@@ -6,6 +6,7 @@ or the folder in RAGNAROK_HOME. A relative path in config.toml is relative to th
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tomllib
@@ -85,6 +86,19 @@ class Config:
     def skip_dir(self, name: str) -> bool:
         """Folders the walker never enters: dot folders (.obsidian, .claude, .git, .trash) and skip_dirs."""
         return name.startswith(".") or name in self.skip_dirs
+
+
+# the values that give the metadata, the sensitivity and the set of indexed notes; a change needs no new vectors
+RULE_KEYS = ("root", "vaults", "skip_dirs", "private_patterns", "project_markers", "archive_folder", "jira_prefixes")
+
+
+def rules_hash(cfg: Config) -> str:
+    """A stable hash of the configuration values that give the metadata of the notes."""
+    values = {key: getattr(cfg, key) for key in RULE_KEYS}
+    values["root"] = str(cfg.root)
+    values["skip_dirs"] = sorted(cfg.skip_dirs)
+    values["vault_rules"] = {vault: asdict(rules) for vault, rules in sorted(cfg.vault_rules.items())}
+    return hashlib.sha1(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
 
 def config_path() -> Path:

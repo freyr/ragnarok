@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import functools
+import hashlib
 import logging
 import threading
 import time
+from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from .config import Config, load_config
+from .config import Config, config_path, load_config
 from .embed import EmbedError, OllamaEmbedder
 from .index import IndexMismatch, connect
 from .search import PrivateNotAllowed
@@ -28,17 +30,43 @@ INSTRUCTIONS = (
 )
 
 
-def build(cfg: Config | None = None, tools: Tools | None = None) -> MCPServer:
-    state: dict[str, Tools] = {}
+def _stamp(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return st.st_mtime_ns, st.st_size
+
+
+def _digest(path: Path) -> str | None:
+    return hashlib.sha1(path.read_bytes()).hexdigest() if path.exists() else None
+
+
+def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Path | None = None) -> MCPServer:
+    """The server. With tools or cfg, the configuration is fixed. Else each call first reads the config file
+    again when it changed, so that a new private pattern or rule applies to that call without a restart."""
+    state: dict = {}
     lock = threading.Lock()  # one call at a time: the scan writes to the index
+    watch = None if tools is not None or cfg is not None else (config_file or config_path())
+
+    def open_tools(c: Config) -> Tools:
+        return Tools(c, connect(c), OllamaEmbedder(c))
 
     def get() -> Tools:
-        if "tools" not in state:
-            if tools is not None:
-                state["tools"] = tools
-            else:
-                c = cfg or load_config()
-                state["tools"] = Tools(c, connect(c), OllamaEmbedder(c))
+        if tools is not None:
+            state["tools"] = tools
+        elif watch is None:
+            if "tools" not in state:
+                state["tools"] = open_tools(cfg)
+        elif (stamp := _stamp(watch)) != state.get("stamp"):
+            digest = _digest(watch)
+            if "tools" not in state or digest != state.get("digest"):
+                if "tools" in state:
+                    state.pop("tools").conn.close()
+                    log.info("config changed: %s", watch)
+                state["tools"] = open_tools(load_config(watch))
+                state["digest"] = digest
+            state["stamp"] = stamp
         return state["tools"]
 
     def timed(fn):
@@ -71,7 +99,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None) -> MCPServer:
         return wrapper
 
     server = MCPServer(
-        name="ragnarok", instructions=INSTRUCTIONS.format(vaults=", ".join((cfg or load_config()).vaults))
+        name="ragnarok", instructions=INSTRUCTIONS.format(vaults=", ".join((cfg or load_config(watch)).vaults))
     )
 
     @server.tool()

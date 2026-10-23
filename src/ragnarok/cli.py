@@ -252,7 +252,7 @@ def cmd_serve(cfg, args) -> int:
         format="%(asctime)s %(name)s %(message)s",
         handlers=[logging.StreamHandler(sys.stderr), logging.FileHandler(logs / "server.log")],
     )
-    build(cfg).run("stdio")
+    build(config_file=_config_file(args)).run("stdio")
     return 0
 
 

@@ -4,6 +4,8 @@ import dataclasses
 import pytest
 from test_search import EXTRA, TopicEmbedder
 
+from ragnarok import server as server_module
+from ragnarok.config import dump_config
 from ragnarok.index import connect, update
 from ragnarok.search import PrivateNotAllowed
 from ragnarok.server import build
@@ -102,3 +104,28 @@ def test_server_errors_carry_their_reason(tools):
     server = build(tools=tools)
     with pytest.raises(ToolError, match="private note"):
         asyncio.run(server.call_tool("open_note", {"path": "Home/Budget/2026.md"}))
+
+
+def test_new_private_pattern_hides_an_indexed_note(tools):
+    assert "Home/Astro/Theory/Field Stop.md" in [r["path"] for r in tools.search("eyepiece")["results"]]
+    tools.cfg = dataclasses.replace(tools.cfg, private_patterns=[*tools.cfg.private_patterns, "Home/Astro/**"])
+    assert "Home/Astro/Theory/Field Stop.md" not in [r["path"] for r in tools.search("eyepiece")["results"]]
+    with pytest.raises(PrivateNotAllowed):
+        tools.open_note("Home/Astro/Theory/Field Stop.md")
+
+
+def test_server_reads_a_changed_config_file(tools, tmp_path, monkeypatch):
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    monkeypatch.setattr(server_module, "OllamaEmbedder", lambda cfg: TopicEmbedder())
+    cfg = tools.cfg
+    config_file = tmp_path / "ragnarok-home" / "config.toml"
+    config_file.parent.mkdir()
+    config_file.write_text(dump_config(cfg, root=cfg.root, index_path=cfg.index_path))
+    server = build(config_file=config_file)
+    note = {"path": "Home/Astro/Theory/Field Stop.md"}
+    asyncio.run(server.call_tool("open_note", note))
+    private = dataclasses.replace(cfg, private_patterns=[*cfg.private_patterns, "Home/Astro/**"])
+    config_file.write_text(dump_config(private, root=cfg.root, index_path=cfg.index_path))
+    with pytest.raises(ToolError, match="private note"):
+        asyncio.run(server.call_tool("open_note", note))
