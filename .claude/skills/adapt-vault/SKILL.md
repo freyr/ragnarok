@@ -16,7 +16,8 @@ below assume the default `data_dir = "data"`.
 - The only command that writes to a vault is `ragnarok backfill apply`. It makes a backup archive first and
   only adds missing keys. Never edit a note by hand for this work.
 - Never run `backfill apply` before the person reviewed the proposal and said yes to that proposal.
-- Agree on the private folders with the person (step 3) before any `backfill propose` or `backfill export`.
+- Agree on the private folders with the person (step 2) before any rule work, backfill or export, and
+  write the private patterns of a vault before you add it to `vaults`.
 - Never open, read or quote a note under a private pattern. Do not use Read or Grep to get around the refusal.
 - The repo is public. Never put names, paths, notes or questions of the person into tracked files.
   `config.toml` and `data/` are gitignored; keep all of their data there.
@@ -46,7 +47,27 @@ sections to the configuration:
 
 Show the person a short summary for each vault and your proposed rules before you write them.
 
-## Step 2: write the path rules and check samples
+## Step 2: agree on the private folders first
+
+Do this before any rule work. `ragnarok init` already indexed every vault in `vaults`, and the MCP server
+returns each indexed note that no private pattern covers.
+
+Ask the person which folders hold private notes (journal, health, finance, HR, clients under NDA).
+Propose candidates from the survey folder names; do not decide alone. Write them as globs on the path
+relative to `root`. The match is case-sensitive, and `*` also matches `/`:
+
+```toml
+private_patterns = ["Home/Journal/**", "Home/Finance/**", "Work/People/*"]
+allow_private = false
+```
+
+Private notes stay in the index, but the server never returns them, the export leaves them out, and the
+backfill writes no description for them. Only the person can set `allow_private = true`; never set it.
+Check one or two paths with `ragnarok inspect` (`"sensitivity": "private"`), then run
+`uv run ragnarok index` and check `private_notes` in `ragnarok status`. The MCP server applies the new
+patterns at its next call, with no restart. See "How config changes reach the index" in step 3.
+
+## Step 3: write the path rules and check samples
 
 Edit `config.toml` (copy keys from `config.example.toml`). Global keys: `vaults`, `project_markers`,
 `archive_folder`, `jira_prefixes`, `private_patterns`, `eval_exclude`. Put every global key above the
@@ -84,7 +105,17 @@ each value came from: `frontmatter`, `frontmatter-map`, `path` or `default`). Sh
 table. Change the rules and inspect again until the person agrees the values are right. Pick sample
 paths from the survey folder names; do not open private notes.
 
-You can leave the index update to the end of step 3; `inspect` reads the files directly.
+`inspect` reads the files directly, so the rules need no index update while you iterate. Run
+`uv run ragnarok index` once when the person agrees the values are right.
+
+### Add a vault to `vaults`
+
+The MCP server reads a changed `config.toml` at its next call. A vault added to `vaults` is then
+indexed and searchable at once, and that one tool call embeds the whole vault. So, in this order:
+
+1. Agree the private patterns of the new vault with the person (step 2) and write them first.
+2. Add the vault to `vaults`.
+3. Run `uv run ragnarok index` at once from the CLI, so that no MCP call has to embed the new vault.
 
 ### How config changes reach the index
 
@@ -106,23 +137,6 @@ ask first) only after a change of `model`, `dimension`, `min_words` or `max_word
 a project marker file (for example `SUMMARY.md`) added to or removed from a folder does not change
 the hash, so the other notes in that folder keep their old project. Touching those notes does not help
 (their content hash is the same). Run `ragnarok index --rebuild`.
-
-## Step 3: agree on the private folders
-
-Ask the person which folders hold private notes (journal, health, finance, HR, clients under NDA).
-Propose candidates from the survey folder names; do not decide alone. Write them as globs on the path
-relative to `root`. The match is case-sensitive, and `*` also matches `/`:
-
-```toml
-private_patterns = ["Home/Journal/**", "Home/Finance/**", "Work/People/*"]
-allow_private = false
-```
-
-Private notes stay in the index, but the server never returns them, the export leaves them out, and the
-backfill writes no description for them. Only the person can set `allow_private = true`; never set it.
-Check one or two paths with `ragnarok inspect` (`"sensitivity": "private"`), then run
-`uv run ragnarok index` and check `private_notes` in `ragnarok status`. The MCP server applies the new
-patterns at its next call, with no restart.
 
 ## Step 4: backfill frontmatter (only if the person agrees)
 
@@ -223,7 +237,7 @@ uv run ragnarok eval mechanical
 ```
 
 It compares grep, keyword, dense and hybrid search. Hybrid should be at least as good as grep. If a
-project scores low, inspect its notes again (step 2).
+project scores low, inspect its notes again (step 3).
 
 ## Step 6: retrieval guidance in ~/.claude/CLAUDE.md
 

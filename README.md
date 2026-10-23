@@ -109,12 +109,12 @@ The default path rules expect `<vault>/<area>/<project>/note.md`. If your vaults
 skill `.claude/skills/adapt-vault/` guides Claude Code through the changes. Open Claude Code in the checkout
 and ask it to adapt ragnarok to your vaults. The skill:
 
-1. runs `ragnarok survey` on each vault and writes the path rules into `config.toml`, checked with
-   `ragnarok inspect`;
-2. agrees the private folders with you;
-3. runs the frontmatter backfill, if you agree, with your review before `apply`;
-4. writes a small evaluation set from your notes and runs `ragnarok eval mechanical`;
-5. adds the guidance above to your `~/.claude/CLAUDE.md`, after it asks you.
+1. runs `ragnarok survey` on each vault;
+2. agrees the private folders with you, before any other change and before a new vault goes into `vaults`;
+3. writes the path rules into `config.toml`, checked with `ragnarok inspect`;
+4. runs the frontmatter backfill, if you agree, with your review before `apply`;
+5. writes a small evaluation set from your notes and runs `ragnarok eval mechanical`;
+6. adds the guidance above to your `~/.claude/CLAUDE.md`, after it asks you.
 
 It changes only `config.toml` and adds frontmatter keys. It never moves, renames or deletes a note or a folder.
 
