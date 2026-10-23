@@ -42,9 +42,13 @@ def _digest(path: Path) -> str | None:
     return hashlib.sha1(path.read_bytes()).hexdigest() if path.exists() else None
 
 
+SETTLE_NS = 10**9  # a config file changed less than one second ago can still be in the middle of a write
+
+
 def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Path | None = None) -> MCPServer:
     """The server. With tools or cfg, the configuration is fixed. Else each call first reads the config file
-    again when it changed, so that a new private pattern or rule applies to that call without a restart."""
+    again when it changed, so that a new private pattern or rule applies to that call without a restart.
+    A missing, recent, invalid or vault-less file does not replace the configuration in use."""
     state: dict = {}
     lock = threading.Lock()  # one call at a time: the scan writes to the index
     watch = None if tools is not None or cfg is not None else (config_file or config_path())
@@ -52,21 +56,41 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
     def open_tools(c: Config) -> Tools:
         return Tools(c, connect(c), OllamaEmbedder(c))
 
+    def reload(stamp: tuple[int, int] | None) -> None:
+        if stamp is None:
+            log.warning("config file %s is missing; the server keeps its configuration", watch)
+            return
+        if time.time_ns() - stamp[0] < SETTLE_NS:
+            log.warning("config file %s changed less than a second ago; the next call reads it", watch)
+            return
+        state["stamp"] = stamp
+        digest = _digest(watch)
+        if digest == state["digest"]:
+            return
+        try:
+            new = load_config(watch)
+            if not new.vaults:
+                raise ValueError("no vaults")
+            new_tools = open_tools(new)
+        except Exception as e:
+            log.warning("config file %s is not usable (%s); the server keeps its configuration", watch, e)
+            return
+        state.pop("tools").conn.close()
+        state["tools"], state["digest"] = new_tools, digest
+        log.info("config changed: %s", watch)
+
     def get() -> Tools:
         if tools is not None:
             state["tools"] = tools
         elif watch is None:
             if "tools" not in state:
                 state["tools"] = open_tools(cfg)
-        elif (stamp := _stamp(watch)) != state.get("stamp"):
-            digest = _digest(watch)
-            if "tools" not in state or digest != state.get("digest"):
-                if "tools" in state:
-                    state.pop("tools").conn.close()
-                    log.info("config changed: %s", watch)
-                state["tools"] = open_tools(load_config(watch))
-                state["digest"] = digest
-            state["stamp"] = stamp
+        elif "tools" not in state:
+            stamp, digest = _stamp(watch), _digest(watch)
+            state["tools"] = open_tools(load_config(watch))
+            state["stamp"], state["digest"] = stamp, digest
+        elif (stamp := _stamp(watch)) != state["stamp"]:
+            reload(stamp)
         return state["tools"]
 
     def timed(fn):
