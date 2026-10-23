@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import functools
+import hashlib
 import logging
 import threading
 import time
+from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from .config import Config, load_config
+from .config import Config, config_path, load_config
 from .embed import EmbedError, OllamaEmbedder
 from .index import IndexMismatch, connect
 from .search import PrivateNotAllowed
@@ -28,17 +30,86 @@ INSTRUCTIONS = (
 )
 
 
-def build(cfg: Config | None = None, tools: Tools | None = None) -> MCPServer:
-    state: dict[str, Tools] = {}
+def _stamp(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return st.st_mtime_ns, st.st_size
+
+
+def _digest(path: Path) -> str | None:
+    return hashlib.sha1(path.read_bytes()).hexdigest() if path.exists() else None
+
+
+SETTLE_NS = 10**9  # a config file changed less than one second ago can still be in the middle of a write
+
+
+def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Path | None = None) -> MCPServer:
+    """The server. With tools or cfg, the configuration is fixed. Else each call first reads the config file
+    again when it changed, so that a new private pattern or rule applies to that call without a restart.
+    A missing, recent, invalid or vault-less file does not replace the configuration in use. A valid file that
+    the index refuses (a new model or dimension) stops the old configuration: each call fails until the rebuild."""
+    state: dict = {}
     lock = threading.Lock()  # one call at a time: the scan writes to the index
+    watch = None if tools is not None or cfg is not None else (config_file or config_path())
+
+    def open_tools(c: Config) -> Tools:
+        return Tools(c, connect(c), OllamaEmbedder(c))
+
+    def keep(reason: str) -> None:
+        """Reject the file: keep the configuration in use, or fail again while the old one is stopped."""
+        log.warning("config file %s %s; the server keeps its configuration", watch, reason)
+        if "stopped" in state:
+            raise IndexMismatch(state["stopped"])
+
+    def reload(stamp: tuple[int, int] | None) -> None:
+        stopped = "stopped" in state
+        if stamp is None:
+            return keep("is missing")
+        if time.time_ns() - stamp[0] < SETTLE_NS:
+            return keep("changed less than a second ago")
+        digest = _digest(watch)
+        if not stopped:
+            state["stamp"] = stamp
+            if digest == state["digest"]:
+                return
+        try:
+            new = load_config(watch)
+            if not new.vaults:
+                raise ValueError("no vaults")
+        except Exception as e:
+            return keep(f"is not usable ({e})")
+        try:
+            new_tools = open_tools(new)
+        except IndexMismatch as e:
+            # a valid config that the index refuses: stop the old config; each call tries again until the rebuild
+            log.warning("config file %s needs a new index; the calls fail until `ragnarok index --rebuild`", watch)
+            if "tools" in state:
+                state.pop("tools").conn.close()
+            state["stopped"] = str(e)
+            raise
+        if "tools" in state:
+            state.pop("tools").conn.close()
+        state.pop("stopped", None)
+        state["tools"], state["stamp"], state["digest"] = new_tools, stamp, digest
+        log.info("config changed: %s", watch)
 
     def get() -> Tools:
-        if "tools" not in state:
-            if tools is not None:
-                state["tools"] = tools
-            else:
-                c = cfg or load_config()
-                state["tools"] = Tools(c, connect(c), OllamaEmbedder(c))
+        if tools is not None:
+            state["tools"] = tools
+        elif watch is None:
+            if "tools" not in state:
+                state["tools"] = open_tools(cfg)
+        elif "tools" not in state and "stopped" not in state:
+            stamp, digest = _stamp(watch), _digest(watch)
+            state["tools"] = open_tools(load_config(watch))
+            state["stamp"], state["digest"] = stamp, digest
+        else:
+            # while stopped, each call tries again: the rebuild changes the index, not the file
+            stamp = _stamp(watch)
+            if "stopped" in state or stamp != state["stamp"]:
+                reload(stamp)
         return state["tools"]
 
     def timed(fn):
@@ -71,7 +142,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None) -> MCPServer:
         return wrapper
 
     server = MCPServer(
-        name="ragnarok", instructions=INSTRUCTIONS.format(vaults=", ".join((cfg or load_config()).vaults))
+        name="ragnarok", instructions=INSTRUCTIONS.format(vaults=", ".join((cfg or load_config(watch)).vaults))
     )
 
     @server.tool()

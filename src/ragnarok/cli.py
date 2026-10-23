@@ -14,7 +14,8 @@ COMMANDS = {
     "inspect": "Print the resolved metadata of one note",
     "chunks": "Print splitter statistics",
     "serve": "Run the MCP server on stdio",
-    "backfill": "Propose or apply frontmatter for existing notes",
+    "backfill": "Propose, describe and apply frontmatter for existing notes",
+    "survey": "Print the facts that the path rules of a vault need",
     "eval": "Run the evaluation sets",
     "init": "Set up this computer: config, Ollama, model, index and the MCP server in Claude Code",
     "doctor": "Check the six parts of the setup and print the fix for each failure",
@@ -55,8 +56,13 @@ def build_parser() -> argparse.ArgumentParser:
     parsers["init"].add_argument("--yes", action="store_true", help="accept each question with its default answer")
     parsers["init"].add_argument("--root", help="the vault root, with no question")
     bp = parsers["backfill"]
-    bp.add_argument("action", choices=["propose", "apply"])
+    bp.add_argument("action", choices=["propose", "export", "merge", "apply"])
     bp.add_argument("vault")
+    bp.add_argument("files", nargs="*", help="merge: the JSON files with the descriptions from Claude")
+    sv = parsers["survey"]
+    sv.add_argument("vault", help="a folder name under the vault root; it need not be in the config yet")
+    sv.add_argument("--top", type=int, default=30, help="the number of rows in each list (default 30)")
+    sv.add_argument("--json", action="store_true", help="print one JSON object")
     return parser
 
 
@@ -246,7 +252,7 @@ def cmd_serve(cfg, args) -> int:
         format="%(asctime)s %(name)s %(message)s",
         handlers=[logging.StreamHandler(sys.stderr), logging.FileHandler(logs / "server.log")],
     )
-    build(cfg).run("stdio")
+    build(config_file=_config_file(args)).run("stdio")
     return 0
 
 
@@ -271,10 +277,63 @@ def cmd_backfill(cfg, args) -> int:
     if not path.exists():
         print(f"No proposal at {path}. Run `ragnarok backfill propose {args.vault}`.", file=sys.stderr)
         return 1
+    if args.action == "export":
+        out, count = backfill.write_export(cfg, args.vault, backfill.read_proposal(cfg, args.vault))
+        print(f"{count} rows written to {out}")
+        return 0
+    if args.action == "merge":
+        return _merge(cfg, args)
     result = backfill.apply(cfg, args.vault, backfill.read_proposal(cfg, args.vault))
     print(f"archive {result.archive}\n{result.written} notes written, {result.keys} keys added")
     for line in result.skipped:
         print(f"skipped {line}", file=sys.stderr)
+    return 0
+
+
+def _merge(cfg, args) -> int:
+    from . import backfill
+
+    descriptions = {}
+    for raw in args.files:
+        try:
+            data = json.loads(Path(raw).expanduser().read_text())
+            if not isinstance(data, dict):
+                raise ValueError("the top level must be an object")
+            for rel, item in data.items():
+                if (
+                    not isinstance(item, dict)
+                    or not isinstance(item.get("description"), str)
+                    or not isinstance(item.get("type", ""), str)
+                ):
+                    raise ValueError(
+                        f"the entry for {rel} must be an object with a text description and an optional text type"
+                    )
+        except (OSError, ValueError) as exc:
+            print(f"Cannot read {raw}: {exc}", file=sys.stderr)
+            return 1
+        descriptions.update(data)
+    proposal = backfill.read_proposal(cfg, args.vault)
+    result = backfill.merge_descriptions(proposal, descriptions)
+    backfill.write_proposal(cfg, args.vault, proposal)
+    print(
+        f"{result.rows} rows, {result.merged} descriptions merged, {len(result.missing)} missing, "
+        f"{len(result.too_long)} too long, {result.redacted} redacted, {result.types} types changed, "
+        f"{len(result.unknown)} unknown paths"
+    )
+    for label, paths in (("missing", result.missing), ("too long", result.too_long), ("unknown", result.unknown)):
+        for rel in paths:
+            print(f"{label}: {rel}", file=sys.stderr)
+    return 0
+
+
+def cmd_survey(cfg, args) -> int:
+    from .survey import format_text, survey
+
+    if not (cfg.root / args.vault).is_dir():
+        print(f"Unknown vault folder {args.vault} under {cfg.root}.", file=sys.stderr)
+        return 1
+    facts = survey(cfg, args.vault, args.top)
+    print(json.dumps(facts, ensure_ascii=False, indent=2) if args.json else format_text(facts))
     return 0
 
 
@@ -315,6 +374,7 @@ HANDLERS = {
     "init": cmd_init,
     "doctor": cmd_doctor,
     "backfill": cmd_backfill,
+    "survey": cmd_survey,
     "eval": cmd_eval,
     "serve": cmd_serve,
     "inspect": cmd_inspect,

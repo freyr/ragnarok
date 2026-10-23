@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 import sqlite_vec
 
-from .config import Config
+from .config import Config, rules_hash
 from .embed import input_hash
 from .metadata import iter_notes, read_note, resolve
 from .splitter import chunk_note
@@ -89,7 +89,9 @@ def connect(cfg: Config) -> sqlite3.Connection:
     expected = {"model": cfg.model, "dimension": str(cfg.dimension), "schema_version": str(SCHEMA_VERSION)}
     stored = dict(conn.execute("SELECT key, value FROM meta").fetchall())
     if not stored:
-        conn.executemany("INSERT INTO meta (key, value) VALUES (?, ?)", expected.items())
+        conn.executemany(
+            "INSERT INTO meta (key, value) VALUES (?, ?)", [*expected.items(), ("rules_hash", rules_hash(cfg))]
+        )
         conn.commit()
     elif any(stored.get(k) != v for k, v in expected.items()):
         conn.close()
@@ -123,6 +125,7 @@ class UpdateResult:
     moved: int = 0  # same content at a new path
     removed: int = 0
     touched: int = 0  # time or size changed, content did not
+    rederived: int = 0  # same content, new metadata or chunks after a change of the rules
     deferred: int = 0  # changed notes left for a later update because of the limit
     chunks: int = 0  # chunks written
     embedded: int = 0  # chunks sent to the model
@@ -142,6 +145,19 @@ class _Pending:
     chunks: list
     links: list[str]
     moved: bool = False
+    rederived: bool = False
+
+
+def _same(cfg: Config, conn: sqlite3.Connection, note_id: int, m, chunks) -> bool:
+    """True when the index already holds this metadata and these chunks for the note."""
+    row = conn.execute(
+        "SELECT title, project, area, type, status, sensitivity, description FROM notes WHERE id = ?", (note_id,)
+    ).fetchone()
+    if row != (m.title, m.project, m.area, m.type, m.status, m.sensitivity, m.description):
+        return False
+    jira = [k for (k,) in conn.execute("SELECT key FROM jira WHERE note_id = ? ORDER BY key", (note_id,))]
+    stored = [h for (h,) in conn.execute("SELECT text_hash FROM chunks WHERE note_id = ? ORDER BY ord", (note_id,))]
+    return jira == m.jira and stored == [input_hash(cfg, c.heading, c.text) for c in chunks]
 
 
 def update(
@@ -155,9 +171,16 @@ def update(
 
     With a limit, rewrite at most `limit` changed notes, newest first, and warn that the index is not current.
     The other changed notes keep their old time in the index, so the next update finds them again.
+
+    When the metadata rules of the configuration changed, derive the metadata of all notes again, with no limit,
+    and rewrite the notes whose metadata or chunks changed. The embedding cache keeps the unchanged chunks.
     """
     start = time.monotonic()
     result = UpdateResult()
+    rules = rules_hash(cfg)
+    rederive = conn.execute("SELECT value FROM meta WHERE key = 'rules_hash'").fetchone() != (rules,)
+    if rederive:
+        limit = None
     known = {
         path: (nid, mtime, size, h)
         for nid, path, mtime, size, h in conn.execute("SELECT id, path, mtime_ns, size, hash FROM notes")
@@ -171,7 +194,7 @@ def update(
     gone = {rel: known[rel] for rel in known.keys() - on_disk.keys()}
     gone_by_hash = {h: rel for rel, (_, _, _, h) in gone.items()}
     todo = sorted(
-        (rel for rel, stat in on_disk.items() if rel not in known or known[rel][1:3] != stat),
+        (rel for rel, stat in on_disk.items() if rel not in known or rederive or known[rel][1:3] != stat),
         key=lambda rel: (-on_disk[rel][0], rel),
     )
     pending: list[_Pending] = []
@@ -181,23 +204,33 @@ def update(
         h = _hash_file(data)
         old = known.get(rel)
         if old and old[3] == h:
-            conn.execute("UPDATE notes SET mtime_ns = ?, size = ? WHERE id = ?", (mtime_ns, size, old[0]))
-            result.touched += 1
-            continue
-        if limit is not None and result.added + result.changed + result.moved + len(pending) >= limit:
-            result.deferred += 1
-            continue
-        note_id = old[0] if old else None
-        moved_from = None if old else gone_by_hash.pop(h, None)
-        if moved_from:
-            # a move: rewrite the old note at the new path, the metadata can change with the path
-            note_id = gone.pop(moved_from)[0]
-        fm, body = read_note(cfg.root / rel)
-        meta = resolve(cfg, rel, fm, body)
-        chunks, redactions = chunk_note(cfg, meta, body)
-        result.redactions += redactions
-        links = sorted({m.group(1).strip() for m in WIKI_LINK.finditer(body)})
-        pending.append(_Pending(rel, note_id, mtime_ns, size, h, meta, chunks, links, moved=bool(moved_from)))
+            if old[1:3] != (mtime_ns, size):
+                conn.execute("UPDATE notes SET mtime_ns = ?, size = ? WHERE id = ?", (mtime_ns, size, old[0]))
+                result.touched += 1
+            if not rederive:
+                continue
+            fm, body = read_note(cfg.root / rel)
+            meta = resolve(cfg, rel, fm, body)
+            chunks, _ = chunk_note(cfg, meta, body)
+            if _same(cfg, conn, old[0], meta, chunks):
+                continue
+            links = sorted({m.group(1).strip() for m in WIKI_LINK.finditer(body)})
+            pending.append(_Pending(rel, old[0], mtime_ns, size, h, meta, chunks, links, rederived=True))
+        else:
+            if limit is not None and result.added + result.changed + result.moved + len(pending) >= limit:
+                result.deferred += 1
+                continue
+            note_id = old[0] if old else None
+            moved_from = None if old else gone_by_hash.pop(h, None)
+            if moved_from:
+                # a move: rewrite the old note at the new path, the metadata can change with the path
+                note_id = gone.pop(moved_from)[0]
+            fm, body = read_note(cfg.root / rel)
+            meta = resolve(cfg, rel, fm, body)
+            chunks, redactions = chunk_note(cfg, meta, body)
+            result.redactions += redactions
+            links = sorted({m.group(1).strip() for m in WIKI_LINK.finditer(body)})
+            pending.append(_Pending(rel, note_id, mtime_ns, size, h, meta, chunks, links, moved=bool(moved_from)))
         if len(pending) >= GROUP:
             _write(cfg, conn, embedder, pending, result)
             conn.commit()
@@ -209,8 +242,10 @@ def update(
     for _, (nid, *_) in gone.items():
         _delete_note(conn, nid)
         result.removed += 1
-    if result.added or result.changed or result.moved or result.removed:
+    if result.added or result.changed or result.moved or result.removed or result.rederived:
         resolve_links(conn)
+    if rederive:
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('rules_hash', ?)", (rules,))
     conn.commit()
     if result.deferred:
         result.warnings.append(NOT_CURRENT)
@@ -243,7 +278,9 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
         m = p.meta
         if p.note_id is not None:
             _delete_note(conn, p.note_id)
-            if p.moved:
+            if p.rederived:
+                result.rederived += 1
+            elif p.moved:
                 result.moved += 1
             else:
                 result.changed += 1
@@ -317,6 +354,7 @@ def status(cfg: Config, conn: sqlite3.Connection) -> dict:
         "size_mb": round(cfg.index_path.stat().st_size / 1e6, 1) if cfg.index_path.exists() else 0,
         "model": one("SELECT value FROM meta WHERE key = 'model'"),
         "dimension": int(one("SELECT value FROM meta WHERE key = 'dimension'")),
+        "rules_hash": (conn.execute("SELECT value FROM meta WHERE key = 'rules_hash'").fetchone() or [None])[0],
         "notes": one("SELECT count(*) FROM notes"),
         "private_notes": one("SELECT count(*) FROM notes WHERE sensitivity = 'private'"),
         "archived_notes": one("SELECT count(*) FROM notes WHERE status = 'archived'"),

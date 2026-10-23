@@ -1,10 +1,12 @@
+import dataclasses
 import hashlib
 import os
 
 import pytest
 import sqlite_vec
 
-from ragnarok.config import Config
+from ragnarok import index
+from ragnarok.config import Config, VaultRules
 from ragnarok.index import IndexMismatch, connect, status, update
 
 
@@ -44,7 +46,7 @@ def test_full_index_then_no_new_embeddings(cfg):
     conn, emb, first = build(cfg)
     assert first.added == first.notes > 0 and emb.calls == first.embedded > 0
     second = update(cfg, conn, emb)
-    assert (second.added, second.changed, second.removed, second.embedded) == (0, 0, 0, 0)
+    assert (second.added, second.changed, second.removed, second.embedded, second.rederived) == (0, 0, 0, 0, 0)
     st = status(cfg, conn)
     assert st["notes"] == first.notes and st["chunks"] == st["vectors"] == first.chunks
 
@@ -134,3 +136,85 @@ def test_model_mismatch_needs_rebuild(cfg):
     other = Config(root=cfg.root, index_path=cfg.index_path, dimension=8, model="other-model")
     with pytest.raises(IndexMismatch):
         connect(other)
+
+
+FIELD_STOP = "Home/Astro/Theory/Field Stop.md"
+
+
+def note_row(conn, path):
+    return conn.execute("SELECT project, area, sensitivity FROM notes WHERE path = ?", (path,)).fetchone()
+
+
+def test_new_private_pattern_makes_an_indexed_note_private_without_embedding(cfg):
+    conn, emb, _ = build(cfg)
+    assert note_row(conn, FIELD_STOP)[2] == "normal"
+    calls = emb.calls
+    cfg.private_patterns = [*cfg.private_patterns, "Home/Astro/**"]
+    result = update(cfg, conn, emb)
+    assert (result.rederived, result.changed, result.embedded) == (1, 0, 0)
+    assert emb.calls == calls
+    assert note_row(conn, FIELD_STOP)[2] == "private"
+    vec = conn.execute(
+        "SELECT DISTINCT v.sensitivity FROM chunks_vec v JOIN chunks c ON c.id = v.chunk_id"
+        " JOIN notes n ON n.id = c.note_id WHERE n.path = ?",
+        (FIELD_STOP,),
+    ).fetchall()
+    assert vec == [("private",)]
+
+
+def test_changed_vault_rule_gives_new_project_and_area_without_embedding(cfg):
+    conn, emb, _ = build(cfg)
+    # no rules for Home: area = level 1 folder in lower case, project = level 2 folder
+    assert note_row(conn, FIELD_STOP)[:2] == ("Theory", "astro")
+    calls = emb.calls
+    cfg.vault_rules = {**cfg.vault_rules, "Home": VaultRules(area="house", project_depth=1)}
+    result = update(cfg, conn, emb)
+    assert note_row(conn, FIELD_STOP)[:2] == ("Astro", "house")
+    assert result.embedded == 0 and emb.calls == calls
+    assert result.changed == 0 and result.rederived > 0
+
+
+def test_changed_area_embeds_only_the_description_chunk(cfg):
+    conn, emb, _ = build(cfg)
+    chunks = count(conn, "SELECT count(*) FROM chunks")
+    cfg.vault_rules = {**cfg.vault_rules, "Work": dataclasses.replace(cfg.vault_rules["Work"], area="ops")}
+    result = update(cfg, conn, emb)
+    # only Work/Devops/db-resize/SUMMARY.md has a description; its chunk text holds the area
+    assert result.embedded == 1
+    assert note_row(conn, "Work/Devops/db-resize/SUMMARY.md") == ("db-resize", "ops", "normal")
+    assert count(conn, "SELECT count(*) FROM chunks") == chunks
+    assert count(conn, "SELECT count(*) FROM chunks_vec") == chunks
+
+
+def test_new_skipped_folder_removes_its_notes(cfg):
+    conn, emb, _ = build(cfg)
+    cfg.skip_dirs = {*cfg.skip_dirs, "Theory"}
+    result = update(cfg, conn, emb)
+    assert result.removed == 1
+    assert count(conn, "SELECT count(*) FROM notes WHERE path LIKE 'Home/Astro/Theory/%'") == 0
+    assert count(conn, "SELECT count(*) FROM chunks_vec") == count(conn, "SELECT count(*) FROM chunks")
+
+
+def test_rules_are_derived_again_only_when_they_change(cfg, monkeypatch):
+    conn, emb, first = build(cfg)
+    calls = []
+    real = index.resolve
+    monkeypatch.setattr(index, "resolve", lambda *a, **k: calls.append(a[1]) or real(*a, **k))
+    ids = conn.execute("SELECT id, path FROM notes ORDER BY id").fetchall()
+    update(cfg, conn, emb)
+    assert calls == []
+    cfg.archive_folder = "_old"
+    update(cfg, conn, emb)
+    assert len(calls) == first.notes
+    calls.clear()
+    update(cfg, conn, emb)
+    assert calls == []
+    assert conn.execute("SELECT id, path FROM notes ORDER BY id").fetchall() != ids  # archived notes changed
+
+
+def test_rule_change_ignores_the_scan_limit(cfg):
+    conn, emb, _ = build(cfg)
+    cfg.private_patterns = [*cfg.private_patterns, "Home/**"]
+    result = update(cfg, conn, emb, limit=1)
+    assert result.warnings == []
+    assert count(conn, "SELECT count(*) FROM notes WHERE path LIKE 'Home/%' AND sensitivity = 'normal'") == 0

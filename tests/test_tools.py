@@ -1,9 +1,13 @@
 import asyncio
 import dataclasses
+import os
+import time
 
 import pytest
 from test_search import EXTRA, TopicEmbedder
 
+from ragnarok import server as server_module
+from ragnarok.config import dump_config
 from ragnarok.index import connect, update
 from ragnarok.search import PrivateNotAllowed
 from ragnarok.server import build
@@ -102,3 +106,122 @@ def test_server_errors_carry_their_reason(tools):
     server = build(tools=tools)
     with pytest.raises(ToolError, match="private note"):
         asyncio.run(server.call_tool("open_note", {"path": "Home/Budget/2026.md"}))
+
+
+def test_new_private_pattern_hides_an_indexed_note(tools):
+    assert "Home/Astro/Theory/Field Stop.md" in [r["path"] for r in tools.search("eyepiece")["results"]]
+    tools.cfg = dataclasses.replace(tools.cfg, private_patterns=[*tools.cfg.private_patterns, "Home/Astro/**"])
+    assert "Home/Astro/Theory/Field Stop.md" not in [r["path"] for r in tools.search("eyepiece")["results"]]
+    with pytest.raises(PrivateNotAllowed):
+        tools.open_note("Home/Astro/Theory/Field Stop.md")
+
+
+FIELD_STOP = {"path": "Home/Astro/Theory/Field Stop.md"}
+
+
+def write_config(path, text, age=5):
+    """Write the config file with a modification time `age` seconds in the past (a settled file)."""
+    path.write_text(text)
+    t = time.time_ns() - age * 10**9
+    os.utime(path, ns=(t, t))
+
+
+@pytest.fixture
+def served(tools, tmp_path, monkeypatch):
+    monkeypatch.setattr(server_module, "OllamaEmbedder", lambda cfg: TopicEmbedder())
+    cfg = tools.cfg
+    config_file = tmp_path / "ragnarok-home" / "config.toml"
+    config_file.parent.mkdir()
+    write_config(config_file, dump_config(cfg, root=cfg.root, index_path=cfg.index_path))
+    server = build(config_file=config_file)
+    asyncio.run(server.call_tool("open_note", FIELD_STOP))
+    return server, config_file, cfg
+
+
+def private_text(cfg):
+    private = dataclasses.replace(cfg, private_patterns=[*cfg.private_patterns, "Home/Astro/**"])
+    return dump_config(private, root=cfg.root, index_path=cfg.index_path)
+
+
+def test_server_reads_a_changed_config_file(served):
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    server, config_file, cfg = served
+    write_config(config_file, private_text(cfg))
+    with pytest.raises(ToolError, match="private note"):
+        asyncio.run(server.call_tool("open_note", FIELD_STOP))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "vaults = [",
+        'index_path = "index.db"\ndimension = 8\n',
+    ],
+    ids=["empty", "invalid-toml", "no-vaults"],
+)
+def test_server_keeps_its_config_when_the_new_file_is_not_usable(served, text):
+    server, config_file, cfg = served
+    count = lambda: connect(cfg).execute("SELECT count(*), sum(sensitivity = 'private') FROM notes").fetchone()  # noqa: E731
+    before = count()
+    write_config(config_file, text)
+    asyncio.run(server.call_tool("open_note", FIELD_STOP))
+    assert count() == before
+
+
+def test_server_waits_until_a_new_config_file_is_settled(served):
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    server, config_file, cfg = served
+    write_config(config_file, private_text(cfg), age=0)
+    asyncio.run(server.call_tool("open_note", FIELD_STOP))  # the file can still be in the middle of a write
+    t = time.time_ns() - 5 * 10**9
+    os.utime(config_file, ns=(t, t))
+    with pytest.raises(ToolError, match="private note"):
+        asyncio.run(server.call_tool("open_note", FIELD_STOP))
+
+
+def test_server_starts_with_no_config_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("RAGNAROK_HOME", str(tmp_path))
+    monkeypatch.setattr(server_module, "OllamaEmbedder", lambda cfg: TopicEmbedder())
+    server = build(config_file=tmp_path / "missing.toml")
+    asyncio.run(server.call_tool("find_by_jira", {"key": "ABC-1"}))
+    assert (tmp_path / "data" / "index.db").exists()
+
+
+def test_server_fails_closed_when_the_index_refuses_a_new_config(served):
+    from mcp.server.mcpserver.exceptions import ToolError
+    from test_index import FakeEmbedder
+
+    server, config_file, cfg = served
+    new = dataclasses.replace(cfg, dimension=16, private_patterns=[*cfg.private_patterns, "Home/Astro/**"])
+    write_config(config_file, dump_config(new, root=cfg.root, index_path=cfg.index_path))
+    for _ in range(2):
+        with pytest.raises(ToolError, match="ragnarok index --rebuild"):
+            asyncio.run(server.call_tool("open_note", FIELD_STOP))
+    for suffix in ("", "-wal", "-shm"):
+        cfg.index_path.with_name(cfg.index_path.name + suffix).unlink(missing_ok=True)
+    update(new, connect(new), FakeEmbedder(dimension=16))
+    with pytest.raises(ToolError, match="private note"):
+        asyncio.run(server.call_tool("open_note", FIELD_STOP))
+
+
+def test_server_stays_stopped_while_the_config_file_is_not_usable(served):
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    server, config_file, cfg = served
+    notes = lambda: connect(cfg).execute("SELECT count(*) FROM notes").fetchone()[0]  # noqa: E731
+    before = notes()
+    new = dataclasses.replace(cfg, dimension=16)
+    write_config(config_file, dump_config(new, root=cfg.root, index_path=cfg.index_path))
+    with pytest.raises(ToolError, match="ragnarok index --rebuild"):
+        asyncio.run(server.call_tool("open_note", FIELD_STOP))
+    # a partial save with no vaults yet, first in the middle of the write, then settled
+    for age in (0, 5):
+        write_config(config_file, f'index_path = "{cfg.index_path}"\ndimension = {cfg.dimension}\n', age=age)
+        with pytest.raises(ToolError, match="ragnarok index --rebuild"):
+            asyncio.run(server.call_tool("open_note", FIELD_STOP))
+        assert notes() == before
+    write_config(config_file, dump_config(cfg, root=cfg.root, index_path=cfg.index_path))
+    asyncio.run(server.call_tool("open_note", FIELD_STOP))
