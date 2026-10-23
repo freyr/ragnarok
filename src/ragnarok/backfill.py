@@ -144,13 +144,14 @@ def export_rows(cfg: Config, proposal: dict) -> list[dict]:
         fm, body = parse_note((cfg.root / row["path"]).read_text(errors="replace"))
         h1 = H1_RE.search(body)
         title = fm.get("title") or (h1.group(1).strip() if h1 else Path(row["path"]).stem)
-        excerpt = "\n".join(body.splitlines()[:EXCERPT_LINES])[:EXCERPT_CHARS].strip()
+        # redact the whole body first: a cut can split a multi-line credential so that no pattern matches
+        excerpt = "\n".join(redact(body)[0].splitlines()[:EXCERPT_LINES])[:EXCERPT_CHARS].strip()
         items.append(
             {
                 "path": row["path"],
                 "title": str(title),
                 "type": row["set"].get("type", ""),
-                "excerpt": redact(excerpt)[0],
+                "excerpt": excerpt,
             }
         )
     return items
@@ -192,11 +193,11 @@ def merge_descriptions(proposal: dict, descriptions: dict) -> MergeResult:
             if needs:
                 result.missing.append(row["path"])
             continue
-        text, count = redact(" ".join(str(item["description"]).split()))
-        result.redacted += bool(count)
-        if len(text.split()) > MAX_WORDS:
-            result.too_long.append(row["path"])
         if needs:
+            text, count = redact(" ".join(item["description"].split()))
+            result.redacted += bool(count)
+            if len(text.split()) > MAX_WORDS:
+                result.too_long.append(row["path"])
             row["set"]["description"] = text
             result.merged += 1
         new_type = item.get("type")

@@ -296,10 +296,22 @@ def _merge(cfg, args) -> int:
     descriptions = {}
     for raw in args.files:
         try:
-            descriptions.update(json.loads(Path(raw).expanduser().read_text()))
+            data = json.loads(Path(raw).expanduser().read_text())
+            if not isinstance(data, dict):
+                raise ValueError("the top level must be an object")
+            for rel, item in data.items():
+                if (
+                    not isinstance(item, dict)
+                    or not isinstance(item.get("description"), str)
+                    or not isinstance(item.get("type", ""), str)
+                ):
+                    raise ValueError(
+                        f"the entry for {rel} must be an object with a text description and an optional text type"
+                    )
         except (OSError, ValueError) as exc:
             print(f"Cannot read {raw}: {exc}", file=sys.stderr)
             return 1
+        descriptions.update(data)
     proposal = backfill.read_proposal(cfg, args.vault)
     result = backfill.merge_descriptions(proposal, descriptions)
     backfill.write_proposal(cfg, args.vault, proposal)

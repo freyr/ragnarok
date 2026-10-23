@@ -223,3 +223,42 @@ def test_cli_merge_writes_the_proposal_and_fails_on_bad_json(vault, monkeypatch,
     bad = tmp_path / "bad.json"
     bad.write_text("{not json")
     assert main(["backfill", "merge", "Home", str(bad)]) == 1
+
+
+def test_export_redacts_a_key_block_that_crosses_the_cut(vault):
+    key = "-----BEGIN RSA PRIVATE KEY-----\n" + "MIIEowIBAAKCAQEAxyz\n" * 30 + "-----END RSA PRIVATE KEY-----\n"
+    (vault.root / "Home/Heating/keys.md").write_text("# Keys\n" + "line\n" * 30 + key)
+    items = backfill.export_rows(vault, backfill.propose(vault, "Home"))
+    excerpt = next(i for i in items if i["path"] == "Home/Heating/keys.md")["excerpt"]
+    assert "MIIEowIBAAKCAQEAxyz" not in excerpt
+    assert "BEGIN RSA PRIVATE KEY" not in excerpt
+
+
+def test_merge_checks_only_the_rows_that_it_writes(vault):
+    proposal, rows = merge_fixture(vault)
+    rows["Home/Bike/shortlist.md"]["set"].pop("description")
+    text = "password: hunter2hunter " + " ".join(["w"] * 30)
+    result = backfill.merge_descriptions(proposal, {"Home/Bike/shortlist.md": {"description": text}})
+    assert result.too_long == []
+    assert result.redacted == 0
+    assert result.merged == 0
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        {"Home/Heating/SUMMARY.md": "text"},
+        {"Home/Heating/SUMMARY.md": {"description": 5}},
+        {"Home/Heating/SUMMARY.md": {"description": "ok", "type": ["guide"]}},
+        ["x"],
+    ],
+)
+def test_cli_merge_rejects_a_bad_entry_and_keeps_the_proposal(vault, monkeypatch, tmp_path, capsys, content):
+    backfill.write_proposal(vault, "Home", backfill.propose(vault, "Home"))
+    before = backfill.proposal_path(vault, "Home").read_text()
+    monkeypatch.setattr("ragnarok.cli.load_config", lambda *a, **k: vault)
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps(content))
+    assert main(["backfill", "merge", "Home", str(bad)]) == 1
+    assert "bad.json" in capsys.readouterr().err
+    assert backfill.proposal_path(vault, "Home").read_text() == before
