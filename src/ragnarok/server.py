@@ -57,34 +57,42 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
     def open_tools(c: Config) -> Tools:
         return Tools(c, connect(c), OllamaEmbedder(c))
 
+    def keep(reason: str) -> None:
+        """Reject the file: keep the configuration in use, or fail again while the old one is stopped."""
+        log.warning("config file %s %s; the server keeps its configuration", watch, reason)
+        if "stopped" in state:
+            raise IndexMismatch(state["stopped"])
+
     def reload(stamp: tuple[int, int] | None) -> None:
+        stopped = "stopped" in state
         if stamp is None:
-            log.warning("config file %s is missing; the server keeps its configuration", watch)
-            return
+            return keep("is missing")
         if time.time_ns() - stamp[0] < SETTLE_NS:
-            log.warning("config file %s changed less than a second ago; the next call reads it", watch)
-            return
-        state["stamp"] = stamp
+            return keep("changed less than a second ago")
         digest = _digest(watch)
-        if digest == state["digest"]:
-            return
+        if not stopped:
+            state["stamp"] = stamp
+            if digest == state["digest"]:
+                return
         try:
             new = load_config(watch)
             if not new.vaults:
                 raise ValueError("no vaults")
         except Exception as e:
-            log.warning("config file %s is not usable (%s); the server keeps its configuration", watch, e)
-            return
+            return keep(f"is not usable ({e})")
         try:
             new_tools = open_tools(new)
-        except IndexMismatch:
+        except IndexMismatch as e:
             # a valid config that the index refuses: stop the old config; each call tries again until the rebuild
             log.warning("config file %s needs a new index; the calls fail until `ragnarok index --rebuild`", watch)
-            state.pop("tools").conn.close()
-            state.pop("stamp")
+            if "tools" in state:
+                state.pop("tools").conn.close()
+            state["stopped"] = str(e)
             raise
-        state.pop("tools").conn.close()
-        state["tools"], state["digest"] = new_tools, digest
+        if "tools" in state:
+            state.pop("tools").conn.close()
+        state.pop("stopped", None)
+        state["tools"], state["stamp"], state["digest"] = new_tools, stamp, digest
         log.info("config changed: %s", watch)
 
     def get() -> Tools:
@@ -93,12 +101,15 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
         elif watch is None:
             if "tools" not in state:
                 state["tools"] = open_tools(cfg)
-        elif "tools" not in state:
+        elif "tools" not in state and "stopped" not in state:
             stamp, digest = _stamp(watch), _digest(watch)
             state["tools"] = open_tools(load_config(watch))
             state["stamp"], state["digest"] = stamp, digest
-        elif (stamp := _stamp(watch)) != state["stamp"]:
-            reload(stamp)
+        else:
+            # while stopped, each call tries again: the rebuild changes the index, not the file
+            stamp = _stamp(watch)
+            if "stopped" in state or stamp != state["stamp"]:
+                reload(stamp)
         return state["tools"]
 
     def timed(fn):

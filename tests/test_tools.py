@@ -205,3 +205,23 @@ def test_server_fails_closed_when_the_index_refuses_a_new_config(served):
     update(new, connect(new), FakeEmbedder(dimension=16))
     with pytest.raises(ToolError, match="private note"):
         asyncio.run(server.call_tool("open_note", FIELD_STOP))
+
+
+def test_server_stays_stopped_while_the_config_file_is_not_usable(served):
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    server, config_file, cfg = served
+    notes = lambda: connect(cfg).execute("SELECT count(*) FROM notes").fetchone()[0]  # noqa: E731
+    before = notes()
+    new = dataclasses.replace(cfg, dimension=16)
+    write_config(config_file, dump_config(new, root=cfg.root, index_path=cfg.index_path))
+    with pytest.raises(ToolError, match="ragnarok index --rebuild"):
+        asyncio.run(server.call_tool("open_note", FIELD_STOP))
+    # a partial save with no vaults yet, first in the middle of the write, then settled
+    for age in (0, 5):
+        write_config(config_file, f'index_path = "{cfg.index_path}"\ndimension = {cfg.dimension}\n', age=age)
+        with pytest.raises(ToolError, match="ragnarok index --rebuild"):
+            asyncio.run(server.call_tool("open_note", FIELD_STOP))
+        assert notes() == before
+    write_config(config_file, dump_config(cfg, root=cfg.root, index_path=cfg.index_path))
+    asyncio.run(server.call_tool("open_note", FIELD_STOP))
