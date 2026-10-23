@@ -1,0 +1,41 @@
+# ragnarok configuration. `ragnarok init` copies this file to config.toml and sets root and vaults.
+# A relative path is relative to the folder of this file.
+
+# The folder that holds the vault folders, and the vault folders to index.
+root = "~/Documents/Vaults"
+vaults = ["Notes"]
+
+# Notes under these patterns are private: the server never returns them unless allow_private is true.
+# Example: private_patterns = ["Notes/Journal/**", "Notes/Finance/**"]
+private_patterns = []
+allow_private = false
+
+# The index, the backfill backups, the backfill proposals and the evaluation data.
+data_dir = "data"
+
+ollama_url = "http://127.0.0.1:11434"
+model = "embeddinggemma-2:270m"
+dimension = 768
+
+# The splitter joins sections with fewer words than min_words and cuts sections with more than max_words.
+min_words = 80
+max_words = 300
+
+# A folder that holds one of these files is a project folder.
+project_markers = ["DRIVERS.md", "SUMMARY.md"]
+# Notes in a folder with this name get status archived.
+archive_folder = "_archive"
+# Ticket prefixes: the ABC of ABC-123. find_by_jira finds only keys with these prefixes.
+jira_prefixes = []
+
+# Path rules of one vault, for notes without a project or area in their frontmatter.
+# Without a table, a vault uses these defaults:
+#
+# [vault_rules.Notes]
+# area = "folder"            # the first folder, in lower case; any other value is the area of all notes
+# area_default = ""          # the area at the top of the vault; empty: the vault name in lower case
+# project_depth = 2          # the folder level that names the project when no folder has a project marker
+# project_fallback = true    # with fewer folders, the first folder names the project; false: "none"
+# project_parents = []       # folder paths whose child folders are projects, for example "Clients/Projects"
+# ignore_folders = []        # first-level folders that give no area and no project, for example "docs"
+# jira_prefixes = []         # ticket prefixes found only in this vault

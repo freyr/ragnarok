@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+dist/
+*.egg-info/
+.claude/settings.local.json
+.claude/worktrees/
+config.toml
+data/
+logs/
