@@ -2,7 +2,7 @@ import pytest
 
 from ragnarok.cli import COMMANDS, build_parser
 
-REQUIRED = {"search": ["a query"], "eval": ["mechanical"], "backfill": ["propose", "Studio"]}
+REQUIRED = {"search": ["a query"], "eval": ["mechanical"], "backfill": ["propose", "Studio"], "survey": ["Studio"]}
 
 
 def test_parser_knows_all_commands():

@@ -132,6 +132,7 @@ Without frontmatter, the path rules give the metadata. The default rules work fo
 | `ragnarok chunks <path>... \| --stats` | Shows the chunks of notes, or the totals. |
 | `ragnarok serve` | Runs the MCP server on stdio. Claude Code starts it. |
 | `ragnarok backfill propose\|apply <vault>` | Proposes and applies missing frontmatter keys. |
+| `ragnarok survey <vault> [--json]` | Prints the folders, frontmatter keys, marker files, name patterns and ticket prefixes of a vault folder. Run it before you write `[vault_rules.<vault>]`. It prints no note text. |
 | `ragnarok eval mechanical\|pool\|agent` | Runs an evaluation on the question sets in `data/eval/sets/`. |
 
 Run each command with `uv run` in the checkout, for example `uv run ragnarok search "boiler"`.

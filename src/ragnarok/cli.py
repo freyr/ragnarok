@@ -15,6 +15,7 @@ COMMANDS = {
     "chunks": "Print splitter statistics",
     "serve": "Run the MCP server on stdio",
     "backfill": "Propose or apply frontmatter for existing notes",
+    "survey": "Print the facts that the path rules of a vault need",
     "eval": "Run the evaluation sets",
     "init": "Set up this computer: config, Ollama, model, index and the MCP server in Claude Code",
     "doctor": "Check the six parts of the setup and print the fix for each failure",
@@ -57,6 +58,10 @@ def build_parser() -> argparse.ArgumentParser:
     bp = parsers["backfill"]
     bp.add_argument("action", choices=["propose", "apply"])
     bp.add_argument("vault")
+    sv = parsers["survey"]
+    sv.add_argument("vault", help="a folder name under the vault root; it need not be in the config yet")
+    sv.add_argument("--top", type=int, default=30, help="the number of rows in each list (default 30)")
+    sv.add_argument("--json", action="store_true", help="print one JSON object")
     return parser
 
 
@@ -278,6 +283,17 @@ def cmd_backfill(cfg, args) -> int:
     return 0
 
 
+def cmd_survey(cfg, args) -> int:
+    from .survey import format_text, survey
+
+    if not (cfg.root / args.vault).is_dir():
+        print(f"Unknown vault folder {args.vault} under {cfg.root}.", file=sys.stderr)
+        return 1
+    facts = survey(cfg, args.vault, args.top)
+    print(json.dumps(facts, ensure_ascii=False, indent=2) if args.json else format_text(facts))
+    return 0
+
+
 def _config_file(args) -> Path:
     from .config import config_path
 
@@ -315,6 +331,7 @@ HANDLERS = {
     "init": cmd_init,
     "doctor": cmd_doctor,
     "backfill": cmd_backfill,
+    "survey": cmd_survey,
     "eval": cmd_eval,
     "serve": cmd_serve,
     "inspect": cmd_inspect,
