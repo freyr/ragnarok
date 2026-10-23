@@ -24,8 +24,12 @@ model, and the index is one SQLite file.
 - **Credential redaction.** The indexer and `open_note` replace literal passwords, tokens and keys with
   `[REDACTED]`. The vault files do not change.
 - **Frontmatter backfill.** `ragnarok backfill propose` writes a proposal of the missing frontmatter keys for
-  a vault. You examine it, then `ragnarok backfill apply` makes a backup archive of the vault and adds only the
-  missing keys.
+  a vault. `ragnarok backfill export` writes a JSON file with the title and the first lines of each public note
+  that needs a description (credentials removed). Claude writes the descriptions into one or more JSON files,
+  `{path: {"description": "...", "type": "..."}}`. `ragnarok backfill merge <vault> <file>...` puts them into the
+  proposal, removes credentials, reports each description of more than 25 words and each row with no
+  description, and replaces a default type with a valid type from Claude. You examine the proposal, then
+  `ragnarok backfill apply` makes a backup archive of the vault and adds only the missing keys.
 - **Evaluation.** `ragnarok eval` compares grep, keyword, dense and hybrid search on your own question sets.
   `ragnarok eval agent` compares a Claude Code agent with grep and an agent with the MCP tools.
 - **One-command setup.** `./setup.sh` installs the tools, the model and the index, and registers the MCP server
@@ -131,7 +135,7 @@ Without frontmatter, the path rules give the metadata. The default rules work fo
 | `ragnarok inspect <path>...` | Shows the metadata of notes. |
 | `ragnarok chunks <path>... \| --stats` | Shows the chunks of notes, or the totals. |
 | `ragnarok serve` | Runs the MCP server on stdio. Claude Code starts it. |
-| `ragnarok backfill propose\|apply <vault>` | Proposes and applies missing frontmatter keys. |
+| `ragnarok backfill propose\|export\|merge\|apply <vault> [file...]` | Proposes, describes and applies missing frontmatter keys. The order is `propose`, `export`, Claude writes descriptions, `merge <vault> <file>...`, you examine the proposal, `apply`. |
 | `ragnarok survey <vault> [--json]` | Prints the folders, frontmatter keys, marker files, name patterns and ticket prefixes of a vault folder. Run it before you write `[vault_rules.<vault>]`. It prints no note text. |
 | `ragnarok eval mechanical\|pool\|agent` | Runs an evaluation on the question sets in `data/eval/sets/`. |
 
@@ -146,7 +150,7 @@ Everything is in the checkout. Git ignores `config.toml`, `data/` and `logs/`.
 | `config.toml` | The configuration of this computer. |
 | `data/index.db` | The SQLite index. Copy it to a second computer to skip the first index. |
 | `data/backups/` | The vault archives that `backfill apply` makes before it writes. |
-| `data/proposals/` | The output of `backfill propose`. |
+| `data/proposals/` | The output of `backfill propose` and `backfill export`. |
 | `data/eval/` | Your question sets (`sets/`), the evaluation results and the mirror of the agent evaluation. |
 | `logs/server.log` | The MCP server log, one line for each tool call with its time. |
 

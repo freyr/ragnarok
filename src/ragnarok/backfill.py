@@ -7,6 +7,7 @@ missing keys as new lines before the closing `---`, so the existing frontmatter 
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import tarfile
 import time
@@ -16,12 +17,22 @@ from pathlib import Path
 import yaml
 
 from .config import Config
-from .metadata import iter_notes, parse_note, resolve
+from .metadata import TYPES, iter_notes, parse_note, resolve
+from .redact import redact
 
 KEYS = ("project", "area", "type", "status", "description")
 # instruction files for agents, not notes: their frontmatter has other meanings
 SKIP_NAMES = {"CLAUDE.md", "AGENTS.md"}
 WORD_RE = re.compile(r"[a-z0-9]+")
+EXCERPT_LINES = 40
+EXCERPT_CHARS = 2000
+MAX_WORDS = 25
+H1_RE = re.compile(r"^#\s+(.+)$", re.M)
+INSTRUCTIONS = (
+    "Write one description for each row. Answer with one JSON object: "
+    '{path: {"description": str, "type": str (optional)}}. '
+    f"Write in English, {MAX_WORDS} words or fewer. A type is one of: {', '.join(sorted(TYPES))}."
+)
 STOP = {"md", "the", "and", "of", "a", "to", "for", "in", "on", "plan", "feat", "fix", "docs", "notes"}
 
 
@@ -118,6 +129,86 @@ def write_proposal(cfg: Config, vault: str, proposal: dict) -> Path:
 
 def read_proposal(cfg: Config, vault: str) -> dict:
     return yaml.safe_load(proposal_path(cfg, vault).read_text())
+
+
+def describe_path(cfg: Config, vault: str) -> Path:
+    return cfg.data_dir / "proposals" / f"describe-{vault}.json"
+
+
+def export_rows(cfg: Config, proposal: dict) -> list[dict]:
+    """One item for each public row that needs a description: path, title, type and the redacted first lines."""
+    items = []
+    for row in proposal["rows"]:
+        if "description" not in row["set"] or row["private"]:
+            continue
+        fm, body = parse_note((cfg.root / row["path"]).read_text(errors="replace"))
+        h1 = H1_RE.search(body)
+        title = fm.get("title") or (h1.group(1).strip() if h1 else Path(row["path"]).stem)
+        excerpt = "\n".join(body.splitlines()[:EXCERPT_LINES])[:EXCERPT_CHARS].strip()
+        items.append(
+            {
+                "path": row["path"],
+                "title": str(title),
+                "type": row["set"].get("type", ""),
+                "excerpt": redact(excerpt)[0],
+            }
+        )
+    return items
+
+
+def write_export(cfg: Config, vault: str, proposal: dict) -> tuple[Path, int]:
+    items = export_rows(cfg, proposal)
+    path = describe_path(cfg, vault)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {"instructions": INSTRUCTIONS, "types": sorted(TYPES), "rows": items}
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    return path, len(items)
+
+
+@dataclass
+class MergeResult:
+    rows: int = 0
+    merged: int = 0
+    types: int = 0
+    redacted: int = 0
+    missing: list[str] = field(default_factory=list)
+    too_long: list[str] = field(default_factory=list)
+    unknown: list[str] = field(default_factory=list)
+
+
+def merge_descriptions(proposal: dict, descriptions: dict) -> MergeResult:
+    """Put the descriptions and the types from Claude into the proposal rows. approve and hash do not change."""
+    result = MergeResult(rows=len(proposal["rows"]))
+    paths = {row["path"] for row in proposal["rows"]}
+    result.unknown = sorted(set(descriptions) - paths)
+    for row in proposal["rows"]:
+        needs = "description" in row["set"]
+        if row["private"]:
+            if needs:
+                row["set"]["description"] = ""
+            continue
+        item = descriptions.get(row["path"])
+        if not item or not item.get("description"):
+            if needs:
+                result.missing.append(row["path"])
+            continue
+        text, count = redact(" ".join(str(item["description"]).split()))
+        result.redacted += bool(count)
+        if len(text.split()) > MAX_WORDS:
+            result.too_long.append(row["path"])
+        if needs:
+            row["set"]["description"] = text
+            result.merged += 1
+        new_type = item.get("type")
+        if (
+            new_type in TYPES
+            and new_type != row["set"].get("type")
+            and "type" in row["set"]
+            and row["source"].get("type") == "default"
+        ):
+            row["set"]["type"], row["source"]["type"] = new_type, "claude"
+            result.types += 1
+    return result
 
 
 def archive(cfg: Config, vault: str) -> Path:
