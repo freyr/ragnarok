@@ -21,6 +21,7 @@ below assume the default `data_dir = "data"`.
 - The repo is public. Never put names, paths, notes or questions of the person into tracked files.
   `config.toml` and `data/` are gitignored; keep all of their data there.
 - Ask before each step that takes long (`index --rebuild`) or writes outside the checkout.
+- Never create, move or delete a project marker file to fix a project; change the rules instead.
 
 ## Step 1: survey each vault
 
@@ -48,8 +49,9 @@ Show the person a short summary for each vault and your proposed rules before yo
 ## Step 2: write the path rules and check samples
 
 Edit `config.toml` (copy keys from `config.example.toml`). Global keys: `vaults`, `project_markers`,
-`archive_folder`, `jira_prefixes`, `private_patterns`, `eval_exclude`. One table for each vault that
-differs from the defaults:
+`archive_folder`, `jira_prefixes`, `private_patterns`, `eval_exclude`. Put every global key above the
+first `[vault_rules.*]` table: TOML puts a key below a table header into that table, and the config then
+fails to load. One table for each vault that differs from the defaults:
 
 ```toml
 project_markers = ["DRIVERS.md", "SUMMARY.md", "README.md"]
@@ -82,17 +84,29 @@ each value came from: `frontmatter`, `frontmatter-map`, `path` or `default`). Sh
 table. Change the rules and inspect again until the person agrees the values are right. Pick sample
 paths from the survey folder names; do not open private notes.
 
-Then update the index. A normal `ragnarok index` only reads changed notes, so a change to the rules,
-`project_markers`, `archive_folder`, `jira_prefixes` or `private_patterns` needs a rebuild to reach the
-notes that are already indexed. A rebuild embeds every note again (approximately 12 minutes for 1,500
-notes on Apple Silicon). Ask first.
+You can leave the index update to the end of step 3; `inspect` reads the files directly.
+
+### How config changes reach the index
+
+The index stores a hash of the rule values (`root`, `vaults`, `skip_dirs`, `private_patterns`,
+`project_markers`, `archive_folder`, `jira_prefixes`, `vault_rules`). When the hash changes, the next
+`ragnarok index`, or the next MCP tool call, derives the metadata of all notes again. Unchanged chunks
+keep their vectors, so this is much faster than a rebuild.
 
 ```bash
-uv run ragnarok index --rebuild
-uv run ragnarok status           # notes, private notes, frontmatter coverage for each vault
+uv run ragnarok index            # after a rule change, the first run reads all notes
+uv run ragnarok status           # notes, private notes, rules_hash, frontmatter coverage for each vault
 ```
 
-The MCP server reads `config.toml` once at start. Tell the person to restart Claude Code after a change.
+The running MCP server reads `config.toml` again before a call when the file changed. A new rule or
+private pattern applies at the next tool call; no restart of Claude Code is needed.
+
+Use `ragnarok index --rebuild` (it embeds every note again, approximately 12 minutes for 1,500 notes;
+ask first) only after a change of `model`, `dimension`, `min_words` or `max_words`, or in this case:
+a project marker file (for example `SUMMARY.md`) added to or removed from a folder does not change
+the hash, so the other notes in that folder keep their old project. Touching those notes does not help
+(their content hash is the same). Either run `ragnarok index --rebuild`, or make the rule hash change,
+for example reorder the `project_markers` list, then run `ragnarok index`.
 
 ## Step 3: agree on the private folders
 
@@ -108,7 +122,8 @@ allow_private = false
 Private notes stay in the index, but the server never returns them, the export leaves them out, and the
 backfill writes no description for them. Only the person can set `allow_private = true`; never set it.
 Check one or two paths with `ragnarok inspect` (`"sensitivity": "private"`), then run
-`ragnarok index --rebuild` (ask first): the private flag of notes already in the index changes only then.
+`uv run ragnarok index` and check `private_notes` in `ragnarok status`. The MCP server applies the new
+patterns at its next call, with no restart.
 
 ## Step 4: backfill frontmatter (only if the person agrees)
 
@@ -195,7 +210,8 @@ its name. Every item has `subtype`; `expected` holds project folder paths, the f
 
 Use the words a person would type, not the exact words of the note. A question whose expected notes are
 private or not indexed is dropped. If a note quotes the questions (for example a planning note about
-this work), add its path prefix to `eval_exclude` (a prefix, not a glob):
+this work), add its path prefix to `eval_exclude` (a prefix, not a glob), above the first
+`[vault_rules.*]` table:
 
 ```toml
 eval_exclude = ["Work/Meta/search-eval"]
@@ -239,9 +255,9 @@ refused by design; do not work around the refusal with Read or Grep.
 
 - [ ] `ragnarok inspect` on a sample from each vault shows the project and area the person expects.
 - [ ] Private patterns are agreed, written, and checked with `inspect`.
-- [ ] The index is built after the last configuration change (`ragnarok status` shows all vaults).
+- [ ] `ragnarok index` ran after the last configuration change (`ragnarok status` shows all vaults).
 - [ ] The backfill ran for each vault the person chose, or the person declined it.
 - [ ] `ragnarok eval mechanical` ran on 15 to 20 questions; the result is shown to the person.
-- [ ] The guidance block is in `~/.claude/CLAUDE.md`, and Claude Code was restarted.
+- [ ] The guidance block is in `~/.claude/CLAUDE.md`.
 - [ ] In a new session, a prompt that continues earlier work without a project name makes Claude call
       `find_projects`.

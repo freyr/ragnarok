@@ -65,7 +65,8 @@ cd ragnarok
 Restart Claude Code after step 6. `uv run ragnarok doctor` checks the same six parts and prints the fix for
 each failure.
 
-Before step 5, examine `config.toml`: remove a folder that is not a vault, and add your private paths.
+Before step 5, examine `config.toml`: remove a folder that is not a vault, and add your private paths. A later
+change of the configuration applies at the next `ragnarok index` or MCP tool call, with no restart.
 
 ## Use in Claude Code
 
@@ -127,7 +128,7 @@ explains each key. The most important keys:
 | `root`, `vaults` | The folder that holds the vaults, and the vault folders to index. |
 | `private_patterns` | Glob patterns of private notes, for example `"Notes/Journal/**"`. |
 | `model`, `dimension` | The Ollama embedding model and its vector size. A change needs `ragnarok index --rebuild`. |
-| `min_words`, `max_words` | The chunk size limits of the splitter. |
+| `min_words`, `max_words` | The chunk size limits of the splitter. A change needs `ragnarok index --rebuild`. |
 | `project_markers` | A folder that holds one of these files is a project folder (default `DRIVERS.md`, `SUMMARY.md`). |
 | `jira_prefixes` | The ticket prefixes that `find_by_jira` knows. |
 | `[vault_rules.<vault>]` | The path rules of one vault: which folder gives the area and the project. |
@@ -158,7 +159,7 @@ Without frontmatter, the path rules give the metadata. The default rules work fo
 |---|---|
 | `ragnarok init` | Sets up this computer (see Setup). |
 | `ragnarok doctor` | Checks the setup. |
-| `ragnarok index [--rebuild]` | Adds, changes and removes notes in the index. |
+| `ragnarok index [--rebuild]` | Adds, changes and removes notes in the index. After a change of the path rules, the private paths or the markers, it derives the metadata of all notes again, with no new embeddings. `--rebuild` is needed only after a change of `model`, `dimension`, `min_words` or `max_words`. |
 | `ragnarok status` | Shows the size and the state of the index. |
 | `ragnarok search "<query>"` | Searches from the terminal. |
 | `ragnarok inspect <path>...` | Shows the metadata of notes. |

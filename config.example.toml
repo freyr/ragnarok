@@ -27,6 +27,11 @@ project_markers = ["DRIVERS.md", "SUMMARY.md"]
 archive_folder = "_archive"
 # Ticket prefixes: the ABC of ABC-123. find_by_jira finds only keys with these prefixes.
 jira_prefixes = []
+# Notes that the evaluation ignores, for example notes that quote the questions. Path prefixes, not globs.
+# Example: eval_exclude = ["Notes/Meta/search-eval"]
+eval_exclude = []
+
+# Put every key above this line: a key below a [vault_rules.<vault>] header belongs to that table.
 
 # Path rules of one vault, for notes without a project or area in their frontmatter.
 # Without a table, a vault uses these defaults:
