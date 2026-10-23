@@ -45,6 +45,8 @@ def survey(cfg: Config, vault: str, top: int = 30) -> dict:
     by_depth: Counter = Counter()
     level1: Counter = Counter()
     level2: Counter = Counter()
+    level3: Counter = Counter()
+    malformed_private = 0
     keys: Counter = Counter()
     values: dict[str, Counter] = {key: Counter() for key in VALUE_KEYS}
     folders_of_name: dict[str, set[str]] = defaultdict(set)
@@ -63,26 +65,35 @@ def survey(cfg: Config, vault: str, top: int = 30) -> dict:
             level1[folders[0]] += 1
         if len(folders) > 1:
             level2["/".join(folders[:2])] += 1
-        folders_of_name[name].add("/".join(folders))
+        if len(folders) > 2:
+            level3["/".join(folders[:3])] += 1
+        private = is_private(cfg, rel)
         for folder in {f for f in folders if ARCHIVE_RE.match(f)}:
             archive[folder] += 1
 
+        # the file name of a private note is in no list
         stem = name.removesuffix(".md")
         if DATE_RE.match(stem):
             date_prefixed += 1
-        elif (m := PREFIX_RE.match(stem)) and not m.group(1)[:-1].isdigit():
-            prefixes[m.group(1)] += 1
+        elif not private:
+            if (m := PREFIX_RE.match(stem)) and not m.group(1)[:-1].isdigit():
+                prefixes[m.group(1)] += 1
+        if not private:
+            folders_of_name[name].add("/".join(folders))
 
         text = (cfg.root / rel).read_text(errors="replace")
         try:
             metadata = dict(frontmatter.loads(text).metadata)
         except Exception:
             metadata = {}
-            malformed.append(rel)
+            if private:
+                malformed_private += 1
+            else:
+                malformed.append(rel)
         if metadata:
             with_frontmatter += 1
             keys.update(str(key) for key in metadata)
-            if not is_private(cfg, rel):
+            if not private:
                 for key in VALUE_KEYS:
                     value = metadata.get(key)
                     if isinstance(value, (str, int, float)) and str(value):
@@ -100,9 +111,11 @@ def survey(cfg: Config, vault: str, top: int = 30) -> dict:
         "notes": notes,
         "with_frontmatter": with_frontmatter,
         "malformed_frontmatter": malformed,
+        "malformed_private": malformed_private,
         "by_depth": {str(d): n for d, n in sorted(by_depth.items())},
         "level1": _folders(level1, top),
         "level2": _folders(level2, top),
+        "level3": _folders(level3, top),
         "keys": dict(sorted(keys.items(), key=lambda kv: (-kv[1], kv[0]))),
         "values": {key: _ranked(counter, top)[0] for key, counter in values.items()},
         "marker_candidates": dict(
@@ -127,10 +140,13 @@ def format_text(facts: dict) -> str:
         out.append(f"\n{title}")
         out.extend([f"  {key}: {fmt(value)}" for key, value in rows.items()] or ["  (none)"])
 
-    out.append(f"frontmatter that cannot be parsed: {len(facts['malformed_frontmatter'])}")
+    out.append(
+        f"frontmatter that cannot be parsed: {len(facts['malformed_frontmatter']) + facts['malformed_private']}"
+        f" ({facts['malformed_private']} private, not listed)"
+    )
     out.extend(f"  {rel}" for rel in facts["malformed_frontmatter"])
     section("notes by folder depth (0 = top of the vault)", facts["by_depth"])
-    for level in ("level1", "level2"):
+    for level in ("level1", "level2", "level3"):
         section(f"folders at level {level[-1]} (notes)", facts[level]["folders"])
         if facts[level]["more"]:
             out.append(f"  and {facts[level]['more']} more")

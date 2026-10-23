@@ -122,3 +122,23 @@ def test_cli_unknown_folder(cfg, tmp_path, capsys):
     config = write_config(cfg, tmp_path, ["Work"])
     assert main(["--config", config, "survey", "Nowhere"]) == 1
     assert "Nowhere" in capsys.readouterr().err
+
+
+def test_level3_folders(facts):
+    assert facts["level3"] == {"folders": {"Devops/_archive/db-migration": 2}, "more": 0}
+
+
+def test_private_note_names_are_not_listed(cfg, tmp_path, capsys):
+    (cfg.root / "Work/Personal/People/Jane-Doe.md").write_text("---\nkey: [unclosed\n---\n# J\n")
+    (cfg.root / "Work/Personal/People/Zed-Quux.md").write_text("# Z\n")
+    facts = survey(cfg, "Work")
+    assert facts["notes"] == 17
+    assert facts["malformed_frontmatter"] == ["Work/Top.md"]
+    assert facts["malformed_private"] == 1
+    assert facts["prefixes"] == {"research-": 1, "Q7-": 1}
+    config = write_config(cfg, tmp_path, ["Work"])
+    for extra in ([], ["--json"]):
+        assert main(["--config", config, "survey", "Work", *extra]) == 0
+        out = capsys.readouterr().out
+        assert "Jane" not in out
+        assert "Zed" not in out
