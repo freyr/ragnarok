@@ -48,7 +48,8 @@ SETTLE_NS = 10**9  # a config file changed less than one second ago can still be
 def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Path | None = None) -> MCPServer:
     """The server. With tools or cfg, the configuration is fixed. Else each call first reads the config file
     again when it changed, so that a new private pattern or rule applies to that call without a restart.
-    A missing, recent, invalid or vault-less file does not replace the configuration in use."""
+    A missing, recent, invalid or vault-less file does not replace the configuration in use. A valid file that
+    the index refuses (a new model or dimension) stops the old configuration: each call fails until the rebuild."""
     state: dict = {}
     lock = threading.Lock()  # one call at a time: the scan writes to the index
     watch = None if tools is not None or cfg is not None else (config_file or config_path())
@@ -71,10 +72,17 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
             new = load_config(watch)
             if not new.vaults:
                 raise ValueError("no vaults")
-            new_tools = open_tools(new)
         except Exception as e:
             log.warning("config file %s is not usable (%s); the server keeps its configuration", watch, e)
             return
+        try:
+            new_tools = open_tools(new)
+        except IndexMismatch:
+            # a valid config that the index refuses: stop the old config; each call tries again until the rebuild
+            log.warning("config file %s needs a new index; the calls fail until `ragnarok index --rebuild`", watch)
+            state.pop("tools").conn.close()
+            state.pop("stamp")
+            raise
         state.pop("tools").conn.close()
         state["tools"], state["digest"] = new_tools, digest
         log.info("config changed: %s", watch)

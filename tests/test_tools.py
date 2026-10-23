@@ -188,3 +188,20 @@ def test_server_starts_with_no_config_file(tmp_path, monkeypatch):
     server = build(config_file=tmp_path / "missing.toml")
     asyncio.run(server.call_tool("find_by_jira", {"key": "ABC-1"}))
     assert (tmp_path / "data" / "index.db").exists()
+
+
+def test_server_fails_closed_when_the_index_refuses_a_new_config(served):
+    from mcp.server.mcpserver.exceptions import ToolError
+    from test_index import FakeEmbedder
+
+    server, config_file, cfg = served
+    new = dataclasses.replace(cfg, dimension=16, private_patterns=[*cfg.private_patterns, "Home/Astro/**"])
+    write_config(config_file, dump_config(new, root=cfg.root, index_path=cfg.index_path))
+    for _ in range(2):
+        with pytest.raises(ToolError, match="ragnarok index --rebuild"):
+            asyncio.run(server.call_tool("open_note", FIELD_STOP))
+    for suffix in ("", "-wal", "-shm"):
+        cfg.index_path.with_name(cfg.index_path.name + suffix).unlink(missing_ok=True)
+    update(new, connect(new), FakeEmbedder(dimension=16))
+    with pytest.raises(ToolError, match="private note"):
+        asyncio.run(server.call_tool("open_note", FIELD_STOP))
