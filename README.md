@@ -79,14 +79,43 @@ The server gives five tools:
 | `open_note` | The text of a note or of one section, with its links and backlinks. |
 | `find_by_jira` | The notes that contain a ticket key, for example `ABC-123`. |
 
-Claude Code loads MCP tools on demand. To make Claude use them before grep, add a short instruction to the
-`CLAUDE.md` file of your vault folder, for example:
+Claude Code loads MCP tools on demand. To make Claude use them before grep, add a short instruction to your
+`~/.claude/CLAUDE.md` file, for example:
 
 ```markdown
-## Finding notes
-Use the ragnarok MCP tools before Grep or Glob: `find_projects` when a prompt continues earlier work
-without a project name, `search` for facts, `open_note` to read a note.
+## Finding notes: ragnarok first
+
+The `ragnarok` MCP server indexes my Obsidian vaults. Use it before Grep or Glob whenever you look for
+notes, earlier work or context:
+
+- `find_projects`: the prompt continues or resembles earlier work and names no project. Then call
+  `list_project` on the best match (look at the top 3).
+- `search`: facts, decisions, how something was done. Filters: vault, project, area, type.
+- `open_note`: read a note or one section, with its links and backlinks.
+- `find_by_jira`: a ticket key such as `OPS-77`.
+
+The tools are deferred. Load them in one call before the first use:
+`ToolSearch` with `select:mcp__ragnarok__search,mcp__ragnarok__find_projects,mcp__ragnarok__list_project,mcp__ragnarok__open_note,mcp__ragnarok__find_by_jira`.
+
+If the tools are absent (for example on a computer without ragnarok), fall back to Grep and say so.
+Results can be unrelated: read the text before you rely on it, and cite note paths. Private notes are
+refused by design; do not work around the refusal with Read or Grep.
 ```
+
+## Adapting to your vaults
+
+The default path rules expect `<vault>/<area>/<project>/note.md`. If your vaults look different, the repo
+skill `.claude/skills/adapt-vault/` guides Claude Code through the changes. Open Claude Code in the checkout
+and ask it to adapt ragnarok to your vaults. The skill:
+
+1. runs `ragnarok survey` on each vault and writes the path rules into `config.toml`, checked with
+   `ragnarok inspect`;
+2. agrees the private folders with you;
+3. runs the frontmatter backfill, if you agree, with your review before `apply`;
+4. writes a small evaluation set from your notes and runs `ragnarok eval mechanical`;
+5. adds the guidance above to your `~/.claude/CLAUDE.md`, after it asks you.
+
+It changes only `config.toml` and adds frontmatter keys. It never moves, renames or deletes a note or a folder.
 
 ## Configuration
 
