@@ -105,6 +105,9 @@ refused by design; do not work around the refusal with Read or Grep.
 
 ## Adapting to your vaults
 
+[docs/vault-requirements.md](docs/vault-requirements.md) tells how a vault must look to get the most from
+ragnarok: headings, project folders, `SUMMARY.md`, frontmatter and private folders.
+
 The default path rules expect `<vault>/<area>/<project>/note.md`. If your vaults look different, the repo
 skill `.claude/skills/adapt-vault/` guides Claude Code through the changes. Open Claude Code in the checkout
 and ask it to adapt ragnarok to your vaults. The skill:
