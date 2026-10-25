@@ -174,6 +174,7 @@ def update(
 
     When the metadata rules of the configuration changed, derive the metadata of all notes again, with no limit,
     and rewrite the notes whose metadata or chunks changed. The embedding cache keeps the unchanged chunks.
+    When the scan adds or removes a project marker file, do the same for the notes under the folder of that file.
     """
     start = time.monotonic()
     result = UpdateResult()
@@ -193,8 +194,18 @@ def update(
 
     gone = {rel: known[rel] for rel in known.keys() - on_disk.keys()}
     gone_by_hash = {h: rel for rel, (_, _, _, h) in gone.items()}
+    # a marker file that appears or disappears (a move does both) changes the project of the notes below its folder
+    marker_dirs = tuple(
+        rel.rpartition("/")[0] + "/"
+        for rel in (on_disk.keys() - known.keys()) | gone.keys()
+        if rel.rpartition("/")[2] in cfg.project_markers
+    )
     todo = sorted(
-        (rel for rel, stat in on_disk.items() if rel not in known or rederive or known[rel][1:3] != stat),
+        (
+            rel
+            for rel, stat in on_disk.items()
+            if rel not in known or rederive or known[rel][1:3] != stat or rel.startswith(marker_dirs)
+        ),
         key=lambda rel: (-on_disk[rel][0], rel),
     )
     pending: list[_Pending] = []
@@ -207,7 +218,7 @@ def update(
             if old[1:3] != (mtime_ns, size):
                 conn.execute("UPDATE notes SET mtime_ns = ?, size = ? WHERE id = ?", (mtime_ns, size, old[0]))
                 result.touched += 1
-            if not rederive:
+            if not (rederive or rel.startswith(marker_dirs)):
                 continue
             fm, body = read_note(cfg.root / rel)
             meta = resolve(cfg, rel, fm, body)
@@ -327,13 +338,28 @@ def _link_key(path: str) -> str:
     return path[:-3] if path.endswith(".md") else path
 
 
+def _common_folders(folders: list[str], path: str) -> int:
+    """The number of leading folders that the list and the path share."""
+    count = 0
+    for a, b in zip(folders, path.split("/")[:-1], strict=False):
+        if a != b:
+            break
+        count += 1
+    return count
+
+
 def resolve_links(conn: sqlite3.Connection) -> None:
-    """Resolve each wiki-link target to a note: same vault first, then the shortest path."""
+    """Resolve each wiki-link target to a note.
+
+    Rank the candidates by the same vault as the note with the link, then the most folders in common with that
+    note, then the shortest path.
+    """
     notes = [(nid, vault, _link_key(path)) for nid, vault, path in conn.execute("SELECT id, vault, path FROM notes")]
     by_name: dict[str, list[tuple[int, str, str]]] = {}
     for n in notes:
         by_name.setdefault(n[2].rsplit("/", 1)[-1], []).append(n)
     vault_of = {nid: vault for nid, vault, _ in notes}
+    path_of = {nid: path for nid, _, path in notes}
     updates = []
     for rowid, from_note, target in conn.execute("SELECT rowid, from_note, target FROM links").fetchall():
         key = _link_key(target).strip("/")
@@ -342,7 +368,8 @@ def resolve_links(conn: sqlite3.Connection) -> None:
             to_note = None
         else:
             home = vault_of.get(from_note)
-            to_note = min(candidates, key=lambda n: (n[1] != home, len(n[2])))[0]
+            folders = path_of.get(from_note, "").split("/")[:-1]
+            to_note = min(candidates, key=lambda n: (n[1] != home, -_common_folders(folders, n[2]), len(n[2])))[0]
         updates.append((to_note, rowid))
     conn.executemany("UPDATE links SET to_note = ? WHERE rowid = ?", updates)
 

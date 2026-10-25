@@ -218,3 +218,45 @@ def test_rule_change_ignores_the_scan_limit(cfg):
     result = update(cfg, conn, emb, limit=1)
     assert result.warnings == []
     assert count(conn, "SELECT count(*) FROM notes WHERE path LIKE 'Home/%' AND sensitivity = 'normal'") == 0
+
+
+def test_added_marker_gives_the_notes_of_its_folder_a_new_project_without_embedding(cfg):
+    conn, emb, _ = build(cfg)
+    assert note_row(conn, FIELD_STOP)[0] == "Theory"
+    calls = emb.calls
+    marker = cfg.root / "Home/Astro/SUMMARY.md"
+    marker.write_text("# Astro\nThe summary of the astro folder.\n")
+    result = update(cfg, conn, emb)
+    assert note_row(conn, FIELD_STOP)[0] == "Astro"
+    assert result.rederived == 1 and result.added == 1
+    assert emb.calls - calls == result.embedded  # only the new marker note is embedded
+    marker.unlink()
+    result = update(cfg, conn, emb)
+    assert note_row(conn, FIELD_STOP)[0] == "Theory"
+    assert (result.removed, result.rederived, result.embedded) == (1, 1, 0)
+
+
+def test_marker_change_leaves_notes_outside_its_folder_alone(cfg, monkeypatch):
+    conn, emb, _ = build(cfg)
+    (cfg.root / "Home/Astro/SUMMARY.md").write_text("# Astro\nThe summary of the astro folder.\n")
+    calls = []
+    real = index.resolve
+    monkeypatch.setattr(index, "resolve", lambda *a, **k: calls.append(a[1]) or real(*a, **k))
+    update(cfg, conn, emb)
+    assert calls and all(rel.startswith("Home/Astro/") for rel in calls)
+
+
+def test_link_goes_to_the_note_in_the_nearest_folder(cfg):
+    (cfg.root / "Home/Heating/DRIVERS.md").write_text("# Drivers\nThe heating drivers.\n")
+    (cfg.root / "Home/Astro/DRIVERS.md").write_text("# Drivers\nThe astro drivers.\n")
+    (cfg.root / "Home/Heating/notes/boiler.md").write_text("# Boiler\nSee [[DRIVERS]].\n")
+    (cfg.root / FIELD_STOP).write_text("# Field Stop\nSee [[DRIVERS]].\n")
+    conn, _, _ = build(cfg)
+    rows = conn.execute(
+        "SELECT f.path, n.path FROM links l JOIN notes f ON f.id = l.from_note JOIN notes n ON n.id = l.to_note"
+        " WHERE l.target = 'DRIVERS' ORDER BY f.path"
+    ).fetchall()
+    assert rows == [
+        (FIELD_STOP, "Home/Astro/DRIVERS.md"),
+        ("Home/Heating/notes/boiler.md", "Home/Heating/DRIVERS.md"),
+    ]

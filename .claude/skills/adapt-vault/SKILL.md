@@ -133,10 +133,10 @@ The running MCP server reads `config.toml` again before a call when the file cha
 private pattern applies at the next tool call; no restart of Claude Code is needed.
 
 Use `ragnarok index --rebuild` (it embeds every note again, approximately 12 minutes for 1,500 notes;
-ask first) only after a change of `model`, `dimension`, `min_words` or `max_words`, or in this case:
-a project marker file (for example `SUMMARY.md`) added to or removed from a folder does not change
-the hash, so the other notes in that folder keep their old project. Touching those notes does not help
-(their content hash is the same). Run `ragnarok index --rebuild`.
+ask first) only after a change of `model`, `dimension`, `min_words` or `max_words`.
+
+A project marker file (for example `SUMMARY.md`) that you add to or remove from a folder needs no rebuild.
+The next `ragnarok index` derives the metadata again for the notes under that folder.
 
 ## Step 4: backfill frontmatter (only if the person agrees)
 
