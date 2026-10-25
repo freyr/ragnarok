@@ -135,8 +135,8 @@ private pattern applies at the next tool call; no restart of Claude Code is need
 Use `ragnarok index --rebuild` (it embeds every note again, approximately 12 minutes for 1,500 notes;
 ask first) only after a change of `model`, `dimension`, `min_words` or `max_words`.
 
-A project marker file (for example `SUMMARY.md`) that you add to or remove from a folder needs no rebuild.
-The next `ragnarok index` derives the metadata again for the notes under that folder.
+A Markdown project marker file (for example `SUMMARY.md`) that you add to or remove from a folder needs no rebuild.
+The next `ragnarok index` derives the metadata again for the notes under that folder. A marker that is not a `.md` file is not in the scan, so its change needs `ragnarok index --rebuild`.
 
 ## Step 4: backfill frontmatter (only if the person agrees)
 

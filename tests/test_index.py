@@ -260,3 +260,13 @@ def test_link_goes_to_the_note_in_the_nearest_folder(cfg):
         (FIELD_STOP, "Home/Astro/DRIVERS.md"),
         ("Home/Heating/notes/boiler.md", "Home/Heating/DRIVERS.md"),
     ]
+
+
+def test_marker_rederivation_does_not_use_the_scan_limit(cfg):
+    conn, emb, _ = build(cfg)
+    edited = cfg.root / "Work/Sales/Answers/Security.md"
+    edited.write_text("# Security\nThe new answer.\n")
+    os.utime(edited, ns=(1, 1))  # the oldest note, so the scan reaches it after the re-derived note
+    (cfg.root / "Home/Astro/SUMMARY.md").write_text("# Astro\nThe summary of the astro folder.\n")
+    result = update(cfg, conn, emb, limit=2)
+    assert (result.added, result.changed, result.rederived, result.deferred) == (1, 1, 1, 0)

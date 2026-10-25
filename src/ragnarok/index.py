@@ -228,7 +228,9 @@ def update(
             links = sorted({m.group(1).strip() for m in WIKI_LINK.finditer(body)})
             pending.append(_Pending(rel, old[0], mtime_ns, size, h, meta, chunks, links, rederived=True))
         else:
-            if limit is not None and result.added + result.changed + result.moved + len(pending) >= limit:
+            # a re-derived note does not count toward the limit, also while it waits in pending
+            written = result.added + result.changed + result.moved + sum(not p.rederived for p in pending)
+            if limit is not None and written >= limit:
                 result.deferred += 1
                 continue
             note_id = old[0] if old else None
