@@ -76,10 +76,16 @@ def _relative(cfg, raw: str) -> str:
 def cmd_inspect(cfg, args) -> int:
     from .metadata import resolve_file
 
+    code = 0
     for raw in args.paths:
-        meta = resolve_file(cfg, _relative(cfg, raw))
+        rel = _relative(cfg, raw)
+        if not (cfg.root / rel).is_file():
+            print(f"not a note: {rel}", file=sys.stderr)
+            code = 1
+            continue
+        meta = resolve_file(cfg, rel)
         print(json.dumps(meta.as_dict(), ensure_ascii=False))
-    return 0
+    return code
 
 
 def cmd_chunks(cfg, args) -> int:
