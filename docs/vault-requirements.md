@@ -62,7 +62,8 @@ prompt continues earlier work but does not name it.
       chunk, which gives the search a clear target. Of the six keys, it adds the most.
     - `type`: one of `drivers`, `summary`, `research`, `spec`, `plan`, `brainstorm`, `review`, `decision`,
       `guide`, `reference`, `meeting`, `log`, `template` or `note`.
-    - `status`: only `archived` changes the behavior. Each other value counts as `active`.
+    - `status`: only `archived` changes the behavior. Each other value counts as `active`. A note in an
+      `_archive` folder, or in a project whose `SUMMARY.md` has `stage: DONE`, is also `archived`.
     - `jira`: ticket keys. ragnarok also finds keys in the text when their prefix is in `jira_prefixes`.
 11. **File names and folders that give the type.** When a note has no `type` key, ragnarok uses these fixed
     rules:

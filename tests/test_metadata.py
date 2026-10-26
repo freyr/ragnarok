@@ -188,3 +188,16 @@ def test_frontmatter_area_is_lower_case(vault):
 def test_type_aliases(vault, raw, type_):
     m = resolve(vault, "Home/Bike/x.md", {"type": raw}, "", lambda f: False)
     assert (m.type, m.sources["type"]) == (type_, "frontmatter-map")
+
+
+@pytest.mark.parametrize("stage, status", [("DONE", "archived"), ("done", "archived"), ("DELIVER", "active")])
+def test_summary_stage_done_archives_the_project(vault, stage, status):
+    (vault.root / "Home/Heating/SUMMARY.md").write_text(f"---\nstage: {stage}\n---\n# Heating\n")
+    m = meta(vault, "Home/Heating/notes/boiler.md")
+    assert m.status == status
+    assert m.sources["status"] == ("summary" if status == "archived" else "path")
+
+
+def test_summary_stage_does_not_reach_notes_outside_the_project(vault):
+    (vault.root / "Home/Heating/SUMMARY.md").write_text("---\nstage: DONE\n---\n# Heating\n")
+    assert meta(vault, "Home/Astro/Theory/Field Stop.md").status == "active"

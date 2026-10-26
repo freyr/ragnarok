@@ -9,6 +9,7 @@ import re
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from fnmatch import fnmatchcase
+from functools import lru_cache
 from pathlib import Path
 
 import frontmatter
@@ -191,8 +192,8 @@ def _project_from_folders(folders: list[str], rules: VaultRules, archive: str) -
     return "none"
 
 
-def _path_rules(cfg: Config, parts: list[str], has_marker: Callable[[str], bool]) -> tuple[str, str, bool]:
-    """Return (area, project, archived) from the path. parts = [vault, folder..., file]."""
+def _path_rules(cfg: Config, parts: list[str], has_marker: Callable[[str], bool]) -> tuple[str, str, bool, str | None]:
+    """Return (area, project, archived, project folder) from the path. parts = [vault, folder..., file]."""
     vault, folders = parts[0], parts[1:-1]
     rules = cfg.rules(vault)
     archived = cfg.archive_folder in folders
@@ -212,7 +213,24 @@ def _path_rules(cfg: Config, parts: list[str], has_marker: Callable[[str], bool]
         project = "none"
     else:
         project = _project_from_folders(folders, rules, cfg.archive_folder)
-    return area, project, archived
+    folder = "/".join(parts[: marker + 1]) if marker is not None else None
+    return area, project, archived, folder
+
+
+def _summary_done(cfg: Config, folder: str) -> bool:
+    """A project is finished when the stage in its SUMMARY.md frontmatter is DONE."""
+    path = cfg.root / folder / "SUMMARY.md"
+    try:
+        mtime = path.stat().st_mtime_ns
+    except FileNotFoundError:
+        return False
+    return _stage_done(path, mtime)
+
+
+@lru_cache(maxsize=4096)
+def _stage_done(path: Path, mtime_ns: int) -> bool:
+    fm, _ = read_note(path)
+    return str(fm.get("stage", "")).strip().upper() == "DONE"
 
 
 def _type_from_path(parts: list[str]) -> str | None:
@@ -236,6 +254,7 @@ def resolve(
     fm: dict | None = None,
     body: str = "",
     has_marker: Callable[[str], bool] | None = None,
+    project_done: Callable[[str], bool] | None = None,
 ) -> NoteMeta:
     """Resolve the metadata of the note at rel (relative to cfg.root)."""
     fm = fm or {}
@@ -244,9 +263,14 @@ def resolve(
         def has_marker(folder: str) -> bool:
             return any((cfg.root / folder / m).is_file() for m in cfg.project_markers)
 
+    if project_done is None:
+
+        def project_done(folder: str) -> bool:
+            return _summary_done(cfg, folder)
+
     parts = rel.split("/")
     vault = parts[0]
-    area, project, archived = _path_rules(cfg, parts, has_marker)
+    area, project, archived, folder = _path_rules(cfg, parts, has_marker)
     sources: dict[str, str] = {}
 
     def pick(key: str, path_value: str) -> str:
@@ -272,6 +296,8 @@ def resolve(
 
     if str(fm.get("status", "")).strip().lower() == "archived":
         status, sources["status"] = "archived", "frontmatter"
+    elif folder is not None and project_done(folder):
+        status, sources["status"] = "archived", "summary"
     else:
         status, sources["status"] = ("archived" if archived else "active"), "path"
 

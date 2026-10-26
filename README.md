@@ -146,7 +146,8 @@ project: heating-upgrade     # the project slug; default: from the path rules
 area: home                   # a wide subject; default: from the path rules
 type: plan                   # drivers, summary, research, spec, plan, brainstorm, review, decision,
                              # guide, reference, meeting, log, template or note
-status: active               # active or archived; a note in an _archive folder is archived
+status: active               # active or archived; a note in an _archive folder, or in a project
+                             # whose SUMMARY.md has stage: DONE, is archived
 description: One sentence about the note, which improves find_projects.
 jira: [ABC-123]              # ticket keys, in addition to the keys in the text
 ---
