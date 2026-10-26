@@ -51,14 +51,23 @@ TYPE_MAP = {
     "research": "research",
     "investigation": "research",
     "analysis": "research",
+    "content-analysis": "research",
     "spec": "spec",
     "specification": "spec",
+    "design": "spec",
+    "brief": "spec",
     "plan": "plan",
     "feat": "plan",
     "fix": "plan",
     "refactor": "plan",
     "brainstorm": "brainstorm",
+    "proposal": "brainstorm",
+    "one-pager": "brainstorm",
+    "pitch-input": "brainstorm",
     "review": "review",
+    "incident": "review",
+    "incident-rca": "review",
+    "sla-review": "review",
     "adr": "decision",
     "decision": "decision",
     "guide": "guide",
@@ -66,11 +75,13 @@ TYPE_MAP = {
     "howto": "guide",
     "tutorial": "guide",
     "runbook": "guide",
+    "facilitator-runbook": "guide",
     "knowledge-base": "reference",
     "reference": "reference",
     "meeting": "meeting",
     "log": "log",
     "journal": "log",
+    "digest": "log",
     "template": "template",
     "drivers": "drivers",
     "summary": "summary",
@@ -247,7 +258,7 @@ def resolve(
         return path_value
 
     project = normalize_project(pick("project", project))
-    area = pick("area", area)
+    area = pick("area", area).lower()
 
     raw_type = str(fm.get("type", "")).strip().lower()
     if raw_type in TYPES:

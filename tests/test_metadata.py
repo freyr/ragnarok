@@ -166,3 +166,25 @@ def test_unknown_rule_key_is_an_error(tmp_path):
     path.write_text("[vault_rules.Work]\nproject_level = 2\n")
     with pytest.raises(TypeError):
         load_config(path)
+
+
+def test_frontmatter_area_is_lower_case(vault):
+    assert resolve(vault, "Home/Bike/x.md", {"area": "Devops"}, "", lambda f: False).area == "devops"
+
+
+@pytest.mark.parametrize(
+    "raw, type_",
+    [
+        ("design", "spec"),
+        ("brief", "spec"),
+        ("incident-rca", "review"),
+        ("sla-review", "review"),
+        ("one-pager", "brainstorm"),
+        ("content-analysis", "research"),
+        ("facilitator-runbook", "guide"),
+        ("digest", "log"),
+    ],
+)
+def test_type_aliases(vault, raw, type_):
+    m = resolve(vault, "Home/Bike/x.md", {"type": raw}, "", lambda f: False)
+    assert (m.type, m.sources["type"]) == (type_, "frontmatter-map")
