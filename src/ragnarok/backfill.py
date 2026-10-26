@@ -83,7 +83,9 @@ def propose(cfg: Config, vault: str) -> dict:
     slugs = {m.project for _, _, _, m in notes if m.project != "none"}
     rows = []
     for rel, text, fm, meta in notes:
-        missing = [k for k in KEYS if k not in fm]
+        # a status from the SUMMARY.md stage follows the stage; written to the note, it would outlive a reopen
+        derived = {"status"} if meta.sources.get("status") == "summary" else set()
+        missing = [k for k in KEYS if k not in fm and k not in derived]
         if not missing:
             continue
         values = {"project": meta.project, "area": meta.area, "type": meta.type, "status": meta.status}

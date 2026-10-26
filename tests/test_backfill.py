@@ -30,6 +30,15 @@ def test_propose_lists_only_the_missing_keys(vault):
     assert all(r.startswith("Home/") for r in rows)
 
 
+def test_propose_leaves_a_status_from_the_summary_stage_out(vault):
+    (vault.root / "Home/Heating/SUMMARY.md").write_text("---\nstage: DONE\n---\n# Heating\n")
+    boiler = rows_by_path(backfill.propose(vault, "Home"))["Home/Heating/notes/boiler.md"]
+    assert "status" not in boiler["set"] and "status" not in boiler["source"]
+    (vault.root / "Home/Heating/notes/boiler.md").write_text("---\nstatus: done\n---\n# Boiler\n")
+    boiler = rows_by_path(backfill.propose(vault, "Home"))["Home/Heating/notes/boiler.md"]
+    assert "status" not in boiler["set"]
+
+
 def test_propose_skips_complete_notes_and_instruction_files(vault):
     (vault.root / "Studio/api-gateway/CLAUDE.md").write_text("# rules\n")
     (vault.root / "Studio/api-gateway/done.md").write_text(

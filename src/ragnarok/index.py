@@ -174,7 +174,8 @@ def update(
 
     When the metadata rules of the configuration changed, derive the metadata of all notes again, with no limit,
     and rewrite the notes whose metadata or chunks changed. The embedding cache keeps the unchanged chunks.
-    When the scan adds or removes a project marker file, do the same for the notes under the folder of that file.
+    When the scan adds, removes or changes a project marker file, do the same for the notes under the folder of
+    that file.
     """
     start = time.monotonic()
     result = UpdateResult()
@@ -194,10 +195,12 @@ def update(
 
     gone = {rel: known[rel] for rel in known.keys() - on_disk.keys()}
     gone_by_hash = {h: rel for rel, (_, _, _, h) in gone.items()}
-    # a marker file that appears or disappears (a move does both) changes the project of the notes below its folder
+    # a marker file that appears or disappears (a move does both) changes the project of the notes below its folder,
+    # and an edited marker file can change their status (a SUMMARY.md with stage DONE)
+    changed = {rel for rel in on_disk.keys() & known.keys() if known[rel][1:3] != on_disk[rel]}
     marker_dirs = tuple(
         rel.rpartition("/")[0] + "/"
-        for rel in (on_disk.keys() - known.keys()) | gone.keys()
+        for rel in (on_disk.keys() - known.keys()) | gone.keys() | changed
         if rel.rpartition("/")[2] in cfg.project_markers
     )
     todo = sorted(
