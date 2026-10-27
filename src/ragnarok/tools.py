@@ -47,7 +47,7 @@ def _outline(secs) -> list[dict]:
             "heading": " > ".join(s.path),
             "level": len(s.path),
             "words": s.words(),
-            "first": redact(_first_sentence(s.lines))[0],
+            "first": _first_sentence(s.lines),
         }
         for s in secs
     ]
@@ -155,7 +155,7 @@ class Tools:
         elif outline is None:
             outline = len(body.split()) > LONG_NOTE_WORDS
         if outline:
-            content = {"outline": _outline(secs)}
+            content = {"outline": _outline(sections(redact(body)[0]))}
         else:
             text, redactions = redact(body)
             content = {"text": text, "redactions": redactions}
