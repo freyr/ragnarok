@@ -12,6 +12,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   derives the metadata of the notes in its project again on the next update.
 - `backfill propose` does not write a status that comes from the `SUMMARY.md` stage, so the status follows
   the stage when the project opens again.
+- `open_note` gives the outline of a note of more than 4,000 words: each H1-H3 section with its heading path,
+  level, words and first sentence. `outline` forces the outline or the text. `heading` also takes the end of a
+  heading path, such as `Plan > Results`, to select one of two sections with the same heading.
 
 ## [1.0.0] - 2026-10-23
 
