@@ -71,6 +71,44 @@ def test_open_note_redacts_and_hides_private_links(tools):
     assert section["backlinks"] == ["Home/Heating/SUMMARY.md"]
 
 
+def test_open_note_outline(tools):
+    note = tools.open_note("Home/Heating/notes/boiler.md", outline=True)
+    assert "text" not in note
+    assert note["outline"] == [
+        {
+            "heading": "Boiler",
+            "level": 1,
+            "words": 8,
+            "first": "The boiler flow temperature follows the weather curve.",
+        },
+        {
+            "heading": "Boiler > Wiring",
+            "level": 2,
+            "words": 8,
+            "first": "The relay password: [REDACTED] is on the label.",
+        },
+    ]
+    assert note["backlinks"] == ["Home/Heating/SUMMARY.md"]
+
+
+def test_open_note_outline_redacts_before_the_cut(tools):
+    rel = "Home/Heating/key.md"
+    key = "\n".join(["-----BEGIN RSA PRIVATE KEY-----", *["MIIEowIBAAKCAQEA1x2y3z4w5v6u7t8s9r0q"] * 30])
+    (tools.cfg.root / rel).write_text(f"# Key\n{key}\n-----END RSA PRIVATE KEY-----\n")
+    assert "MIIE" not in tools.open_note(rel, outline=True)["outline"][0]["first"]
+
+
+def test_open_note_gives_the_outline_of_a_long_note(tools):
+    rel = "Home/Heating/long.md"
+    part = "The pump runs. " * 700
+    (tools.cfg.root / rel).write_text(f"# Long\n\n## Results\n{part}\n## Plan\n{part}\n### Results\nShort.\n")
+    assert "outline" in tools.open_note(rel) and "text" not in tools.open_note(rel)
+    assert "text" in tools.open_note(rel, outline=False)
+    assert "text" in tools.open_note("Home/Heating/notes/boiler.md")
+    assert tools.open_note(rel, heading="Plan > Results")["text"].strip() == "Short."
+    assert tools.open_note(rel, heading="## Results")["text"].strip().startswith("The pump runs.")
+
+
 def test_open_note_refuses_private_and_unknown_notes(tools):
     with pytest.raises(PrivateNotAllowed):
         tools.open_note("Home/Budget/2026.md")

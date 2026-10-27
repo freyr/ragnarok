@@ -190,12 +190,15 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
 
     @server.tool()
     @timed
-    def open_note(path: str, heading: str | None = None) -> dict:
+    def open_note(path: str, heading: str | None = None, outline: bool | None = None) -> dict:
         """The text of a note (or of one section, by heading), its frontmatter, links and backlinks.
 
+        outline=true gives the sections (heading path, words, first sentence) instead of the text. A note of more
+        than 4000 words gives the outline unless outline=false; then open the section you need by heading, as the
+        last heading or the full path such as "Results > Inferences".
         Credentials in the text are replaced with [REDACTED]. Private notes are refused.
         """
-        return get().open_note(path, heading=heading)
+        return get().open_note(path, heading=heading, outline=outline)
 
     @server.tool()
     @timed

@@ -77,7 +77,7 @@ The server gives five tools:
 | `search` | Hybrid search over the notes. Filters: vault, project, area, type, archived. |
 | `find_projects` | The projects that match a prompt, with the summary and the matching notes of each project. |
 | `list_project` | All notes of one project. |
-| `open_note` | The text of a note or of one section, with its links and backlinks. |
+| `open_note` | The text of a note or of one section, with its links and backlinks. A note of more than 4,000 words gives an outline: each section with its heading path, words and first sentence. |
 | `find_by_jira` | The notes that contain a ticket key, for example `ABC-123`. |
 
 Claude Code loads MCP tools on demand. To make Claude use them before grep, add a short instruction to your
@@ -92,7 +92,7 @@ notes, earlier work or context:
 - `find_projects`: the prompt continues or resembles earlier work and names no project. Then call
   `list_project` on the best match (look at the top 3).
 - `search`: facts, decisions, how something was done. Filters: vault, project, area, type.
-- `open_note`: read a note or one section, with its links and backlinks.
+- `open_note`: read a note or one section, with its links and backlinks. A long note gives its outline first; open the section you need by heading.
 - `find_by_jira`: a ticket key such as `OPS-77`.
 
 The tools are deferred. Load them in one call before the first use:

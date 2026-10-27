@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import posixpath
+import re
 import sqlite3
 from dataclasses import dataclass, field
 
@@ -16,6 +17,8 @@ from .splitter import sections
 
 PROJECT_POOL = 50  # notes that find_projects groups into projects
 DESCRIPTION_WORDS = 60
+LONG_NOTE_WORDS = 4000  # open_note gives the outline of a longer note when no outline value is given
+FIRST_WORDS = 25
 
 
 def _plain(value):
@@ -29,6 +32,25 @@ def _plain(value):
     if isinstance(value, str):
         return redact(value)[0]
     return value
+
+
+def _first_sentence(lines: list[str]) -> str:
+    text = " ".join(" ".join(lines).split())
+    sentence = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0]
+    words = sentence.split()
+    return " ".join(words[:FIRST_WORDS]) + (" …" if len(words) > FIRST_WORDS else "")
+
+
+def _outline(secs) -> list[dict]:
+    return [
+        {
+            "heading": " > ".join(s.path),
+            "level": len(s.path),
+            "words": s.words(),
+            "first": _first_sentence(s.lines),
+        }
+        for s in secs
+    ]
 
 
 def _first_paragraph(body: str) -> str | None:
@@ -113,7 +135,7 @@ class Tools:
         results = [{**self._project_info(v, project), "notes": notes} for v, notes in by_vault.items()]
         return {"results": results, "warnings": warnings}
 
-    def open_note(self, path: str, heading: str | None = None) -> dict:
+    def open_note(self, path: str, heading: str | None = None, outline: bool | None = None) -> dict:
         warnings = self.scan()
         row = self._note_row(path)
         if row is None:
@@ -121,14 +143,22 @@ class Tools:
         note_id, vault, title, project, area, type_, status, sensitivity, description = row
         self._check_private(sensitivity, path)
         fm, body = read_note(self.cfg.root / path)
+        secs = sections(body)
         if heading is not None:
             wanted = heading.strip().lstrip("#").strip().lower()
-            found = [s for s in sections(body) if s.path and s.path[-1].lower() == wanted]
+            found = [s for s in secs if s.path and (" > " + " > ".join(s.path).lower()).endswith(" > " + wanted)]
             if not found:
-                names = [" > ".join(s.path) for s in sections(body) if s.path]
+                names = [" > ".join(s.path) for s in secs if s.path]
                 raise LookupError(f"No heading {heading!r} in {path}. Headings: {names}")
             body = "\n".join(found[0].lines)
-        text, redactions = redact(body)
+            outline = False
+        elif outline is None:
+            outline = len(body.split()) > LONG_NOTE_WORDS
+        if outline:
+            content = {"outline": _outline(sections(redact(body)[0]))}
+        else:
+            text, redactions = redact(body)
+            content = {"text": text, "redactions": redactions}
         hide = "" if self.cfg.allow_private else " AND (n.id IS NULL OR n.sensitivity = 'normal')"
         links = self.conn.execute(
             "SELECT l.target, n.path FROM links l LEFT JOIN notes n ON n.id = l.to_note"
@@ -150,8 +180,7 @@ class Tools:
             "status": status,
             "description": description,
             "frontmatter": _plain(fm),
-            "text": text,
-            "redactions": redactions,
+            **content,
             "links": [{"target": t, "path": p} for t, p in links],
             "backlinks": [p for (p,) in backlinks],
             "warnings": warnings,
