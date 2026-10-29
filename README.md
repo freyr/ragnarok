@@ -70,13 +70,14 @@ change of the configuration applies at the next `ragnarok index` or MCP tool cal
 
 ## Use in Claude Code
 
-The server gives five tools:
+The server gives six tools:
 
 | Tool | What it does |
 |---|---|
 | `search` | Hybrid search over the notes. Filters: vault, project, area, type, archived. |
 | `find_projects` | The projects that match a prompt, with the summary and the matching notes of each project. |
 | `list_project` | All notes of one project. |
+| `open_projects` | The open projects (`state: in-progress` and `paused` by default), grouped by state, newest update first. |
 | `open_note` | The text of a note or of one section, with its links and backlinks. A note of more than 4,000 words gives an outline: each section with its heading path, words and first sentence. |
 | `find_by_jira` | The notes that contain a ticket key, for example `ABC-123`. |
 
@@ -93,10 +94,11 @@ notes, earlier work or context:
   `list_project` on the best match (look at the top 3).
 - `search`: facts, decisions, how something was done. Filters: vault, project, area, type.
 - `open_note`: read a note or one section, with its links and backlinks. A long note gives its outline first; open the section you need by heading.
+- `open_projects`: which projects are in progress or paused.
 - `find_by_jira`: a ticket key such as `OPS-77`.
 
 The tools are deferred. Load them in one call before the first use:
-`ToolSearch` with `select:mcp__ragnarok__search,mcp__ragnarok__find_projects,mcp__ragnarok__list_project,mcp__ragnarok__open_note,mcp__ragnarok__find_by_jira`.
+`ToolSearch` with `select:mcp__ragnarok__search,mcp__ragnarok__find_projects,mcp__ragnarok__list_project,mcp__ragnarok__open_projects,mcp__ragnarok__open_note,mcp__ragnarok__find_by_jira`.
 
 If the tools are absent (for example on a computer without ragnarok), fall back to Grep and say so.
 Results can be unrelated: read the text before you rely on it, and cite note paths. Private notes are
@@ -147,7 +149,7 @@ area: home                   # a wide subject; default: from the path rules
 type: plan                   # drivers, summary, research, spec, plan, brainstorm, review, decision,
                              # guide, reference, meeting, log, template or note
 status: active               # active or archived; a note in an _archive folder, or in a project
-                             # whose SUMMARY.md has stage: DONE, is archived
+                             # whose SUMMARY.md has state: done or abandoned, is archived
 description: One sentence about the note, which improves find_projects.
 jira: [ABC-123]              # ticket keys, in addition to the keys in the text
 ---

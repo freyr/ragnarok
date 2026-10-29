@@ -178,15 +178,25 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
     def find_projects(query: str, vault: str | None = None, limit: int = 5) -> dict:
         """Find the earlier projects that a prompt continues or resembles, ranked by their matching notes.
 
-        Each project has its slug, vault, folder, description, stage, next action and matching notes.
+        Each project has its slug, vault, folder, description, stage, state, next action and matching notes.
         """
         return get().find_projects(query, vault=vault, limit=limit)
 
     @server.tool()
     @timed
     def list_project(project: str, vault: str | None = None) -> dict:
-        """All notes of a project in any folder, with type, status and description, plus its stage and next action."""
+        """All notes of a project in any folder, with type, status and description, with stage, state, next action."""
         return get().list_project(project, vault=vault)
+
+    @server.tool()
+    @timed
+    def open_projects(states: list[str] | None = None, vault: str | None = None) -> dict:
+        """The projects that are open, grouped by the state in their SUMMARY.md, newest update first.
+
+        states defaults to in-progress and paused; the other values are done and abandoned. Each project has
+        its slug, vault, folder, description, stage, state, gate, updated date and next action.
+        """
+        return get().open_projects(states=states, vault=vault)
 
     @server.tool()
     @timed

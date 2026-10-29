@@ -198,6 +198,15 @@ def test_summary_stage_done_archives_the_project(vault, stage, status):
     assert m.sources["status"] == ("summary" if status == "archived" else "path")
 
 
+@pytest.mark.parametrize(
+    "state, status",
+    [("done", "archived"), ("abandoned", "archived"), ("paused", "active"), ("in-progress", "active")],
+)
+def test_summary_state_archives_the_project(vault, state, status):
+    (vault.root / "Home/Heating/SUMMARY.md").write_text(f"---\nstage: DESIGN\nstate: {state}\n---\n# Heating\n")
+    assert meta(vault, "Home/Heating/notes/boiler.md").status == status
+
+
 def test_summary_stage_does_not_reach_notes_outside_the_project(vault):
     (vault.root / "Home/Heating/SUMMARY.md").write_text("---\nstage: DONE\n---\n# Heating\n")
     assert meta(vault, "Home/Astro/Theory/Field Stop.md").status == "active"
