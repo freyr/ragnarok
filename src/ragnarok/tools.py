@@ -19,6 +19,7 @@ PROJECT_POOL = 50  # notes that find_projects groups into projects
 DESCRIPTION_WORDS = 60
 LONG_NOTE_WORDS = 4000  # open_note gives the outline of a longer note when no outline value is given
 FIRST_WORDS = 25
+OPEN_STATES = ("in-progress", "paused")
 
 
 def _plain(value):
@@ -60,6 +61,14 @@ def _first_paragraph(body: str) -> str | None:
             words = text.split()
             return " ".join(words[:DESCRIPTION_WORDS]) + (" …" if len(words) > DESCRIPTION_WORDS else "")
     return None
+
+
+def _state(fm: dict, archived: bool) -> str:
+    """The project state; a SUMMARY.md without one is done when it is archived or its stage is DONE."""
+    state = str(fm.get("state") or "").strip().lower()
+    if state:
+        return state
+    return "done" if archived or str(fm.get("stage", "")).strip().upper() == "DONE" else "in-progress"
 
 
 @dataclass
@@ -134,6 +143,32 @@ class Tools:
             )
         results = [{**self._project_info(v, project), "notes": notes} for v, notes in by_vault.items()]
         return {"results": results, "warnings": warnings}
+
+    def open_projects(self, states: list[str] | None = None, vault: str | None = None) -> dict:
+        warnings = self.scan()
+        wanted = {st.strip().lower() for st in (states or OPEN_STATES)}
+        where, params = "(n.path LIKE '%/SUMMARY.md' OR n.path = 'SUMMARY.md')", []
+        if vault:
+            where += " AND n.vault = ?"
+            params.append(vault)
+        rows = self.conn.execute(
+            f"SELECT n.vault, n.project, n.path, n.status FROM notes n WHERE {where}{self._visible()} ORDER BY n.path",
+            params,
+        ).fetchall()
+        projects = []
+        for v, project, path, status in rows:
+            fm, _ = read_note(self.cfg.root / path)
+            state = _state(fm, status == "archived")
+            if state not in wanted:
+                continue
+            info = self._project_info(v, project)
+            projects.append({**info, "state": state, "updated": _plain(fm.get("updated")), "gate": fm.get("gate")})
+        by_state: dict[str, list[dict]] = {}
+        for p in projects:
+            by_state.setdefault(p["state"], []).append(p)
+        for group in by_state.values():
+            group.sort(key=lambda p: str(p["updated"] or ""), reverse=True)
+        return {"results": by_state, "count": len(projects), "warnings": warnings}
 
     def open_note(self, path: str, heading: str | None = None, outline: bool | None = None) -> dict:
         warnings = self.scan()
@@ -213,7 +248,15 @@ class Tools:
             folder = posixpath.commonpath([posixpath.dirname(p) for p in paths])
         else:
             folder = None
-        info = {"project": project, "vault": vault, "folder": folder, "description": None, "stage": None, "next": None}
+        info = {
+            "project": project,
+            "vault": vault,
+            "folder": folder,
+            "description": None,
+            "stage": None,
+            "state": None,
+            "next": None,
+        }
         if not folder:
             return info
         summary, drivers = f"{folder}/SUMMARY.md", f"{folder}/DRIVERS.md"
@@ -222,5 +265,6 @@ class Tools:
         description = s_fm.get("description") or d_fm.get("description") or _first_paragraph(s_body)
         info["description"] = redact(str(description))[0] if description else None
         info["stage"] = s_fm.get("stage")
+        info["state"] = s_fm.get("state")
         info["next"] = redact(str(s_fm["next"]))[0] if s_fm.get("next") else None
         return info

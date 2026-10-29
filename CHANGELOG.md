@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- A note in a project whose `SUMMARY.md` has `state: done` or `state: abandoned` is `archived`. `stage: DONE`
+  still archives a project. `find_projects` and `list_project` return the `state`.
+- The `open_projects` tool lists the projects in progress and the paused projects, grouped by state. Its
+  `states` argument selects other states, for example `abandoned`.
 - A note in a project whose `SUMMARY.md` has `stage: DONE` is `archived`. An edit to a project marker file
   derives the metadata of the notes in its project again on the next update.
 - `backfill propose` does not write a status that comes from the `SUMMARY.md` stage, so the status follows

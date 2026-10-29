@@ -60,6 +60,32 @@ def test_list_project(tools):
     assert [n["path"] for n in result[0]["notes"]] == ["Home/Heating/SUMMARY.md", "Home/Heating/notes/boiler.md"]
 
 
+def test_open_projects_groups_by_state(tools):
+    root = tools.cfg.root
+    (root / "Work/Devops/db-resize/SUMMARY.md").write_text(
+        "---\nstage: DESIGN\nstate: paused\nupdated: 2026-10-01\n---\n# S\n"
+    )
+    (root / "Home/Heating/SUMMARY.md").write_text("---\nstage: DELIVER\nstate: in-progress\n---\n# Heating\n")
+    result = tools.open_projects()
+    assert set(result["results"]) == {"in-progress", "paused"}
+    assert [p["folder"] for p in result["results"]["paused"]] == ["Work/Devops/db-resize"]
+    assert result["results"]["paused"][0]["updated"] == "2026-10-01"
+    assert [p["folder"] for p in result["results"]["in-progress"]] == ["Home/Heating"]
+
+
+def test_open_projects_filters_state_and_vault(tools):
+    root = tools.cfg.root
+    (root / "Home/Heating/SUMMARY.md").write_text("---\nstage: DELIVER\nstate: abandoned\n---\n# Heating\n")
+    assert tools.open_projects(vault="Home")["count"] == 0
+    abandoned = tools.open_projects(states=["abandoned"])["results"]["abandoned"]
+    assert [p["folder"] for p in abandoned] == ["Home/Heating"]
+
+
+def test_open_projects_reads_legacy_stage_done(tools):
+    (tools.cfg.root / "Home/Heating/SUMMARY.md").write_text("---\nstage: DONE\n---\n# Heating\n")
+    assert tools.open_projects(states=["done"], vault="Home")["count"] == 1
+
+
 def test_open_note_redacts_and_hides_private_links(tools):
     note = tools.open_note("Home/Heating/SUMMARY.md")
     assert note["frontmatter"]["stage"] == "DELIVER"
@@ -132,10 +158,10 @@ def test_each_call_scans_first(tools):
     assert tools.last_scan["changed"] == 1
 
 
-def test_server_lists_the_five_tools(tools):
+def test_server_lists_the_six_tools(tools):
     server = build(tools=tools)
     names = {t.name for t in asyncio.run(server.list_tools())}
-    assert names == {"search", "find_projects", "list_project", "open_note", "find_by_jira"}
+    assert names == {"search", "find_projects", "list_project", "open_projects", "open_note", "find_by_jira"}
 
 
 def test_server_errors_carry_their_reason(tools):

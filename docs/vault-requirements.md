@@ -36,7 +36,7 @@ prompt continues earlier work but does not name it.
    marker, the path rules (`project_depth`, `project_parents`, `project_fallback`) find the project from the
    folder level.
 8. **A `SUMMARY.md` with the state of the project.** `find_projects` and `list_project` show its
-   frontmatter keys `stage` and `next`, and its `description`. Without a `description`, they show the
+   frontmatter keys `stage`, `state` and `next`, and its `description`. Without a `description`, they show the
    `description` of `DRIVERS.md` or the first paragraph of `SUMMARY.md`. This file must have the exact name
    `SUMMARY.md`; the `project_markers` setting does not change it.
 9. **A stable project name.** Use one short name, for example `db-resize`. A note outside the project folder
@@ -63,7 +63,7 @@ prompt continues earlier work but does not name it.
     - `type`: one of `drivers`, `summary`, `research`, `spec`, `plan`, `brainstorm`, `review`, `decision`,
       `guide`, `reference`, `meeting`, `log`, `template` or `note`.
     - `status`: only `archived` changes the behavior. Each other value counts as `active`. A note in an
-      `_archive` folder, or in a project whose `SUMMARY.md` has `stage: DONE`, is also `archived`.
+      `_archive` folder, or in a project whose `SUMMARY.md` has `state: done` or `state: abandoned`, is also `archived`.
     - `jira`: ticket keys. ragnarok also finds keys in the text when their prefix is in `jira_prefixes`.
 11. **File names and folders that give the type.** When a note has no `type` key, ragnarok uses these fixed
     rules:

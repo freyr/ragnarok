@@ -218,7 +218,7 @@ def _path_rules(cfg: Config, parts: list[str], has_marker: Callable[[str], bool]
 
 
 def _summary_done(cfg: Config, folder: str) -> bool:
-    """A project is finished when the stage in its SUMMARY.md frontmatter is DONE."""
+    """A project is archived when its SUMMARY.md has state done or abandoned, or the legacy stage DONE."""
     path = cfg.root / folder / "SUMMARY.md"
     try:
         mtime = path.stat().st_mtime_ns
@@ -230,6 +230,8 @@ def _summary_done(cfg: Config, folder: str) -> bool:
 @lru_cache(maxsize=4096)
 def _stage_done(path: Path, mtime_ns: int) -> bool:
     fm, _ = read_note(path)
+    if str(fm.get("state", "")).strip().lower() in ("done", "abandoned"):
+        return True
     return str(fm.get("stage", "")).strip().upper() == "DONE"
 
 
