@@ -86,6 +86,15 @@ def test_open_projects_reads_legacy_stage_done(tools):
     assert tools.open_projects(states=["done"], vault="Home")["count"] == 1
 
 
+def test_open_projects_reports_done_and_superseded_states(tools):
+    root = tools.cfg.root
+    (root / "Home/Heating/SUMMARY.md").write_text("---\nstage: DELIVER\nstate: done\n---\n# Heating\n")
+    assert tools.open_projects(states=["done"], vault="Home")["count"] == 1
+    (root / "Home/Heating/SUMMARY.md").write_text("---\nstage: DELIVER\nstate: superseded\n---\n# Heating\n")
+    result = tools.open_projects(states=["superseded"], vault="Home")
+    assert [p["folder"] for p in result["results"]["superseded"]] == ["Home/Heating"]
+
+
 def test_open_note_redacts_and_hides_private_links(tools):
     note = tools.open_note("Home/Heating/SUMMARY.md")
     assert note["frontmatter"]["stage"] == "DELIVER"

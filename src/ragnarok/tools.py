@@ -64,7 +64,7 @@ def _first_paragraph(body: str) -> str | None:
 
 
 def _state(fm: dict, archived: bool) -> str:
-    """The project state; a SUMMARY.md without one is done when it is archived or its stage is DONE."""
+    """The state in SUMMARY.md; without one, a project is done when archived by path or its stage is DONE."""
     state = str(fm.get("state") or "").strip().lower()
     if state:
         return state

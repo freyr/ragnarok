@@ -272,7 +272,7 @@ def test_marker_rederivation_does_not_use_the_scan_limit(cfg):
     assert (result.added, result.changed, result.rederived, result.deferred) == (1, 1, 1, 0)
 
 
-def test_edited_summary_stage_changes_the_status_of_its_project_without_embedding(cfg):
+def test_edited_summary_state_changes_the_status_of_its_project_without_embedding(cfg):
     conn, emb, _ = build(cfg)
 
     def status():
@@ -280,7 +280,7 @@ def test_edited_summary_stage_changes_the_status_of_its_project_without_embeddin
 
     assert status() == "active"
     summary = cfg.root / "Home/Heating/SUMMARY.md"
-    summary.write_text("---\nstage: DONE\n---\n# Heating\n")
+    summary.write_text("---\nstate: superseded\n---\n# Heating\n")
     result = update(cfg, conn, emb)
     assert status() == "archived"
     assert result.embedded <= 1  # only the edited SUMMARY.md may need a new embedding
