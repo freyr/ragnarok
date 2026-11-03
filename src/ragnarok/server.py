@@ -193,7 +193,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
     def open_projects(states: list[str] | None = None, vault: str | None = None) -> dict:
         """The projects that are open, grouped by the state in their SUMMARY.md, newest update first.
 
-        states defaults to in-progress and paused; the other values are done and abandoned. Each project has
+        states defaults to in-progress and paused; the other values are done, superseded and abandoned. Each project has
         its slug, vault, folder, description, stage, state, gate, updated date and next action.
         """
         return get().open_projects(states=states, vault=vault)

@@ -196,7 +196,7 @@ def update(
     gone = {rel: known[rel] for rel in known.keys() - on_disk.keys()}
     gone_by_hash = {h: rel for rel, (_, _, _, h) in gone.items()}
     # a marker file that appears or disappears (a move does both) changes the project of the notes below its folder,
-    # and an edited marker file can change their status (a SUMMARY.md with stage DONE)
+    # and an edited marker file can change their status (a SUMMARY.md with state superseded)
     changed = {rel for rel in on_disk.keys() & known.keys() if known[rel][1:3] != on_disk[rel]}
     marker_dirs = tuple(
         rel.rpartition("/")[0] + "/"

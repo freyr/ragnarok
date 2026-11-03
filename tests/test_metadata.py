@@ -190,8 +190,8 @@ def test_type_aliases(vault, raw, type_):
     assert (m.type, m.sources["type"]) == (type_, "frontmatter-map")
 
 
-@pytest.mark.parametrize("stage, status", [("DONE", "archived"), ("done", "archived"), ("DELIVER", "active")])
-def test_summary_stage_done_archives_the_project(vault, stage, status):
+@pytest.mark.parametrize("stage, status", [("DONE", "active"), ("done", "active"), ("DELIVER", "active")])
+def test_summary_stage_done_does_not_archive_the_project(vault, stage, status):
     (vault.root / "Home/Heating/SUMMARY.md").write_text(f"---\nstage: {stage}\n---\n# Heating\n")
     m = meta(vault, "Home/Heating/notes/boiler.md")
     assert m.status == status
@@ -200,11 +200,23 @@ def test_summary_stage_done_archives_the_project(vault, stage, status):
 
 @pytest.mark.parametrize(
     "state, status",
-    [("done", "archived"), ("abandoned", "archived"), ("paused", "active"), ("in-progress", "active")],
+    [
+        ("done", "active"),
+        ("superseded", "archived"),
+        ("abandoned", "archived"),
+        ("paused", "active"),
+        ("in-progress", "active"),
+    ],
 )
 def test_summary_state_archives_the_project(vault, state, status):
     (vault.root / "Home/Heating/SUMMARY.md").write_text(f"---\nstage: DESIGN\nstate: {state}\n---\n# Heating\n")
     assert meta(vault, "Home/Heating/notes/boiler.md").status == status
+
+
+def test_done_project_under_archive_folder_is_archived_by_path(vault):
+    (vault.root / "Work/Devops/_archive/db-migration/SUMMARY.md").write_text("---\nstate: done\n---\n# Old\n")
+    m = meta(vault, "Work/Devops/_archive/db-migration/Q7-cost.md")
+    assert (m.status, m.sources["status"]) == ("archived", "path")
 
 
 def test_summary_stage_does_not_reach_notes_outside_the_project(vault):

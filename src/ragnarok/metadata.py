@@ -217,22 +217,20 @@ def _path_rules(cfg: Config, parts: list[str], has_marker: Callable[[str], bool]
     return area, project, archived, folder
 
 
-def _summary_done(cfg: Config, folder: str) -> bool:
-    """A project is archived when its SUMMARY.md has state done or abandoned, or the legacy stage DONE."""
+def _summary_archived(cfg: Config, folder: str) -> bool:
+    """A project is archived when its SUMMARY.md has state superseded or abandoned. State done is current."""
     path = cfg.root / folder / "SUMMARY.md"
     try:
         mtime = path.stat().st_mtime_ns
     except FileNotFoundError:
         return False
-    return _stage_done(path, mtime)
+    return _summary_state_archived(path, mtime)
 
 
 @lru_cache(maxsize=4096)
-def _stage_done(path: Path, mtime_ns: int) -> bool:
+def _summary_state_archived(path: Path, mtime_ns: int) -> bool:
     fm, _ = read_note(path)
-    if str(fm.get("state", "")).strip().lower() in ("done", "abandoned"):
-        return True
-    return str(fm.get("stage", "")).strip().upper() == "DONE"
+    return str(fm.get("state", "")).strip().lower() in ("superseded", "abandoned")
 
 
 def _type_from_path(parts: list[str]) -> str | None:
@@ -256,7 +254,7 @@ def resolve(
     fm: dict | None = None,
     body: str = "",
     has_marker: Callable[[str], bool] | None = None,
-    project_done: Callable[[str], bool] | None = None,
+    project_archived: Callable[[str], bool] | None = None,
 ) -> NoteMeta:
     """Resolve the metadata of the note at rel (relative to cfg.root)."""
     fm = fm or {}
@@ -265,10 +263,10 @@ def resolve(
         def has_marker(folder: str) -> bool:
             return any((cfg.root / folder / m).is_file() for m in cfg.project_markers)
 
-    if project_done is None:
+    if project_archived is None:
 
-        def project_done(folder: str) -> bool:
-            return _summary_done(cfg, folder)
+        def project_archived(folder: str) -> bool:
+            return _summary_archived(cfg, folder)
 
     parts = rel.split("/")
     vault = parts[0]
@@ -298,7 +296,7 @@ def resolve(
 
     if str(fm.get("status", "")).strip().lower() == "archived":
         status, sources["status"] = "archived", "frontmatter"
-    elif folder is not None and project_done(folder):
+    elif folder is not None and project_archived(folder):
         status, sources["status"] = "archived", "summary"
     else:
         status, sources["status"] = ("archived" if archived else "active"), "path"

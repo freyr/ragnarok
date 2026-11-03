@@ -149,7 +149,7 @@ area: home                   # a wide subject; default: from the path rules
 type: plan                   # drivers, summary, research, spec, plan, brainstorm, review, decision,
                              # guide, reference, meeting, log, template or note
 status: active               # active or archived; a note in an _archive folder, or in a project
-                             # whose SUMMARY.md has state: done or abandoned, is archived
+                             # whose SUMMARY.md has state: superseded or abandoned, is archived; state: done is current
 description: One sentence about the note, which improves find_projects.
 jira: [ABC-123]              # ticket keys, in addition to the keys in the text
 ---
