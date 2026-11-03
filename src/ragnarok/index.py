@@ -302,6 +302,11 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
                 result.changed += 1
         else:
             result.added += 1
+        # another writer (the scan of the MCP server before each call) can index the path after this update read
+        # its snapshot of the notes
+        other = conn.execute("SELECT id FROM notes WHERE path = ?", (p.rel,)).fetchone()
+        if other:
+            _delete_note(conn, other[0])
         cur = conn.execute(
             "INSERT INTO notes (vault, path, title, project, area, type, status, sensitivity, description,"
             " mtime_ns, size, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

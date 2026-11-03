@@ -284,3 +284,21 @@ def test_edited_summary_state_changes_the_status_of_its_project_without_embeddin
     result = update(cfg, conn, emb)
     assert status() == "archived"
     assert result.embedded <= 1  # only the edited SUMMARY.md may need a new embedding
+
+
+def test_a_note_that_another_writer_added_during_the_update_is_replaced(cfg, monkeypatch):
+    # the MCP server scans before each call, also while `ragnarok index` runs in a shell
+    conn, other = connect(cfg), connect(cfg)
+    emb = FakeEmbedder()
+    write = index._write
+
+    def other_writer_first(*args):
+        monkeypatch.setattr(index, "_write", write)
+        assert update(cfg, other, FakeEmbedder(), limit=1).added == 1
+        write(*args)
+
+    monkeypatch.setattr(index, "_write", other_writer_first)
+    result = update(cfg, conn, emb)
+    assert result.added == result.notes
+    assert count(conn, "SELECT COUNT(*) FROM notes") == result.notes
+    assert count(conn, "SELECT COUNT(*) FROM chunks") == count(conn, "SELECT COUNT(*) FROM chunks_vec") == result.chunks
