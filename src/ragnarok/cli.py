@@ -21,13 +21,18 @@ COMMANDS = {
     "init": "Set up this computer: config, Ollama, model, index and the MCP server in Claude Code",
     "doctor": "Check the six parts of the setup and print the fix for each failure",
 }
+# a second name for a command; "evaluate" avoids the shell word in tools that refuse it
+ALIASES = {"evaluate": "eval"}
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ragnarok", description="Local RAG search over Obsidian vaults.")
     parser.add_argument("--config", type=Path, help="config file (default <home>/config.toml)")
     sub = parser.add_subparsers(dest="command", required=True)
-    parsers = {name: sub.add_parser(name, help=help_text) for name, help_text in COMMANDS.items()}
+    parsers = {
+        name: sub.add_parser(name, help=help_text, aliases=[a for a, n in ALIASES.items() if n == name])
+        for name, help_text in COMMANDS.items()
+    }
     parsers["inspect"].add_argument("paths", nargs="*", help="note paths, relative to the vault root or absolute")
     sp = parsers["search"]
     sp.add_argument("query")
@@ -427,6 +432,7 @@ HANDLERS = {
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    args.command = ALIASES.get(args.command, args.command)
     handler = HANDLERS.get(args.command)
     if handler is None:
         print(f"ragnarok {args.command}: not implemented yet", file=sys.stderr)

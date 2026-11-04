@@ -17,6 +17,16 @@ def test_parser_knows_all_commands():
         assert parser.parse_args([name, *REQUIRED.get(name, [])]).command == name
 
 
+def test_evaluate_runs_the_eval_handler(monkeypatch):
+    from ragnarok import cli
+
+    seen = []
+    monkeypatch.setitem(cli.HANDLERS, "eval", lambda cfg, args: seen.append(args.kind) or 0)
+    monkeypatch.setattr(cli, "load_config", lambda path: None)
+    assert cli.main(["evaluate", "mirror-hash"]) == 0
+    assert seen == ["mirror-hash"]
+
+
 def test_parser_requires_a_command():
     with pytest.raises(SystemExit):
         build_parser().parse_args([])
