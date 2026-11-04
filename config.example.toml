@@ -97,12 +97,13 @@ note = {class = "none", one_per = "none", standard = "legacy"}
 template = {class = "none", one_per = "none", standard = "legacy"}
 
 # The closed list of relation types. An empty list of kinds allows every kind.
+# "doc" in src_kinds lets a document node be the source.
 [kb.relation_types]
-partOf = {src_kinds = ["component", "resource", "system"], dst_kinds = ["system", "domain"], inverse = "hasPart", standard = "backstage"}
-dependsOn = {src_kinds = ["component", "resource"], dst_kinds = ["component", "resource"], inverse = "dependencyOf", standard = "backstage"}
-providesApi = {src_kinds = ["component"], dst_kinds = ["api"], inverse = "apiProvidedBy", standard = "backstage"}
-consumesApi = {src_kinds = ["component"], dst_kinds = ["api"], inverse = "apiConsumedBy", standard = "backstage"}
-requests = {src_kinds = ["client"], dst_kinds = ["feature"], inverse = "requestedBy", standard = "local"}
+partOf = {src_kinds = [], dst_kinds = [], inverse = "hasPart", standard = "backstage"}
+dependsOn = {src_kinds = [], dst_kinds = [], inverse = "dependencyOf", standard = "backstage"}
+providesApi = {src_kinds = [], dst_kinds = [], inverse = "apiProvidedBy", standard = "backstage"}
+consumesApi = {src_kinds = [], dst_kinds = [], inverse = "apiConsumedBy", standard = "backstage"}
+requests = {src_kinds = ["doc", "client"], dst_kinds = ["feature"], inverse = "requestedBy", standard = "local"}
 memberOf = {src_kinds = ["person"], dst_kinds = ["group"], inverse = "hasMember", standard = "local"}
 
 # The attributes of a kind: [kb.attributes.<kind>.<name>]. There are none by default. Example with placeholder names.

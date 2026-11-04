@@ -103,11 +103,11 @@ def _doc_types() -> dict[str, DocType]:
 def _relation_types() -> dict[str, RelationType]:
     backstage = "backstage"
     return {
-        "partOf": RelationType(["component", "resource", "system"], ["system", "domain"], "hasPart", backstage),
-        "dependsOn": RelationType(["component", "resource"], ["component", "resource"], "dependencyOf", backstage),
-        "providesApi": RelationType(["component"], ["api"], "apiProvidedBy", backstage),
-        "consumesApi": RelationType(["component"], ["api"], "apiConsumedBy", backstage),
-        "requests": RelationType(["client"], ["feature"], "requestedBy"),
+        "partOf": RelationType([], [], "hasPart", backstage),
+        "dependsOn": RelationType([], [], "dependencyOf", backstage),
+        "providesApi": RelationType([], [], "apiProvidedBy", backstage),
+        "consumesApi": RelationType([], [], "apiConsumedBy", backstage),
+        "requests": RelationType(["doc", "client"], ["feature"], "requestedBy"),
         "memberOf": RelationType(["person"], ["group"], "hasMember"),
     }
 

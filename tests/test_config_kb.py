@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from ragnarok.config import Config, dump_config, load_config, rules_hash
+from ragnarok.config import Config, KbConfig, dump_config, load_config, rules_hash
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "config.example.toml"
 
@@ -153,3 +153,12 @@ def test_dump_config_round_trips_kb_tables(tmp_path):
     # the defaults round trip as well
     out.write_text(dump_config(Config(), root="vaults", data_dir="data"))
     assert load_config(out).kb == Config().kb
+
+
+def test_default_relation_kinds_admit_the_spec_examples():
+    rel = KbConfig().relation_types
+    assert rel["requests"].src_kinds == ["doc", "client"]
+    assert rel["requests"].dst_kinds == ["feature"]
+    assert rel["memberOf"].src_kinds == ["person"]
+    for name in ("partOf", "dependsOn", "providesApi", "consumesApi"):
+        assert rel[name].src_kinds == [] and rel[name].dst_kinds == []
