@@ -95,7 +95,7 @@ def index_notes(cfg: Config) -> tuple[int | None, str]:
     except IndexMismatch as e:
         return None, str(e)
     try:
-        return conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0], str(cfg.index_path)
+        return conn.execute("SELECT COUNT(*) FROM doc").fetchone()[0], str(cfg.index_path)
     finally:
         conn.close()
 

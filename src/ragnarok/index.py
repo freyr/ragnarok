@@ -1,4 +1,4 @@
-"""SQLite index: notes, chunks, FTS5, sqlite-vec, embedding cache, links and Jira keys."""
+"""SQLite index: node, doc, unit, FTS5, sqlite-vec, embedding cache, link and Jira keys."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from .embed import input_hash
 from .metadata import iter_notes, read_note, resolve
 from .splitter import chunk_note
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 GROUP = 64  # notes per transaction during an update
 SCAN_LIMIT = 20  # changed notes for each scan before a server call
 NOT_CURRENT = "The index is not current. Run `ragnarok index`."
@@ -28,8 +28,15 @@ WIKI_LINK = re.compile(r"!?\[\[([^\]|#^]+)")
 def _schema(dimension: int) -> str:
     return f"""
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS notes (
-    id INTEGER PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS node (
+    id TEXT PRIMARY KEY,
+    node_type TEXT NOT NULL,
+    collection TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    provisional INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS doc (
+    id TEXT PRIMARY KEY REFERENCES node (id) ON DELETE CASCADE,
     vault TEXT NOT NULL,
     path TEXT NOT NULL UNIQUE,
     title TEXT NOT NULL,
@@ -43,31 +50,39 @@ CREATE TABLE IF NOT EXISTS notes (
     size INTEGER NOT NULL,
     hash TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS notes_project ON notes (vault, project);
-CREATE TABLE IF NOT EXISTS chunks (
+CREATE INDEX IF NOT EXISTS doc_project ON doc (vault, project);
+CREATE TABLE IF NOT EXISTS unit (
     id INTEGER PRIMARY KEY,
-    note_id INTEGER NOT NULL REFERENCES notes (id),
+    doc_id TEXT NOT NULL,
     ord INTEGER NOT NULL,
-    heading TEXT NOT NULL,
+    heading_path TEXT NOT NULL,
     text TEXT NOT NULL,
-    text_hash TEXT NOT NULL
+    text_hash TEXT NOT NULL,
+    words INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS chunks_note ON chunks (note_id);
-CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-    heading, text, tokenize = 'porter unicode61 remove_diacritics 2'
+CREATE INDEX IF NOT EXISTS unit_doc ON unit (doc_id);
+CREATE VIRTUAL TABLE IF NOT EXISTS unit_fts USING fts5(
+    heading_path, text, tokenize = 'porter unicode61 remove_diacritics 2'
 );
-CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
-    chunk_id INTEGER PRIMARY KEY,
+CREATE VIRTUAL TABLE IF NOT EXISTS unit_vec USING vec0(
+    unit_id INTEGER PRIMARY KEY,
     embedding float[{dimension}] distance_metric=cosine,
     vault TEXT,
     sensitivity TEXT,
     status TEXT
 );
-CREATE TABLE IF NOT EXISTS links (from_note INTEGER NOT NULL, target TEXT NOT NULL, to_note INTEGER);
-CREATE INDEX IF NOT EXISTS links_from ON links (from_note);
-CREATE INDEX IF NOT EXISTS links_to ON links (to_note);
-CREATE TABLE IF NOT EXISTS jira (key TEXT NOT NULL, note_id INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS link (
+    from_doc TEXT NOT NULL REFERENCES doc (id) ON DELETE CASCADE,
+    ord INTEGER NOT NULL,
+    target_text TEXT NOT NULL,
+    to_node TEXT,
+    in_code INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (from_doc, ord)
+);
+CREATE INDEX IF NOT EXISTS link_to ON link (to_node);
+CREATE TABLE IF NOT EXISTS jira (key TEXT NOT NULL, doc_id TEXT NOT NULL REFERENCES doc (id) ON DELETE CASCADE);
 CREATE INDEX IF NOT EXISTS jira_key ON jira (key);
+CREATE INDEX IF NOT EXISTS jira_doc ON jira (doc_id);
 """
 
 
@@ -118,21 +133,23 @@ def connect(cfg: Config) -> sqlite3.Connection:
     conn.enable_load_extension(False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
-    conn.executescript(_schema(cfg.dimension))
-    attach_core(conn, cfg)
     expected = {"model": cfg.model, "dimension": str(cfg.dimension), "schema_version": str(SCHEMA_VERSION)}
+    conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     stored = dict(conn.execute("SELECT key, value FROM meta").fetchall())
-    if not stored:
-        conn.executemany(
-            "INSERT INTO meta (key, value) VALUES (?, ?)", [*expected.items(), ("rules_hash", rules_hash(cfg))]
-        )
-        conn.commit()
-    elif any(stored.get(k) != v for k, v in expected.items()):
+    # check before the DDL, so a file of another schema version gets no new tables
+    if stored and any(stored.get(k) != v for k, v in expected.items()):
         conn.close()
         raise IndexMismatch(
             f"The index at {cfg.index_path} uses {stored}, the configuration needs {expected}. "
             "Run `ragnarok index --rebuild`."
         )
+    conn.executescript(_schema(cfg.dimension))
+    attach_core(conn, cfg)
+    if not stored:
+        conn.executemany(
+            "INSERT INTO meta (key, value) VALUES (?, ?)", [*expected.items(), ("rules_hash", rules_hash(cfg))]
+        )
+        conn.commit()
     return conn
 
 
@@ -140,15 +157,33 @@ def _hash_file(data: bytes) -> str:
     return hashlib.sha1(data).hexdigest()
 
 
-def _delete_note(conn: sqlite3.Connection, note_id: int) -> None:
-    ids = [r[0] for r in conn.execute("SELECT id FROM chunks WHERE note_id = ?", (note_id,))]
-    conn.executemany("DELETE FROM chunks_vec WHERE chunk_id = ?", [(i,) for i in ids])
-    conn.executemany("DELETE FROM chunks_fts WHERE rowid = ?", [(i,) for i in ids])
-    conn.execute("DELETE FROM chunks WHERE note_id = ?", (note_id,))
-    conn.execute("DELETE FROM links WHERE from_note = ?", (note_id,))
-    conn.execute("UPDATE links SET to_note = NULL WHERE to_note = ?", (note_id,))
-    conn.execute("DELETE FROM jira WHERE note_id = ?", (note_id,))
-    conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+def provisional_id(rel: str) -> str:
+    """The ID of a note with no frontmatter `id`: `~` and the first 12 hex characters of the SHA-1 of its path."""
+    return "~" + hashlib.sha1(rel.encode()).hexdigest()[:12]
+
+
+def _frontmatter_id(fm: dict) -> str | None:
+    value = fm.get("id")
+    if isinstance(value, bool) or not isinstance(value, str | int):
+        return None
+    return str(value).strip() or None
+
+
+def _delete_note(conn: sqlite3.Connection, path: str) -> None:
+    """Delete the doc at the path, with its node, units, links and Jira keys."""
+    row = conn.execute("SELECT id FROM doc WHERE path = ?", (path,)).fetchone()
+    if row is None:
+        return
+    doc_id = row[0]
+    ids = [r[0] for r in conn.execute("SELECT id FROM unit WHERE doc_id = ?", (doc_id,))]
+    conn.executemany("DELETE FROM unit_vec WHERE unit_id = ?", [(i,) for i in ids])
+    conn.executemany("DELETE FROM unit_fts WHERE rowid = ?", [(i,) for i in ids])
+    conn.execute("DELETE FROM unit WHERE doc_id = ?", (doc_id,))
+    conn.execute("DELETE FROM link WHERE from_doc = ?", (doc_id,))
+    conn.execute("UPDATE link SET to_node = NULL WHERE to_node = ?", (doc_id,))
+    conn.execute("DELETE FROM jira WHERE doc_id = ?", (doc_id,))
+    conn.execute("DELETE FROM doc WHERE id = ?", (doc_id,))
+    conn.execute("DELETE FROM node WHERE id = ?", (doc_id,))
 
 
 @dataclass
@@ -159,10 +194,10 @@ class UpdateResult:
     moved: int = 0  # same content at a new path
     removed: int = 0
     touched: int = 0  # time or size changed, content did not
-    rederived: int = 0  # same content, new metadata or chunks after a change of the rules
+    rederived: int = 0  # same content, new metadata or units after a change of the rules
     deferred: int = 0  # changed notes left for a later update because of the limit
-    chunks: int = 0  # chunks written
-    embedded: int = 0  # chunks sent to the model
+    chunks: int = 0  # units written
+    embedded: int = 0  # units sent to the model
     redactions: int = 0
     seconds: float = 0.0
     warnings: list[str] = field(default_factory=list)
@@ -171,7 +206,8 @@ class UpdateResult:
 @dataclass
 class _Pending:
     rel: str
-    note_id: int | None
+    old_path: str | None  # the path of the doc that this note replaces
+    frontmatter_id: str | None
     mtime_ns: int
     size: int
     hash: str
@@ -182,15 +218,15 @@ class _Pending:
     rederived: bool = False
 
 
-def _same(cfg: Config, conn: sqlite3.Connection, note_id: int, m, chunks) -> bool:
-    """True when the index already holds this metadata and these chunks for the note."""
+def _same(cfg: Config, conn: sqlite3.Connection, doc_id: str, m, chunks) -> bool:
+    """True when the index already holds this metadata and these units for the note."""
     row = conn.execute(
-        "SELECT title, project, area, type, status, sensitivity, description FROM notes WHERE id = ?", (note_id,)
+        "SELECT title, project, area, type, status, sensitivity, description FROM doc WHERE id = ?", (doc_id,)
     ).fetchone()
     if row != (m.title, m.project, m.area, m.type, m.status, m.sensitivity, m.description):
         return False
-    jira = [k for (k,) in conn.execute("SELECT key FROM jira WHERE note_id = ? ORDER BY key", (note_id,))]
-    stored = [h for (h,) in conn.execute("SELECT text_hash FROM chunks WHERE note_id = ? ORDER BY ord", (note_id,))]
+    jira = [k for (k,) in conn.execute("SELECT key FROM jira WHERE doc_id = ? ORDER BY key", (doc_id,))]
+    stored = [h for (h,) in conn.execute("SELECT text_hash FROM unit WHERE doc_id = ? ORDER BY ord", (doc_id,))]
     return jira == m.jira and stored == [input_hash(cfg, c.heading, c.text) for c in chunks]
 
 
@@ -201,13 +237,13 @@ def update(
     progress: Callable[[str], None] | None = None,
     limit: int | None = None,
 ) -> UpdateResult:
-    """Bring the index in line with the vaults: add, change, move and remove notes. Embed only uncached chunks.
+    """Bring the index in line with the vaults: add, change, move and remove notes. Embed only uncached units.
 
     With a limit, rewrite at most `limit` changed notes, newest first, and warn that the index is not current.
     The other changed notes keep their old time in the index, so the next update finds them again.
 
     When the metadata rules of the configuration changed, derive the metadata of all notes again, with no limit,
-    and rewrite the notes whose metadata or chunks changed. The embedding cache keeps the unchanged chunks.
+    and rewrite the notes whose metadata or units changed. The embedding cache keeps the unchanged units.
     When the scan adds, removes or changes a project marker file, do the same for the notes under the folder of
     that file.
     """
@@ -218,8 +254,8 @@ def update(
     if rederive:
         limit = None
     known = {
-        path: (nid, mtime, size, h)
-        for nid, path, mtime, size, h in conn.execute("SELECT id, path, mtime_ns, size, hash FROM notes")
+        path: (doc_id, mtime, size, h)
+        for doc_id, path, mtime, size, h in conn.execute("SELECT id, path, mtime_ns, size, hash FROM doc")
     }
     on_disk = {}
     for rel in iter_notes(cfg):
@@ -253,7 +289,7 @@ def update(
         old = known.get(rel)
         if old and old[3] == h:
             if old[1:3] != (mtime_ns, size):
-                conn.execute("UPDATE notes SET mtime_ns = ?, size = ? WHERE id = ?", (mtime_ns, size, old[0]))
+                conn.execute("UPDATE doc SET mtime_ns = ?, size = ? WHERE id = ?", (mtime_ns, size, old[0]))
                 result.touched += 1
             if not (rederive or rel.startswith(marker_dirs)):
                 continue
@@ -263,34 +299,37 @@ def update(
             if _same(cfg, conn, old[0], meta, chunks):
                 continue
             links = sorted({m.group(1).strip() for m in WIKI_LINK.finditer(body)})
-            pending.append(_Pending(rel, old[0], mtime_ns, size, h, meta, chunks, links, rederived=True))
+            fid = _frontmatter_id(fm)
+            pending.append(_Pending(rel, rel, fid, mtime_ns, size, h, meta, chunks, links, rederived=True))
         else:
             # a re-derived note does not count toward the limit, also while it waits in pending
             written = result.added + result.changed + result.moved + sum(not p.rederived for p in pending)
             if limit is not None and written >= limit:
                 result.deferred += 1
                 continue
-            note_id = old[0] if old else None
+            old_path = rel if old else None
             moved_from = None if old else gone_by_hash.pop(h, None)
             if moved_from:
-                # a move: rewrite the old note at the new path, the metadata can change with the path
-                note_id = gone.pop(moved_from)[0]
+                # a move: rewrite the old note at the new path; the metadata and a provisional ID change with the path
+                gone.pop(moved_from)
+                old_path = moved_from
             fm, body = read_note(cfg.note_path(rel))
             meta = resolve(cfg, rel, fm, body)
             chunks, redactions = chunk_note(cfg, meta, body)
             result.redactions += redactions
             links = sorted({m.group(1).strip() for m in WIKI_LINK.finditer(body)})
-            pending.append(_Pending(rel, note_id, mtime_ns, size, h, meta, chunks, links, moved=bool(moved_from)))
+            fid = _frontmatter_id(fm)
+            pending.append(_Pending(rel, old_path, fid, mtime_ns, size, h, meta, chunks, links, moved=bool(moved_from)))
         if len(pending) >= GROUP:
             _write(cfg, conn, embedder, pending, result)
             conn.commit()
             pending = []
             if progress:
-                progress(f"{i + 1}/{len(todo)} notes, {result.embedded} chunks embedded")
+                progress(f"{i + 1}/{len(todo)} notes, {result.embedded} units embedded")
     if pending:
         _write(cfg, conn, embedder, pending, result)
-    for _, (nid, *_) in gone.items():
-        _delete_note(conn, nid)
+    for rel in gone:
+        _delete_note(conn, rel)
         result.removed += 1
     if result.added or result.changed or result.moved or result.removed or result.rederived:
         resolve_links(conn)
@@ -303,8 +342,26 @@ def update(
     return result
 
 
+def _claim_id(cfg: Config, conn: sqlite3.Connection, p: _Pending, result: UpdateResult) -> tuple[str, bool]:
+    """The ID of the note and True when it is provisional.
+
+    The frontmatter `id` is the ID. A doc that holds that ID at a path that is no longer on disk is the same note at
+    a new path, so it is deleted. A doc that holds it at a path on disk is another note with the same ID: this note
+    gets its provisional ID and the update a warning.
+    """
+    if p.frontmatter_id is None:
+        return provisional_id(p.rel), True
+    row = conn.execute("SELECT path FROM doc WHERE id = ?", (p.frontmatter_id,)).fetchone()
+    if row is not None:
+        if cfg.note_path(row[0]).exists():
+            result.warnings.append(f"{p.rel} has the id {p.frontmatter_id} of {row[0]}; it gets a provisional ID")
+            return provisional_id(p.rel), True
+        _delete_note(conn, row[0])
+    return p.frontmatter_id, False
+
+
 def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pending], result: UpdateResult) -> None:
-    # embed the chunks that are not in the cache, in one call for the group
+    # embed the units that are not in the cache, in one call for the group
     hashes = {}
     for p in pending:
         for c in p.chunks:
@@ -328,8 +385,8 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
 
     for p in pending:
         m = p.meta
-        if p.note_id is not None:
-            _delete_note(conn, p.note_id)
+        if p.old_path is not None:
+            _delete_note(conn, p.old_path)
             if p.rederived:
                 result.rederived += 1
             elif p.moved:
@@ -340,13 +397,17 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
             result.added += 1
         # another writer (the scan of the MCP server before each call) can index the path after this update read
         # its snapshot of the notes
-        other = conn.execute("SELECT id FROM notes WHERE path = ?", (p.rel,)).fetchone()
-        if other:
-            _delete_note(conn, other[0])
-        cur = conn.execute(
-            "INSERT INTO notes (vault, path, title, project, area, type, status, sensitivity, description,"
-            " mtime_ns, size, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        _delete_note(conn, p.rel)
+        doc_id, provisional = _claim_id(cfg, conn, p, result)
+        conn.execute(
+            "INSERT INTO node (id, node_type, collection, mode, provisional) VALUES (?, 'doc', ?, 'files', ?)",
+            (doc_id, m.vault, int(provisional)),
+        )
+        conn.execute(
+            "INSERT INTO doc (id, vault, path, title, project, area, type, status, sensitivity, description,"
+            " mtime_ns, size, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
+                doc_id,
                 m.vault,
                 p.rel,
                 m.title,
@@ -361,22 +422,24 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
                 p.hash,
             ),
         )
-        note_id = cur.lastrowid
         for c in p.chunks:
             th = input_hash(cfg, c.heading, c.text)
-            cid = conn.execute(
-                "INSERT INTO chunks (note_id, ord, heading, text, text_hash) VALUES (?, ?, ?, ?, ?)",
-                (note_id, c.ord, c.heading, c.text, th),
+            uid = conn.execute(
+                "INSERT INTO unit (doc_id, ord, heading_path, text, text_hash, words) VALUES (?, ?, ?, ?, ?, ?)",
+                (doc_id, c.ord, c.heading, c.text, th, len(c.text.split())),
             ).lastrowid
-            conn.execute("INSERT INTO chunks_fts (rowid, heading, text) VALUES (?, ?, ?)", (cid, c.heading, c.text))
+            conn.execute("INSERT INTO unit_fts (rowid, heading_path, text) VALUES (?, ?, ?)", (uid, c.heading, c.text))
             conn.execute(
-                "INSERT INTO chunks_vec (chunk_id, embedding, vault, sensitivity, status)"
+                "INSERT INTO unit_vec (unit_id, embedding, vault, sensitivity, status)"
                 " SELECT ?, vector, ?, ?, ? FROM core.embed_cache WHERE text_hash = ? AND length(vector) = ?",
-                (cid, m.vault, m.sensitivity, m.status, th, cfg.dimension * 4),
+                (uid, m.vault, m.sensitivity, m.status, th, cfg.dimension * 4),
             )
             result.chunks += 1
-        conn.executemany("INSERT INTO links (from_note, target) VALUES (?, ?)", [(note_id, t) for t in p.links])
-        conn.executemany("INSERT INTO jira (key, note_id) VALUES (?, ?)", [(k, note_id) for k in m.jira])
+        conn.executemany(
+            "INSERT INTO link (from_doc, ord, target_text) VALUES (?, ?, ?)",
+            [(doc_id, i, t) for i, t in enumerate(p.links)],
+        )
+        conn.executemany("INSERT INTO jira (key, doc_id) VALUES (?, ?)", [(k, doc_id) for k in m.jira])
 
 
 def _link_key(path: str) -> str:
@@ -395,29 +458,29 @@ def _common_folders(folders: list[str], path: str) -> int:
 
 
 def resolve_links(conn: sqlite3.Connection) -> None:
-    """Resolve each wiki-link target to a note.
+    """Resolve each wiki-link target to a doc node.
 
     Rank the candidates by the same vault as the note with the link, then the most folders in common with that
     note, then the shortest path.
     """
-    notes = [(nid, vault, _link_key(path)) for nid, vault, path in conn.execute("SELECT id, vault, path FROM notes")]
-    by_name: dict[str, list[tuple[int, str, str]]] = {}
-    for n in notes:
+    docs = [(doc_id, vault, _link_key(path)) for doc_id, vault, path in conn.execute("SELECT id, vault, path FROM doc")]
+    by_name: dict[str, list[tuple[str, str, str]]] = {}
+    for n in docs:
         by_name.setdefault(n[2].rsplit("/", 1)[-1], []).append(n)
-    vault_of = {nid: vault for nid, vault, _ in notes}
-    path_of = {nid: path for nid, _, path in notes}
+    vault_of = {doc_id: vault for doc_id, vault, _ in docs}
+    path_of = {doc_id: path for doc_id, _, path in docs}
     updates = []
-    for rowid, from_note, target in conn.execute("SELECT rowid, from_note, target FROM links").fetchall():
+    for from_doc, ord_, target in conn.execute("SELECT from_doc, ord, target_text FROM link").fetchall():
         key = _link_key(target).strip("/")
         candidates = [n for n in by_name.get(key.rsplit("/", 1)[-1], []) if n[2].endswith(key)]
         if not candidates:
-            to_note = None
+            to_node = None
         else:
-            home = vault_of.get(from_note)
-            folders = path_of.get(from_note, "").split("/")[:-1]
-            to_note = min(candidates, key=lambda n: (n[1] != home, -_common_folders(folders, n[2]), len(n[2])))[0]
-        updates.append((to_note, rowid))
-    conn.executemany("UPDATE links SET to_note = ? WHERE rowid = ?", updates)
+            home = vault_of.get(from_doc)
+            folders = path_of.get(from_doc, "").split("/")[:-1]
+            to_node = min(candidates, key=lambda n: (n[1] != home, -_common_folders(folders, n[2]), len(n[2])))[0]
+        updates.append((to_node, from_doc, ord_))
+    conn.executemany("UPDATE link SET to_node = ? WHERE from_doc = ? AND ord = ?", updates)
 
 
 def status(cfg: Config, conn: sqlite3.Connection) -> dict:
@@ -428,14 +491,14 @@ def status(cfg: Config, conn: sqlite3.Connection) -> dict:
         "model": one("SELECT value FROM meta WHERE key = 'model'"),
         "dimension": int(one("SELECT value FROM meta WHERE key = 'dimension'")),
         "rules_hash": (conn.execute("SELECT value FROM meta WHERE key = 'rules_hash'").fetchone() or [None])[0],
-        "notes": one("SELECT count(*) FROM notes"),
-        "private_notes": one("SELECT count(*) FROM notes WHERE sensitivity = 'private'"),
-        "archived_notes": one("SELECT count(*) FROM notes WHERE status = 'archived'"),
-        "chunks": one("SELECT count(*) FROM chunks"),
-        "vectors": one("SELECT count(*) FROM chunks_vec"),
+        "notes": one("SELECT count(*) FROM doc"),
+        "private_notes": one("SELECT count(*) FROM doc WHERE sensitivity = 'private'"),
+        "archived_notes": one("SELECT count(*) FROM doc WHERE status = 'archived'"),
+        "chunks": one("SELECT count(*) FROM unit"),
+        "vectors": one("SELECT count(*) FROM unit_vec"),
         "cache": one("SELECT count(*) FROM core.embed_cache"),
-        "links": one("SELECT count(*) FROM links"),
-        "resolved_links": one("SELECT count(*) FROM links WHERE to_note IS NOT NULL"),
+        "links": one("SELECT count(*) FROM link"),
+        "resolved_links": one("SELECT count(*) FROM link WHERE to_node IS NOT NULL"),
         "jira_keys": one("SELECT count(DISTINCT key) FROM jira"),
-        "vaults": dict(conn.execute("SELECT vault, count(*) FROM notes GROUP BY vault").fetchall()),
+        "vaults": dict(conn.execute("SELECT vault, count(*) FROM doc GROUP BY vault").fetchall()),
     }

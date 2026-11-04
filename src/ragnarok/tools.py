@@ -92,8 +92,7 @@ class Tools:
 
     def _note_row(self, path: str):
         return self.conn.execute(
-            "SELECT id, vault, title, project, area, type, status, sensitivity, description FROM notes n"
-            " WHERE path = ?",
+            "SELECT id, vault, title, project, area, type, status, sensitivity, description FROM doc n WHERE path = ?",
             (path,),
         ).fetchone()
 
@@ -132,7 +131,7 @@ class Tools:
             where += " AND n.vault = ?"
             params.append(vault)
         rows = self.conn.execute(
-            f"SELECT vault, path, title, type, status, description FROM notes n WHERE {where}{self._visible()}"
+            f"SELECT vault, path, title, type, status, description FROM doc n WHERE {where}{self._visible()}"
             " ORDER BY vault, path",
             params,
         ).fetchall()
@@ -152,7 +151,7 @@ class Tools:
             where += " AND n.vault = ?"
             params.append(vault)
         rows = self.conn.execute(
-            f"SELECT n.vault, n.project, n.path, n.status FROM notes n WHERE {where}{self._visible()} ORDER BY n.path",
+            f"SELECT n.vault, n.project, n.path, n.status FROM doc n WHERE {where}{self._visible()} ORDER BY n.path",
             params,
         ).fetchall()
         projects = []
@@ -175,7 +174,7 @@ class Tools:
         row = self._note_row(path)
         if row is None:
             raise FileNotFoundError(f"{path} is not a note in the index. Use a path from a search result.")
-        note_id, vault, title, project, area, type_, status, sensitivity, description = row
+        doc_id, vault, title, project, area, type_, status, sensitivity, description = row
         self._check_private(sensitivity, path)
         fm, body = read_note(self.cfg.note_path(path))
         secs = sections(body)
@@ -196,14 +195,14 @@ class Tools:
             content = {"text": text, "redactions": redactions}
         hide = "" if self.cfg.allow_private else " AND (n.id IS NULL OR n.sensitivity = 'normal')"
         links = self.conn.execute(
-            "SELECT l.target, n.path FROM links l LEFT JOIN notes n ON n.id = l.to_note"
-            f" WHERE l.from_note = ?{hide} ORDER BY l.target",
-            (note_id,),
+            "SELECT l.target_text, n.path FROM link l LEFT JOIN doc n ON n.id = l.to_node"
+            f" WHERE l.from_doc = ?{hide} ORDER BY l.target_text",
+            (doc_id,),
         ).fetchall()
         backlinks = self.conn.execute(
-            "SELECT DISTINCT n.path FROM links l JOIN notes n ON n.id = l.from_note"
-            f" WHERE l.to_note = ?{self._visible()} ORDER BY n.path",
-            (note_id,),
+            "SELECT DISTINCT n.path FROM link l JOIN doc n ON n.id = l.from_doc"
+            f" WHERE l.to_node = ?{self._visible()} ORDER BY n.path",
+            (doc_id,),
         ).fetchall()
         return {
             "path": path,
@@ -224,7 +223,7 @@ class Tools:
     def find_by_jira(self, key: str) -> dict:
         warnings = self.scan()
         rows = self.conn.execute(
-            "SELECT DISTINCT n.path, n.title, n.project, n.type, n.status FROM jira j JOIN notes n ON n.id = j.note_id"
+            "SELECT DISTINCT n.path, n.title, n.project, n.type, n.status FROM jira j JOIN doc n ON n.id = j.doc_id"
             f" WHERE j.key = ?{self._visible()} ORDER BY n.path",
             (key.strip().upper(),),
         ).fetchall()
@@ -235,7 +234,7 @@ class Tools:
 
     def _project_info(self, vault: str, project: str) -> dict:
         rows = self.conn.execute(
-            f"SELECT path, sensitivity FROM notes n WHERE n.vault = ? AND n.project = ?{self._visible()}",
+            f"SELECT path, sensitivity FROM doc n WHERE n.vault = ? AND n.project = ?{self._visible()}",
             (vault, project),
         ).fetchall()
         paths = [p for p, _ in rows]

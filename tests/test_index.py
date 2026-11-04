@@ -57,8 +57,8 @@ def test_changed_note_is_rewritten_and_only_new_chunks_are_embedded(cfg):
     result = update(cfg, conn, emb)
     assert (result.changed, result.embedded) == (1, 1)
     hits = conn.execute(
-        "SELECT n.path FROM chunks_fts f JOIN chunks c ON c.id = f.rowid JOIN notes n ON n.id = c.note_id"
-        " WHERE chunks_fts MATCH 'flow temperature'"
+        "SELECT n.path FROM unit_fts f JOIN unit c ON c.id = f.rowid JOIN doc n ON n.id = c.doc_id"
+        " WHERE unit_fts MATCH 'flow temperature'"
     ).fetchall()
     assert hits == [("Home/Heating/notes/boiler.md",)]
 
@@ -75,9 +75,9 @@ def test_deleted_note_is_removed_everywhere(cfg):
     (cfg.root / "Home/Astro/Theory/Field Stop.md").unlink()
     result = update(cfg, conn, emb)
     assert result.removed == 1
-    assert count(conn, "SELECT count(*) FROM notes WHERE path LIKE '%Field Stop%'") == 0
-    assert count(conn, "SELECT count(*) FROM chunks_vec") == count(conn, "SELECT count(*) FROM chunks")
-    assert count(conn, "SELECT count(*) FROM chunks_fts") == count(conn, "SELECT count(*) FROM chunks")
+    assert count(conn, "SELECT count(*) FROM doc WHERE path LIKE '%Field Stop%'") == 0
+    assert count(conn, "SELECT count(*) FROM unit_vec") == count(conn, "SELECT count(*) FROM unit")
+    assert count(conn, "SELECT count(*) FROM unit_fts") == count(conn, "SELECT count(*) FROM unit")
 
 
 def test_moved_note_needs_no_embedding(cfg):
@@ -92,7 +92,7 @@ def test_moved_note_needs_no_embedding(cfg):
 def test_sensitivity_column_for_filters(cfg):
     conn, _, _ = build(cfg)
     private = conn.execute(
-        "SELECT DISTINCT n.path FROM chunks_vec v JOIN chunks c ON c.id = v.chunk_id JOIN notes n ON n.id = c.note_id"
+        "SELECT DISTINCT n.path FROM unit_vec v JOIN unit c ON c.id = v.unit_id JOIN doc n ON n.id = c.doc_id"
         " WHERE v.sensitivity = 'private'"
     ).fetchall()
     assert {p for (p,) in private} == {
@@ -107,7 +107,7 @@ def test_vector_query_with_filter(cfg):
     conn, emb, _ = build(cfg)
     q = sqlite_vec.serialize_float32(emb.vector("anything"))
     rows = conn.execute(
-        "SELECT chunk_id, distance FROM chunks_vec WHERE embedding MATCH ? AND k = 5 AND sensitivity = 'normal'",
+        "SELECT unit_id, distance FROM unit_vec WHERE embedding MATCH ? AND k = 5 AND sensitivity = 'normal'",
         (q,),
     ).fetchall()
     assert len(rows) == 5
@@ -118,8 +118,8 @@ def test_links_and_jira(cfg):
     note.write_text("# Boiler\nSee [[SUMMARY|the summary]] and [[Field Stop]] and [[Missing]].\n")
     conn, _, _ = build(cfg)
     rows = conn.execute(
-        "SELECT l.target, n.path FROM links l JOIN notes f ON f.id = l.from_note LEFT JOIN notes n ON n.id = l.to_note"
-        " WHERE f.path = 'Home/Heating/notes/boiler.md' ORDER BY l.target"
+        "SELECT l.target_text, n.path FROM link l JOIN doc f ON f.id = l.from_doc LEFT JOIN doc n ON n.id = l.to_node"
+        " WHERE f.path = 'Home/Heating/notes/boiler.md' ORDER BY l.target_text"
     ).fetchall()
     assert rows == [
         ("Field Stop", "Home/Astro/Theory/Field Stop.md"),
@@ -142,7 +142,7 @@ FIELD_STOP = "Home/Astro/Theory/Field Stop.md"
 
 
 def note_row(conn, path):
-    return conn.execute("SELECT project, area, sensitivity FROM notes WHERE path = ?", (path,)).fetchone()
+    return conn.execute("SELECT project, area, sensitivity FROM doc WHERE path = ?", (path,)).fetchone()
 
 
 def test_new_private_pattern_makes_an_indexed_note_private_without_embedding(cfg):
@@ -155,8 +155,8 @@ def test_new_private_pattern_makes_an_indexed_note_private_without_embedding(cfg
     assert emb.calls == calls
     assert note_row(conn, FIELD_STOP)[2] == "private"
     vec = conn.execute(
-        "SELECT DISTINCT v.sensitivity FROM chunks_vec v JOIN chunks c ON c.id = v.chunk_id"
-        " JOIN notes n ON n.id = c.note_id WHERE n.path = ?",
+        "SELECT DISTINCT v.sensitivity FROM unit_vec v JOIN unit c ON c.id = v.unit_id"
+        " JOIN doc n ON n.id = c.doc_id WHERE n.path = ?",
         (FIELD_STOP,),
     ).fetchall()
     assert vec == [("private",)]
@@ -176,14 +176,14 @@ def test_changed_vault_rule_gives_new_project_and_area_without_embedding(cfg):
 
 def test_changed_area_embeds_only_the_description_chunk(cfg):
     conn, emb, _ = build(cfg)
-    chunks = count(conn, "SELECT count(*) FROM chunks")
+    chunks = count(conn, "SELECT count(*) FROM unit")
     cfg.vault_rules = {**cfg.vault_rules, "Work": dataclasses.replace(cfg.vault_rules["Work"], area="ops")}
     result = update(cfg, conn, emb)
     # only Work/Devops/db-resize/SUMMARY.md has a description; its chunk text holds the area
     assert result.embedded == 1
     assert note_row(conn, "Work/Devops/db-resize/SUMMARY.md") == ("db-resize", "ops", "normal")
-    assert count(conn, "SELECT count(*) FROM chunks") == chunks
-    assert count(conn, "SELECT count(*) FROM chunks_vec") == chunks
+    assert count(conn, "SELECT count(*) FROM unit") == chunks
+    assert count(conn, "SELECT count(*) FROM unit_vec") == chunks
 
 
 def test_new_skipped_folder_removes_its_notes(cfg):
@@ -191,8 +191,8 @@ def test_new_skipped_folder_removes_its_notes(cfg):
     cfg.skip_dirs = {*cfg.skip_dirs, "Theory"}
     result = update(cfg, conn, emb)
     assert result.removed == 1
-    assert count(conn, "SELECT count(*) FROM notes WHERE path LIKE 'Home/Astro/Theory/%'") == 0
-    assert count(conn, "SELECT count(*) FROM chunks_vec") == count(conn, "SELECT count(*) FROM chunks")
+    assert count(conn, "SELECT count(*) FROM doc WHERE path LIKE 'Home/Astro/Theory/%'") == 0
+    assert count(conn, "SELECT count(*) FROM unit_vec") == count(conn, "SELECT count(*) FROM unit")
 
 
 def test_rules_are_derived_again_only_when_they_change(cfg, monkeypatch):
@@ -200,7 +200,7 @@ def test_rules_are_derived_again_only_when_they_change(cfg, monkeypatch):
     calls = []
     real = index.resolve
     monkeypatch.setattr(index, "resolve", lambda *a, **k: calls.append(a[1]) or real(*a, **k))
-    ids = conn.execute("SELECT id, path FROM notes ORDER BY id").fetchall()
+    ids = conn.execute("SELECT rowid, path FROM doc ORDER BY rowid").fetchall()
     update(cfg, conn, emb)
     assert calls == []
     cfg.archive_folder = "_old"
@@ -209,7 +209,7 @@ def test_rules_are_derived_again_only_when_they_change(cfg, monkeypatch):
     calls.clear()
     update(cfg, conn, emb)
     assert calls == []
-    assert conn.execute("SELECT id, path FROM notes ORDER BY id").fetchall() != ids  # archived notes changed
+    assert conn.execute("SELECT rowid, path FROM doc ORDER BY rowid").fetchall() != ids  # archived notes changed
 
 
 def test_rule_change_ignores_the_scan_limit(cfg):
@@ -217,7 +217,7 @@ def test_rule_change_ignores_the_scan_limit(cfg):
     cfg.private_patterns = [*cfg.private_patterns, "Home/**"]
     result = update(cfg, conn, emb, limit=1)
     assert result.warnings == []
-    assert count(conn, "SELECT count(*) FROM notes WHERE path LIKE 'Home/%' AND sensitivity = 'normal'") == 0
+    assert count(conn, "SELECT count(*) FROM doc WHERE path LIKE 'Home/%' AND sensitivity = 'normal'") == 0
 
 
 def test_added_marker_gives_the_notes_of_its_folder_a_new_project_without_embedding(cfg):
@@ -253,8 +253,8 @@ def test_link_goes_to_the_note_in_the_nearest_folder(cfg):
     (cfg.root / FIELD_STOP).write_text("# Field Stop\nSee [[DRIVERS]].\n")
     conn, _, _ = build(cfg)
     rows = conn.execute(
-        "SELECT f.path, n.path FROM links l JOIN notes f ON f.id = l.from_note JOIN notes n ON n.id = l.to_note"
-        " WHERE l.target = 'DRIVERS' ORDER BY f.path"
+        "SELECT f.path, n.path FROM link l JOIN doc f ON f.id = l.from_doc JOIN doc n ON n.id = l.to_node"
+        " WHERE l.target_text = 'DRIVERS' ORDER BY f.path"
     ).fetchall()
     assert rows == [
         (FIELD_STOP, "Home/Astro/DRIVERS.md"),
@@ -276,7 +276,7 @@ def test_edited_summary_state_changes_the_status_of_its_project_without_embeddin
     conn, emb, _ = build(cfg)
 
     def status():
-        return conn.execute("SELECT status FROM notes WHERE path = ?", ("Home/Heating/notes/boiler.md",)).fetchone()[0]
+        return conn.execute("SELECT status FROM doc WHERE path = ?", ("Home/Heating/notes/boiler.md",)).fetchone()[0]
 
     assert status() == "active"
     summary = cfg.root / "Home/Heating/SUMMARY.md"
@@ -300,5 +300,73 @@ def test_a_note_that_another_writer_added_during_the_update_is_replaced(cfg, mon
     monkeypatch.setattr(index, "_write", other_writer_first)
     result = update(cfg, conn, emb)
     assert result.added == result.notes
-    assert count(conn, "SELECT COUNT(*) FROM notes") == result.notes
-    assert count(conn, "SELECT COUNT(*) FROM chunks") == count(conn, "SELECT COUNT(*) FROM chunks_vec") == result.chunks
+    assert count(conn, "SELECT COUNT(*) FROM doc") == result.notes
+    assert count(conn, "SELECT COUNT(*) FROM unit") == count(conn, "SELECT COUNT(*) FROM unit_vec") == result.chunks
+
+
+def test_frontmatter_id_is_kept_across_a_rewrite(cfg):
+    note = cfg.root / "Home/Heating/notes/boiler.md"
+    note.write_text("---\nid: x-1\n---\n# Boiler\nThe first text.\n")
+    conn, emb, _ = build(cfg)
+    row = lambda: conn.execute("SELECT id, provisional FROM doc JOIN node USING (id) WHERE path = ?", (BOILER,))  # noqa: E731
+    assert row().fetchone() == ("x-1", 0)
+    note.write_text("---\nid: x-1\n---\n# Boiler\nThe second text.\n")
+    assert update(cfg, conn, emb).changed == 1
+    assert row().fetchone() == ("x-1", 0)
+
+
+def test_provisional_id_is_marked(cfg):
+    conn, emb, _ = build(cfg)
+    expected = "~" + hashlib.sha1(BOILER.encode()).hexdigest()[:12]
+    row = conn.execute("SELECT id, provisional FROM doc JOIN node USING (id) WHERE path = ?", (BOILER,)).fetchone()
+    assert row == (expected, 1)
+    dst = "Home/Heating/notes/boiler-2.md"
+    (cfg.root / BOILER).rename(cfg.root / dst)
+    assert update(cfg, conn, emb).moved == 1  # a move gives a provisional ID a new value
+    new = conn.execute("SELECT id, provisional FROM doc JOIN node USING (id) WHERE path = ?", (dst,)).fetchone()
+    assert new == ("~" + hashlib.sha1(dst.encode()).hexdigest()[:12], 1)
+    assert count(conn, "SELECT count(*) FROM node") == count(conn, "SELECT count(*) FROM doc")
+
+
+def test_frontmatter_id_follows_a_note_that_is_moved_and_edited(cfg):
+    (cfg.root / BOILER).write_text("---\nid: x-1\n---\n# Boiler\nThe first text.\n")
+    conn, emb, _ = build(cfg)
+    (cfg.root / BOILER).unlink()
+    dst = "Home/Heating/boiler.md"
+    (cfg.root / dst).write_text("---\nid: x-1\n---\n# Boiler\nThe second text.\n")
+    result = update(cfg, conn, emb)
+    assert (result.added, result.removed, result.warnings) == (1, 1, [])
+    assert conn.execute("SELECT id FROM doc WHERE path = ?", (dst,)).fetchone() == ("x-1",)
+    assert count(conn, "SELECT count(*) FROM unit WHERE doc_id = 'x-1'") > 0
+
+
+def test_duplicate_frontmatter_id_gives_a_provisional_id_and_a_warning(cfg):
+    (cfg.root / BOILER).write_text("---\nid: x-1\n---\n# Boiler\n")
+    (cfg.root / FIELD_STOP).write_text("---\nid: x-1\n---\n# Field Stop\n")
+    conn, emb, result = build(cfg)
+    rows = conn.execute("SELECT provisional FROM doc JOIN node USING (id) WHERE path IN (?, ?)", (BOILER, FIELD_STOP))
+    assert sorted(p for (p,) in rows) == [0, 1]
+    assert count(conn, "SELECT count(*) FROM doc WHERE id = 'x-1'") == 1
+    assert any("x-1" in w for w in result.warnings)
+
+
+BOILER = "Home/Heating/notes/boiler.md"
+
+
+def test_version_1_file_gives_index_mismatch(cfg):
+    import sqlite3
+
+    v1 = sqlite3.connect(cfg.index_path)
+    v1.executescript(
+        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+        "CREATE TABLE jira (key TEXT NOT NULL, note_id INTEGER NOT NULL);"
+    )
+    v1.executemany(
+        "INSERT INTO meta VALUES (?, ?)", [("model", cfg.model), ("dimension", "8"), ("schema_version", "1")]
+    )
+    v1.commit()
+    v1.close()
+    with pytest.raises(IndexMismatch):
+        connect(cfg)
+    tables = sqlite3.connect(cfg.index_path).execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    assert sorted(tables) == [("jira",), ("meta",)]

@@ -236,7 +236,7 @@ def test_server_reads_a_changed_config_file(served):
 )
 def test_server_keeps_its_config_when_the_new_file_is_not_usable(served, text):
     server, config_file, cfg = served
-    count = lambda: connect(cfg).execute("SELECT count(*), sum(sensitivity = 'private') FROM notes").fetchone()  # noqa: E731
+    count = lambda: connect(cfg).execute("SELECT count(*), sum(sensitivity = 'private') FROM doc").fetchone()  # noqa: E731
     before = count()
     write_config(config_file, text)
     asyncio.run(server.call_tool("open_note", FIELD_STOP))
@@ -284,7 +284,7 @@ def test_server_stays_stopped_while_the_config_file_is_not_usable(served):
     from mcp.server.mcpserver.exceptions import ToolError
 
     server, config_file, cfg = served
-    notes = lambda: connect(cfg).execute("SELECT count(*) FROM notes").fetchone()[0]  # noqa: E731
+    notes = lambda: connect(cfg).execute("SELECT count(*) FROM doc").fetchone()[0]  # noqa: E731
     before = notes()
     new = dataclasses.replace(cfg, dimension=16)
     write_config(config_file, dump_config(new, root=cfg.root, index_path=cfg.index_path))

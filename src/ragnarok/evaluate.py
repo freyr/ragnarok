@@ -158,7 +158,7 @@ def report_hard(results: list[dict]) -> list[str]:
 
 def mechanical(cfg, conn, embedder, sets_dir: Path, out_dir: Path | None = None) -> list[str]:
     grep = Grep(cfg)
-    known = {p for (p,) in conn.execute("SELECT path FROM notes WHERE sensitivity = 'normal'")}
+    known = {p for (p,) in conn.execute("SELECT path FROM doc WHERE sensitivity = 'normal'")}
     lines: list[str] = []
     all_results = {}
     for path in sorted(sets_dir.glob("*.json")):

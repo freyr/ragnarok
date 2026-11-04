@@ -51,11 +51,11 @@ def test_move_into_a_sensitive_folder_makes_the_note_private(built):
     (cfg.root / "Home/Astro/Theory/Field Stop.md").rename(dst)
     result = update(cfg, conn, emb)
     assert result.moved == 1
-    row = conn.execute("SELECT sensitivity FROM notes WHERE path = 'Home/Budget/Field Stop.md'").fetchone()
+    row = conn.execute("SELECT sensitivity FROM doc WHERE path = 'Home/Budget/Field Stop.md'").fetchone()
     assert row == ("private",)
     vec = conn.execute(
-        "SELECT DISTINCT v.sensitivity FROM chunks_vec v JOIN chunks c ON c.id = v.chunk_id"
-        " JOIN notes n ON n.id = c.note_id WHERE n.path = 'Home/Budget/Field Stop.md'"
+        "SELECT DISTINCT v.sensitivity FROM unit_vec v JOIN unit c ON c.id = v.unit_id"
+        " JOIN doc n ON n.id = c.doc_id WHERE n.path = 'Home/Budget/Field Stop.md'"
     ).fetchall()
     assert vec == [("private",)]
 
@@ -80,7 +80,7 @@ def test_more_than_the_limit_gives_the_warning_and_the_next_scan_continues(built
     first = update(cfg, conn, emb, limit=SCAN_LIMIT)
     assert (first.added, first.deferred, first.warnings) == (20, 10, [NOT_CURRENT])
     newest = conn.execute(
-        "SELECT count(*) FROM notes WHERE path BETWEEN 'Home/Many/note-10.md' AND 'Home/Many/note-29.md'"
+        "SELECT count(*) FROM doc WHERE path BETWEEN 'Home/Many/note-10.md' AND 'Home/Many/note-29.md'"
     ).fetchone()
     assert newest == (20,)
     second = update(cfg, conn, emb, limit=SCAN_LIMIT)
