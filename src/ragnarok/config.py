@@ -46,6 +46,113 @@ class VaultRules:
     jira_prefixes: list[str] = field(default_factory=list)
 
 
+def _kinds() -> dict[str, str]:
+    """The kind and its standard: the Backstage kinds, then the local kinds."""
+    backstage = ["domain", "system", "component", "resource", "api", "group", "person"]
+    local = ["client", "environment", "vendor", "feature", "process"]
+    return {**dict.fromkeys(backstage, "backstage"), **dict.fromkeys(local, "local")}
+
+
+@dataclass
+class DocType:
+    """A closed document type. class_ is `state`, `record` or `none`; one_per is the identity key."""
+
+    class_: str
+    one_per: str
+    required_sections: list[str] = field(default_factory=list)
+    review_months: int | None = None
+    standard: str = "local"
+
+
+@dataclass
+class RelationType:
+    """A closed relation type. An empty list of kinds allows every kind."""
+
+    src_kinds: list[str] = field(default_factory=list)
+    dst_kinds: list[str] = field(default_factory=list)
+    inverse: str = ""
+    standard: str = "local"
+
+
+@dataclass
+class AttributeDef:
+    """An attribute of an entity kind. A live attribute holds no value: it names its system of record and skill."""
+
+    value_type: str = "string"
+    live: bool = False
+    system: str = ""
+    skill: str = ""
+    scoped: bool = False
+
+
+def _doc_types() -> dict[str, DocType]:
+    types = {}
+    for names, class_, one_per, standard in (
+        (["how-to", "tutorial", "reference", "explanation"], "state", "subject+task", "Diataxis"),
+        (["entity"], "state", "entity", "Backstage entity descriptor"),
+        (["drivers", "summary", "spec", "plan"], "state", "project", "local"),
+        (["decision"], "record", "none", "MADR"),
+        (["incident"], "record", "none", "KCS"),
+        (["research", "measurement", "meeting", "review", "brainstorm", "log"], "record", "none", "local"),
+        (["guide", "note", "template"], "none", "none", "legacy"),
+    ):
+        types.update({name: DocType(class_, one_per, standard=standard) for name in names})
+    return types
+
+
+def _relation_types() -> dict[str, RelationType]:
+    backstage = "backstage"
+    return {
+        "partOf": RelationType(["component", "resource", "system"], ["system", "domain"], "hasPart", backstage),
+        "dependsOn": RelationType(["component", "resource"], ["component", "resource"], "dependencyOf", backstage),
+        "providesApi": RelationType(["component"], ["api"], "apiProvidedBy", backstage),
+        "consumesApi": RelationType(["component"], ["api"], "apiConsumedBy", backstage),
+        "requests": RelationType(["client"], ["feature"], "requestedBy"),
+        "memberOf": RelationType(["person"], ["group"], "hasMember"),
+    }
+
+
+@dataclass
+class AuthorityConfig:
+    """The factors that multiply the RRF score of a document in the rank stage."""
+
+    canonical: float = 1.5  # the canonical document of a subject in the query
+    review_overdue: float = 0.8  # a state document with review_by in the past
+    archived: float = 0.5
+    superseded: float = 0.5  # a record with superseded_by
+    duplicate_identity: float = 0.5  # the second document of one identity key
+
+
+@dataclass
+class KbConfig:
+    """The closed vocabularies of the knowledge base and the read-path limit."""
+
+    # at or below this count of eligible units the search scans exactly
+    exact_limit: int = 25000
+    kinds: dict[str, str] = field(default_factory=_kinds)  # kind -> standard
+    doc_types: dict[str, DocType] = field(default_factory=_doc_types)
+    relation_types: dict[str, RelationType] = field(default_factory=_relation_types)
+    attributes: dict[str, dict[str, AttributeDef]] = field(default_factory=dict)  # kind -> name -> definition
+    authority: AuthorityConfig = field(default_factory=AuthorityConfig)
+
+
+@dataclass
+class TraceConfig:
+    retention_days: int = 90
+
+
+@dataclass
+class W0Config:
+    """The admission evaluator."""
+
+    summary_chars: int = 2000
+    private_paths: list[str] = field(default_factory=list)
+    # a false reject costs this many false admits; the threshold is 1 / (1 + cost_ratio)
+    cost_ratio: float = 10
+    # the uncertain band of the score; the judge sees a step inside it
+    band: list[float] = field(default_factory=lambda: [0.03, 0.30])
+
+
 @dataclass
 class Config:
     root: Path = field(default_factory=lambda: Path("~/Documents/Vaults").expanduser())
@@ -64,6 +171,9 @@ class Config:
     vault_rules: dict[str, VaultRules] = field(default_factory=dict)
     # notes the evaluation ignores, for example the notes that quote the evaluation questions
     eval_exclude: list[str] = field(default_factory=list)
+    kb: KbConfig = field(default_factory=KbConfig)
+    trace: TraceConfig = field(default_factory=TraceConfig)
+    w0: W0Config = field(default_factory=W0Config)
     ollama_url: str = "http://127.0.0.1:11434"
     model: str = "embeddinggemma-2:270m"
     query_prefix: str = "task: search result | query: "
@@ -102,6 +212,15 @@ class Config:
 RULE_KEYS = ("root", "vaults", "skip_dirs", "private_patterns", "project_markers", "archive_folder", "jira_prefixes")
 
 
+def _vocabularies(kb: KbConfig) -> dict:
+    return {
+        "kinds": kb.kinds,
+        "doc_types": {name: asdict(t) for name, t in kb.doc_types.items()},
+        "relation_types": {name: asdict(t) for name, t in kb.relation_types.items()},
+        "attributes": {k: {n: asdict(a) for n, a in attrs.items()} for k, attrs in kb.attributes.items()},
+    }
+
+
 def rules_hash(cfg: Config) -> str:
     """A stable hash of the configuration values that give the metadata of the notes."""
     values = {key: getattr(cfg, key) for key in RULE_KEYS}
@@ -110,11 +229,33 @@ def rules_hash(cfg: Config) -> str:
     values["vault_rules"] = {vault: asdict(rules) for vault, rules in sorted(cfg.vault_rules.items())}
     if cfg.vault_paths:  # only when set, so that an index made before vault_paths keeps its hash
         values["vault_paths"] = {vault: str(path) for vault, path in sorted(cfg.vault_paths.items())}
+    vocabularies = _vocabularies(cfg.kb)
+    if vocabularies != _vocabularies(KbConfig()):  # only when changed, so that the default keeps its hash
+        values["kb"] = vocabularies
     return hashlib.sha1(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
 
 def config_path() -> Path:
     return home_dir() / "config.toml"
+
+
+def _load_kb(table: dict) -> KbConfig:
+    """The [kb] table. A list table (kinds, doc_types, relation_types, attributes) replaces its default."""
+    values = {}
+    for key, value in table.items():
+        if key == "doc_types":
+            value = {
+                name: DocType(**{("class_" if k == "class" else k): v for k, v in t.items()})
+                for name, t in value.items()
+            }
+        elif key == "relation_types":
+            value = {name: RelationType(**t) for name, t in value.items()}
+        elif key == "attributes":
+            value = {kind: {name: AttributeDef(**a) for name, a in attrs.items()} for kind, attrs in value.items()}
+        elif key == "authority":
+            value = AuthorityConfig(**value)
+        values[key] = value
+    return KbConfig(**values)
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -133,6 +274,12 @@ def load_config(path: Path | None = None) -> Config:
             value = {vault: path.parent / Path(folder).expanduser() for vault, folder in value.items()}
         elif key == "vault_rules":
             value = {vault: VaultRules(**rules) for vault, rules in value.items()}
+        elif key == "kb":
+            value = _load_kb(value)
+        elif key == "trace":
+            value = TraceConfig(**value)
+        elif key == "w0":
+            value = W0Config(**value)
         values[key] = value
     return Config(**values)
 
@@ -142,7 +289,7 @@ def dump_config(cfg: Config, **paths: Path | str) -> str:
     lines = [f"{key} = {json.dumps(str(value))}" for key, value in paths.items()]
     for f in fields(Config):
         value = getattr(cfg, f.name)
-        if f.name in PATH_KEYS or f.name in ("vault_paths", "vault_rules") or f.name in paths:
+        if f.name in PATH_KEYS or f.name in ("vault_paths", "vault_rules", "kb", "trace", "w0") or f.name in paths:
             continue
         lines.append(f"{f.name} = {json.dumps(sorted(value) if isinstance(value, set) else value)}")
     if cfg.vault_paths:
@@ -151,4 +298,28 @@ def dump_config(cfg: Config, **paths: Path | str) -> str:
     for vault, rules in cfg.vault_rules.items():
         lines.append(f"\n[vault_rules.{json.dumps(vault)}]")
         lines += [f"{key} = {json.dumps(value)}" for key, value in asdict(rules).items()]
+    lines += _dump_kb(cfg.kb)
+    for name, table in (("trace", cfg.trace), ("w0", cfg.w0)):
+        lines.append(f"\n[{name}]")
+        lines += [f"{key} = {json.dumps(value)}" for key, value in asdict(table).items()]
     return "\n".join(lines) + "\n"
+
+
+def _dump_kb(kb: KbConfig) -> list[str]:
+    lines = ["\n[kb]", f"exact_limit = {kb.exact_limit}", "\n[kb.kinds]"]
+    lines += [f"{json.dumps(kind)} = {json.dumps(standard)}" for kind, standard in kb.kinds.items()]
+    for name, doc_type in kb.doc_types.items():
+        lines.append(f"\n[kb.doc_types.{json.dumps(name)}]")
+        lines += [
+            f"{'class' if k == 'class_' else k} = {json.dumps(v)}" for k, v in asdict(doc_type).items() if v is not None
+        ]
+    for name, relation in kb.relation_types.items():
+        lines.append(f"\n[kb.relation_types.{json.dumps(name)}]")
+        lines += [f"{k} = {json.dumps(v)}" for k, v in asdict(relation).items()]
+    for kind, attributes in kb.attributes.items():
+        for name, attribute in attributes.items():
+            lines.append(f"\n[kb.attributes.{json.dumps(kind)}.{json.dumps(name)}]")
+            lines += [f"{k} = {json.dumps(v)}" for k, v in asdict(attribute).items()]
+    lines.append("\n[kb.authority]")
+    lines += [f"{k} = {json.dumps(v)}" for k, v in asdict(kb.authority).items()]
+    return lines

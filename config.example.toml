@@ -50,3 +50,90 @@ eval_exclude = []
 # project_parents = []       # folder paths whose child folders are projects, for example "Clients/Projects"
 # ignore_folders = []        # first-level folders that give no area and no project, for example "docs"
 # jira_prefixes = []         # ticket prefixes found only in this vault
+
+# The knowledge base. A list table (kinds, doc_types, relation_types, attributes) replaces its default list.
+# An unknown key fails. The values below are the defaults.
+[kb]
+# At or below this count of eligible units the search scans all vectors exactly.
+exact_limit = 25000
+
+# The closed list of entity kinds, each with its standard.
+[kb.kinds]
+domain = "backstage"
+system = "backstage"
+component = "backstage"
+resource = "backstage"
+api = "backstage"
+group = "backstage"
+person = "backstage"
+client = "local"
+environment = "local"
+vendor = "local"
+feature = "local"
+process = "local"
+
+# The closed list of document types. class: state, record or none. one_per: subject+task, subject, entity, project
+# or none. Optional: required_sections (list), review_months (number), standard.
+[kb.doc_types]
+how-to = {class = "state", one_per = "subject+task", standard = "Diataxis"}
+tutorial = {class = "state", one_per = "subject+task", standard = "Diataxis"}
+reference = {class = "state", one_per = "subject+task", standard = "Diataxis"}
+explanation = {class = "state", one_per = "subject+task", standard = "Diataxis"}
+entity = {class = "state", one_per = "entity", standard = "Backstage entity descriptor"}
+drivers = {class = "state", one_per = "project", standard = "local"}
+summary = {class = "state", one_per = "project", standard = "local"}
+spec = {class = "state", one_per = "project", standard = "local"}
+plan = {class = "state", one_per = "project", standard = "local"}
+decision = {class = "record", one_per = "none", standard = "MADR"}
+incident = {class = "record", one_per = "none", standard = "KCS"}
+research = {class = "record", one_per = "none", standard = "local"}
+measurement = {class = "record", one_per = "none", standard = "local"}
+meeting = {class = "record", one_per = "none", standard = "local"}
+review = {class = "record", one_per = "none", standard = "local"}
+brainstorm = {class = "record", one_per = "none", standard = "local"}
+log = {class = "record", one_per = "none", standard = "local"}
+guide = {class = "none", one_per = "none", standard = "legacy"}
+note = {class = "none", one_per = "none", standard = "legacy"}
+template = {class = "none", one_per = "none", standard = "legacy"}
+
+# The closed list of relation types. An empty list of kinds allows every kind.
+[kb.relation_types]
+partOf = {src_kinds = ["component", "resource", "system"], dst_kinds = ["system", "domain"], inverse = "hasPart", standard = "backstage"}
+dependsOn = {src_kinds = ["component", "resource"], dst_kinds = ["component", "resource"], inverse = "dependencyOf", standard = "backstage"}
+providesApi = {src_kinds = ["component"], dst_kinds = ["api"], inverse = "apiProvidedBy", standard = "backstage"}
+consumesApi = {src_kinds = ["component"], dst_kinds = ["api"], inverse = "apiConsumedBy", standard = "backstage"}
+requests = {src_kinds = ["client"], dst_kinds = ["feature"], inverse = "requestedBy", standard = "local"}
+memberOf = {src_kinds = ["person"], dst_kinds = ["group"], inverse = "hasMember", standard = "local"}
+
+# The attributes of a kind: [kb.attributes.<kind>.<name>]. There are none by default. Example with placeholder names.
+# value_type is a free label. A live attribute holds no value: it names the system of record and the skill.
+#
+# [kb.attributes.environment.region]
+# value_type = "string"
+# live = false
+# scoped = false
+#
+# [kb.attributes.environment.monthly_cost]
+# value_type = "number"
+# live = true
+# system = "billing-system"
+# skill = "billing-read"
+
+# The factors that multiply the RRF score of a document in the rank stage.
+[kb.authority]
+canonical = 1.5           # the canonical document of a subject in the query
+review_overdue = 0.8      # a state document with review_by in the past
+archived = 0.5
+superseded = 0.5          # a record with superseded_by
+duplicate_identity = 0.5  # the second document of one identity key
+
+# Each call appends a trace line; files older than retention_days are removed.
+[trace]
+retention_days = 90
+
+# The admission evaluator.
+[w0]
+summary_chars = 2000      # the length of the summary of a candidate that the evaluator sees
+private_paths = []        # path prefixes that the evaluator never reads, for example ["Notes/Journal"]
+cost_ratio = 10           # a false reject costs this many false admits
+band = [0.03, 0.30]       # the uncertain band of the score
