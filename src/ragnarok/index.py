@@ -189,7 +189,7 @@ def update(
     }
     on_disk = {}
     for rel in iter_notes(cfg):
-        st = (cfg.root / rel).stat()
+        st = cfg.note_path(rel).stat()
         on_disk[rel] = (st.st_mtime_ns, st.st_size)
     result.notes = len(on_disk)
 
@@ -214,7 +214,7 @@ def update(
     pending: list[_Pending] = []
     for i, rel in enumerate(todo):
         mtime_ns, size = on_disk[rel]
-        data = (cfg.root / rel).read_bytes()
+        data = cfg.note_path(rel).read_bytes()
         h = _hash_file(data)
         old = known.get(rel)
         if old and old[3] == h:
@@ -223,7 +223,7 @@ def update(
                 result.touched += 1
             if not (rederive or rel.startswith(marker_dirs)):
                 continue
-            fm, body = read_note(cfg.root / rel)
+            fm, body = read_note(cfg.note_path(rel))
             meta = resolve(cfg, rel, fm, body)
             chunks, _ = chunk_note(cfg, meta, body)
             if _same(cfg, conn, old[0], meta, chunks):
@@ -241,7 +241,7 @@ def update(
             if moved_from:
                 # a move: rewrite the old note at the new path, the metadata can change with the path
                 note_id = gone.pop(moved_from)[0]
-            fm, body = read_note(cfg.root / rel)
+            fm, body = read_note(cfg.note_path(rel))
             meta = resolve(cfg, rel, fm, body)
             chunks, redactions = chunk_note(cfg, meta, body)
             result.redactions += redactions

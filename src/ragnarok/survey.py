@@ -38,7 +38,7 @@ def _folders(counter: Counter, top: int) -> dict:
 
 
 def survey(cfg: Config, vault: str, top: int = 30) -> dict:
-    """The facts of the folder `vault` under cfg.root. The folder need not be in cfg.vaults."""
+    """The facts of the vault folder `vault`. The folder need not be in cfg.vaults."""
     notes = 0
     with_frontmatter = 0
     malformed: list[str] = []
@@ -81,7 +81,7 @@ def survey(cfg: Config, vault: str, top: int = 30) -> dict:
         if not private:
             folders_of_name[name].add("/".join(folders))
 
-        text = (cfg.root / rel).read_text(errors="replace")
+        text = cfg.note_path(rel).read_text(errors="replace")
         try:
             metadata = dict(frontmatter.loads(text).metadata)
         except Exception:

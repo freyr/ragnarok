@@ -68,9 +68,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _relative(cfg, raw: str) -> str:
     path = Path(raw).expanduser()
-    if path.is_absolute():
-        return path.resolve().relative_to(cfg.root.resolve()).as_posix()
-    return path.as_posix()
+    if not path.is_absolute():
+        return path.as_posix()
+    path = path.resolve()
+    for vault in cfg.vaults:
+        if path.is_relative_to(base := cfg.vault_dir(vault).resolve()):
+            return f"{vault}/{path.relative_to(base).as_posix()}"
+    return path.relative_to(cfg.root.resolve()).as_posix()
 
 
 def cmd_inspect(cfg, args) -> int:
@@ -79,7 +83,7 @@ def cmd_inspect(cfg, args) -> int:
     code = 0
     for raw in args.paths:
         rel = _relative(cfg, raw)
-        if not (cfg.root / rel).is_file():
+        if not cfg.note_path(rel).is_file():
             print(f"not a note: {rel}", file=sys.stderr)
             code = 1
             continue
@@ -335,8 +339,8 @@ def _merge(cfg, args) -> int:
 def cmd_survey(cfg, args) -> int:
     from .survey import format_text, survey
 
-    if not (cfg.root / args.vault).is_dir():
-        print(f"Unknown vault folder {args.vault} under {cfg.root}.", file=sys.stderr)
+    if not cfg.vault_dir(args.vault).is_dir():
+        print(f"Unknown vault folder {cfg.vault_dir(args.vault)}.", file=sys.stderr)
         return 1
     facts = survey(cfg, args.vault, args.top)
     print(json.dumps(facts, ensure_ascii=False, indent=2) if args.json else format_text(facts))

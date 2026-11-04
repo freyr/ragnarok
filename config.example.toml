@@ -31,7 +31,13 @@ jira_prefixes = []
 # Example: eval_exclude = ["Notes/Meta/search-eval"]
 eval_exclude = []
 
-# Put every key above this line: a key below a [vault_rules.<vault>] header belongs to that table.
+# Put every key above this line: a key below a [vault_paths] or [vault_rules.<vault>] header belongs to that table.
+
+# The folder of a vault that is not in root. A vault with no entry is the folder root/<vault>.
+# The vault name stays the first part of the note paths, for example "kb/Runbooks/failover.md".
+#
+# [vault_paths]
+# kb = "~/code/kb"
 
 # Path rules of one vault, for notes without a project or area in their frontmatter.
 # Without a table, a vault uses these defaults:

@@ -104,10 +104,8 @@ def doctor(cfg: Config, config_file: Path, home: Path) -> list[Check]:
     checks = []
     if not config_file.exists():
         checks.append(Check("config", False, f"no {config_file}", "ragnarok init"))
-    elif missing := [v for v in cfg.vaults if not (cfg.root / v).is_dir()]:
-        checks.append(
-            Check("config", False, f"no vault folder {', '.join(missing)} in {cfg.root}", f"edit {config_file}")
-        )
+    elif missing := [str(cfg.vault_dir(v)) for v in cfg.vaults if not cfg.vault_dir(v).is_dir()]:
+        checks.append(Check("config", False, f"no vault folder {', '.join(missing)}", f"edit {config_file}"))
     else:
         checks.append(Check("config", True, f"{config_file}, root {cfg.root}, vaults {', '.join(cfg.vaults)}"))
 

@@ -28,6 +28,18 @@ def test_write_config_lists_the_vault_folders(home, tmp_path):
     assert (cfg.root, cfg.vaults, cfg.index_path) == (tmp_path / "vaults", vaults, home / "data/index.db")
 
 
+def test_doctor_names_a_missing_vault_folder(home, tmp_path, monkeypatch):
+    fake_setup(monkeypatch, None, None)
+    (tmp_path / "ops-kb").mkdir()
+    config = home / "config.toml"
+    config.write_text(
+        f'root = "{tmp_path / "vaults"}"\nvaults = ["Home", "Ops", "Gone"]\n\n[vault_paths]\n'
+        f'Ops = "{tmp_path / "ops-kb"}"\nGone = "{tmp_path / "gone"}"\n'
+    )
+    check = bootstrap.doctor(load_config(config), config, home)[0]
+    assert (check.ok, check.detail) == (False, f"no vault folder {tmp_path / 'gone'}")
+
+
 def fake_setup(monkeypatch, models, command, binaries=("ollama", "claude"), service=True):
     monkeypatch.setattr(bootstrap, "brew_service_running", lambda: service)
     monkeypatch.setattr(bootstrap, "ollama_models", lambda cfg: models)

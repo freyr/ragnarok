@@ -38,7 +38,7 @@ class Grep:
 
     def __init__(self, cfg):
         self.texts = {
-            rel: (cfg.root / rel).read_text(errors="ignore").lower()
+            rel: cfg.note_path(rel).read_text(errors="ignore").lower()
             for rel in iter_notes(cfg)
             if not is_private(cfg, rel)
         }

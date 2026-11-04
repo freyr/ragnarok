@@ -110,9 +110,9 @@ class NoteMeta:
 
 
 def iter_notes(cfg: Config) -> Iterator[str]:
-    """Yield the paths (relative to cfg.root) of all Markdown notes of the configured vaults."""
+    """Yield the keys (`<vault>/<path in the vault>`) of all Markdown notes of the configured vaults."""
     for vault in cfg.vaults:
-        base = cfg.root / vault
+        base = cfg.vault_dir(vault)
         if not base.is_dir():
             continue
         stack = [base]
@@ -123,7 +123,7 @@ def iter_notes(cfg: Config) -> Iterator[str]:
                     if not cfg.skip_dir(entry.name):
                         stack.append(entry)
                 elif entry.suffix == ".md":
-                    yield entry.relative_to(cfg.root).as_posix()
+                    yield f"{vault}/{entry.relative_to(base).as_posix()}"
 
 
 def is_private(cfg: Config, rel: str) -> bool:
@@ -219,7 +219,7 @@ def _path_rules(cfg: Config, parts: list[str], has_marker: Callable[[str], bool]
 
 def _summary_archived(cfg: Config, folder: str) -> bool:
     """A project is archived when its SUMMARY.md has state superseded or abandoned. State done is current."""
-    path = cfg.root / folder / "SUMMARY.md"
+    path = cfg.note_path(folder) / "SUMMARY.md"
     try:
         mtime = path.stat().st_mtime_ns
     except FileNotFoundError:
@@ -256,12 +256,12 @@ def resolve(
     has_marker: Callable[[str], bool] | None = None,
     project_archived: Callable[[str], bool] | None = None,
 ) -> NoteMeta:
-    """Resolve the metadata of the note at rel (relative to cfg.root)."""
+    """Resolve the metadata of the note with the key rel."""
     fm = fm or {}
     if has_marker is None:
 
         def has_marker(folder: str) -> bool:
-            return any((cfg.root / folder / m).is_file() for m in cfg.project_markers)
+            return any((cfg.note_path(folder) / m).is_file() for m in cfg.project_markers)
 
     if project_archived is None:
 
@@ -324,5 +324,5 @@ def resolve(
 
 
 def resolve_file(cfg: Config, rel: str) -> NoteMeta:
-    fm, body = read_note(cfg.root / rel)
+    fm, body = read_note(cfg.note_path(rel))
     return resolve(cfg, rel, fm, body)
