@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from ragnarok.config import Config, home_dir, load_config
@@ -145,6 +147,13 @@ def test_vault_paths_give_the_folder_of_a_vault(tmp_path, monkeypatch):
     ]
     assert cfg.note_path("B/x/y.md") == tmp_path / "user/code/b/x/y.md"
     assert cfg.note_path("A/y.md") == tmp_path / "vaults/A/y.md"
+
+
+def test_a_config_without_vault_paths_keeps_its_rules_hash():
+    from ragnarok.config import rules_hash
+
+    # the hash of 2d18ddf, before vault_paths: an existing index must not re-derive
+    assert rules_hash(Config(root=Path("/vaults"), vaults=["Notes"])) == "d0b71fa70ee3f689f3d3bcdcea69ec1612e3c144"
 
 
 def test_the_default_home_is_the_repo_checkout(monkeypatch):
