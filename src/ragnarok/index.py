@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS doc (
     description TEXT,
     mtime_ns INTEGER NOT NULL,
     size INTEGER NOT NULL,
-    hash TEXT NOT NULL
+    hash TEXT NOT NULL,
+    declared_id TEXT
 );
 CREATE INDEX IF NOT EXISTS doc_project ON doc (vault, project);
 CREATE TABLE IF NOT EXISTS unit (
@@ -282,6 +283,7 @@ def update(
         key=lambda rel: (-on_disk[rel][0], rel),
     )
     pending: list[_Pending] = []
+    contested: list[str] = []  # notes whose frontmatter id another doc held when they were written
     for i, rel in enumerate(todo):
         mtime_ns, size = on_disk[rel]
         data = cfg.note_path(rel).read_bytes()
@@ -321,17 +323,19 @@ def update(
             fid = _frontmatter_id(fm)
             pending.append(_Pending(rel, old_path, fid, mtime_ns, size, h, meta, chunks, links, moved=bool(moved_from)))
         if len(pending) >= GROUP:
-            _write(cfg, conn, embedder, pending, result)
+            _write(cfg, conn, embedder, pending, result, on_disk.keys(), contested)
             conn.commit()
             pending = []
             if progress:
                 progress(f"{i + 1}/{len(todo)} notes, {result.embedded} units embedded")
     if pending:
-        _write(cfg, conn, embedder, pending, result)
+        _write(cfg, conn, embedder, pending, result, on_disk.keys(), contested)
     for rel in gone:
         _delete_note(conn, rel)
         result.removed += 1
-    if result.added or result.changed or result.moved or result.removed or result.rederived:
+    claimed = _claim_free_ids(conn)
+    _warn_duplicate_ids(conn, contested, result)
+    if result.added or result.changed or result.moved or result.removed or result.rederived or claimed:
         resolve_links(conn)
     if rederive:
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('rules_hash', ?)", (rules,))
@@ -342,25 +346,69 @@ def update(
     return result
 
 
-def _claim_id(cfg: Config, conn: sqlite3.Connection, p: _Pending, result: UpdateResult) -> tuple[str, bool]:
+def _claim_id(conn: sqlite3.Connection, p: _Pending, present, contested: list[str]) -> tuple[str, bool]:
     """The ID of the note and True when it is provisional.
 
-    The frontmatter `id` is the ID. A doc that holds that ID at a path that is no longer on disk is the same note at
-    a new path, so it is deleted. A doc that holds it at a path on disk is another note with the same ID: this note
-    gets its provisional ID and the update a warning.
+    The frontmatter `id` is the ID. A doc that holds that ID at a path that is not a note of this scan is the same
+    note at a new path, so it is deleted. A doc that holds it at a path of this scan can still give the ID up later
+    in the update: this note gets its provisional ID for now, and `_claim_free_ids()` tries again at the end.
     """
     if p.frontmatter_id is None:
         return provisional_id(p.rel), True
     row = conn.execute("SELECT path FROM doc WHERE id = ?", (p.frontmatter_id,)).fetchone()
     if row is not None:
-        if cfg.note_path(row[0]).exists():
-            result.warnings.append(f"{p.rel} has the id {p.frontmatter_id} of {row[0]}; it gets a provisional ID")
+        if row[0] in present:
+            contested.append(p.rel)
             return provisional_id(p.rel), True
         _delete_note(conn, row[0])
     return p.frontmatter_id, False
 
 
-def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pending], result: UpdateResult) -> None:
+def _claim_free_ids(conn: sqlite3.Connection) -> int:
+    """Give each provisional doc the ID that its frontmatter declares, when no doc holds that ID. Return the count.
+
+    When two docs declare the same free ID, the first path gets it.
+    """
+    rows = conn.execute(
+        "SELECT d.id, d.declared_id FROM doc d JOIN node n ON n.id = d.id"
+        " WHERE n.provisional = 1 AND d.declared_id IS NOT NULL"
+        " AND d.declared_id NOT IN (SELECT id FROM doc) ORDER BY d.path"
+    ).fetchall()
+    taken: set[str] = set()
+    for old, new in rows:
+        if new in taken:
+            continue
+        taken.add(new)
+        conn.execute("UPDATE node SET id = ?, provisional = 0 WHERE id = ?", (new, old))
+        conn.execute("UPDATE doc SET id = ? WHERE id = ?", (new, old))
+        conn.execute("UPDATE unit SET doc_id = ? WHERE doc_id = ?", (new, old))
+        conn.execute("UPDATE link SET from_doc = ? WHERE from_doc = ?", (new, old))
+        conn.execute("UPDATE link SET to_node = ? WHERE to_node = ?", (new, old))
+        conn.execute("UPDATE jira SET doc_id = ? WHERE doc_id = ?", (new, old))
+    return len(taken)
+
+
+def _warn_duplicate_ids(conn: sqlite3.Connection, contested: list[str], result: UpdateResult) -> None:
+    """Warn for each note of this update that still has a provisional ID because another note holds its ID."""
+    for rel in contested:
+        row = conn.execute(
+            "SELECT d.declared_id, h.path FROM doc d JOIN node n ON n.id = d.id JOIN doc h ON h.id = d.declared_id"
+            " WHERE d.path = ? AND n.provisional = 1",
+            (rel,),
+        ).fetchone()
+        if row:
+            result.warnings.append(f"{rel} has the id {row[0]} of {row[1]}; it gets a provisional ID")
+
+
+def _write(
+    cfg: Config,
+    conn: sqlite3.Connection,
+    embedder,
+    pending: list[_Pending],
+    result: UpdateResult,
+    present,
+    contested: list[str],
+) -> None:
     # embed the units that are not in the cache, in one call for the group
     hashes = {}
     for p in pending:
@@ -398,14 +446,14 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
         # another writer (the scan of the MCP server before each call) can index the path after this update read
         # its snapshot of the notes
         _delete_note(conn, p.rel)
-        doc_id, provisional = _claim_id(cfg, conn, p, result)
+        doc_id, provisional = _claim_id(conn, p, present, contested)
         conn.execute(
             "INSERT INTO node (id, node_type, collection, mode, provisional) VALUES (?, 'doc', ?, 'files', ?)",
             (doc_id, m.vault, int(provisional)),
         )
         conn.execute(
             "INSERT INTO doc (id, vault, path, title, project, area, type, status, sensitivity, description,"
-            " mtime_ns, size, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " mtime_ns, size, hash, declared_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 doc_id,
                 m.vault,
@@ -420,6 +468,7 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
                 p.mtime_ns,
                 p.size,
                 p.hash,
+                p.frontmatter_id,
             ),
         )
         for c in p.chunks:

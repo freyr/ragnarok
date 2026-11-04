@@ -370,3 +370,31 @@ def test_version_1_file_gives_index_mismatch(cfg):
         connect(cfg)
     tables = sqlite3.connect(cfg.index_path).execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
     assert sorted(tables) == [("jira",), ("meta",)]
+
+
+def test_frontmatter_id_moves_from_one_note_to_another_in_one_update(cfg):
+    (cfg.root / FIELD_STOP).write_text("---\nid: x-1\n---\n# Field Stop\n")
+    conn, emb, _ = build(cfg)
+    (cfg.root / FIELD_STOP).write_text("# Field Stop\nNo id now.\n")
+    (cfg.root / BOILER).write_text("---\nid: x-1\n---\n# Boiler\nThe id is here now.\n")
+    os.utime(cfg.root / FIELD_STOP, ns=(1, 1))  # the old holder is rewritten after the new one
+    result = update(cfg, conn, emb)
+    row = lambda p: conn.execute("SELECT id, provisional FROM doc JOIN node USING (id) WHERE path = ?", (p,)).fetchone()  # noqa: E731
+    assert row(BOILER) == ("x-1", 0)
+    assert row(FIELD_STOP) == (index.provisional_id(FIELD_STOP), 1)
+    assert result.warnings == []
+    assert count(conn, "SELECT count(*) FROM unit WHERE doc_id = 'x-1'") > 0
+    assert count(conn, "SELECT count(*) FROM jira WHERE doc_id NOT IN (SELECT id FROM doc)") == 0
+    assert count(conn, "SELECT count(*) FROM node") == count(conn, "SELECT count(*) FROM doc")
+
+
+def test_case_only_rename_with_an_edit_keeps_the_id(cfg):
+    (cfg.root / BOILER).write_text("---\nid: x-1\n---\n# Boiler\nThe first text.\n")
+    conn, emb, _ = build(cfg)
+    (cfg.root / BOILER).unlink()
+    dst = "Home/Heating/notes/Boiler.md"
+    (cfg.root / dst).write_text("---\nid: x-1\n---\n# Boiler\nThe second text.\n")
+    result = update(cfg, conn, emb)
+    assert result.warnings == []
+    assert conn.execute("SELECT id FROM doc WHERE path = ?", (dst,)).fetchone() == ("x-1",)
+    assert conn.execute("SELECT count(*) FROM doc WHERE path = ?", (BOILER,)).fetchone() == (0,)
