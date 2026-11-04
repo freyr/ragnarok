@@ -192,6 +192,11 @@ class Config:
         elif self.data_dir is None:
             self.data_dir = self.index_path.parent
 
+    @property
+    def core_path(self) -> Path:
+        """The file that holds the data that survives a rebuild: next to index_path, else data_dir/core.db."""
+        return self.index_path.parent / "core.db"
+
     def vault_dir(self, vault: str) -> Path:
         return self.vault_paths.get(vault) or self.root / vault
 

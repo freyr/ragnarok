@@ -16,7 +16,8 @@ COMMANDS = {
     "serve": "Run the MCP server on stdio",
     "backfill": "Propose, describe and apply frontmatter for existing notes",
     "survey": "Print the facts that the path rules of a vault need",
-    "eval": "Run the evaluation sets",
+    "eval": "Run the evaluation sets, make the mirror (prepare) or print its hash (mirror-hash)",
+    "cache": "Work with the embedding cache in core.db",
     "init": "Set up this computer: config, Ollama, model, index and the MCP server in Claude Code",
     "doctor": "Check the six parts of the setup and print the fix for each failure",
 }
@@ -40,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--mode", choices=["hybrid", "dense", "fts"], default="hybrid")
     sp.add_argument("--json", action="store_true", help="print one JSON object for each note")
     ep = parsers["eval"]
-    ep.add_argument("kind", choices=["mechanical", "pool", "agent"])
+    ep.add_argument("kind", choices=["mechanical", "pool", "agent", "prepare", "mirror-hash"])
     ep.add_argument("--set", action="append", dest="set_names", help="agent: a set name (default draft-long and hard)")
     ep.add_argument("--calls", type=int, default=8, help="agent: the limit of tool calls for each agent")
     ep.add_argument("--model", default="sonnet", help="agent: the Claude model of both agents")
@@ -48,6 +49,10 @@ def build_parser() -> argparse.ArgumentParser:
     ep.add_argument("--sets", type=Path, help="folder with the question sets (default <data_dir>/eval/sets)")
     ep.add_argument("--out", type=Path, help="folder for the results (default <data_dir>/eval/results)")
     ep.add_argument("--min-words", type=int, help="use a separate index with this minimum chunk size")
+    ep.add_argument("--reuse-mirror", action="store_true", help="agent, prepare: keep the mirror that exists")
+    cp = parsers["cache"]
+    cp.add_argument("action", choices=["import"])
+    cp.add_argument("--from", dest="source", type=Path, required=True, help="a version 1 index file")
     parsers["index"].add_argument("--min-words", type=int, help="build a separate index with this minimum chunk size")
     parsers["index"].add_argument("--rebuild", action="store_true", help="delete the index and make it again")
     parsers["chunks"].add_argument("--stats", action="store_true", help="print totals for all vaults")
@@ -160,6 +165,16 @@ def cmd_index(cfg, args) -> int:
     return 0
 
 
+def cmd_cache(cfg, args) -> int:
+    from .index import import_cache
+
+    if not args.source.is_file():
+        print(f"No index file at {args.source}.", file=sys.stderr)
+        return 1
+    print(f"imported {import_cache(cfg, args.source)} rows into {cfg.core_path}")
+    return 0
+
+
 def cmd_status(cfg, args) -> int:
     from .index import IndexMismatch, connect, status
 
@@ -226,6 +241,20 @@ def cmd_eval(cfg, args) -> int:
     from .index import connect
 
     cfg = _with_min_words(cfg, args.min_words)
+    if args.kind == "prepare":
+        from .agent_eval import prepare
+
+        print(f"mirror {prepare(cfg, reuse_mirror=args.reuse_mirror).root}")
+        return 0
+    if args.kind == "mirror-hash":
+        from .agent_eval import eval_home, mirror_hash
+
+        try:
+            print(mirror_hash(eval_home(cfg) / "vaults"))
+        except FileNotFoundError as e:
+            print(e, file=sys.stderr)
+            return 1
+        return 0
     if not cfg.index_path.exists():
         print(f"No index at {cfg.index_path}. Run `ragnarok index` with the same --min-words.", file=sys.stderr)
         return 1
@@ -237,7 +266,7 @@ def cmd_eval(cfg, args) -> int:
         names = args.set_names or ["draft-long", "hard"]
         print(f"# agent evaluation, sets {', '.join(names)}, model {args.model}, {args.calls} tool calls")
         out = args.out / "agent" / f"{args.model}-calls{args.calls}"
-        print("\n".join(evaluate(cfg, args.sets, names, out, args.calls, args.model, args.limit)))
+        print("\n".join(evaluate(cfg, args.sets, names, out, args.calls, args.model, args.limit, args.reuse_mirror)))
         return 0
     conn = connect(cfg)
     if args.kind == "mechanical":
@@ -390,6 +419,7 @@ HANDLERS = {
     "inspect": cmd_inspect,
     "chunks": cmd_chunks,
     "index": cmd_index,
+    "cache": cmd_cache,
     "status": cmd_status,
     "search": cmd_search,
 }

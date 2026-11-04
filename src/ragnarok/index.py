@@ -8,6 +8,7 @@ import sqlite3
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import sqlite_vec
 
@@ -62,7 +63,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
     sensitivity TEXT,
     status TEXT
 );
-CREATE TABLE IF NOT EXISTS embed_cache (text_hash TEXT PRIMARY KEY, model TEXT NOT NULL, vector BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS links (from_note INTEGER NOT NULL, target TEXT NOT NULL, to_note INTEGER);
 CREATE INDEX IF NOT EXISTS links_from ON links (from_note);
 CREATE INDEX IF NOT EXISTS links_to ON links (to_note);
@@ -71,8 +71,41 @@ CREATE INDEX IF NOT EXISTS jira_key ON jira (key);
 """
 
 
+# core.db holds what a rebuild keeps: the embedding cache. Task 5 of the plan makes it the main file.
+CORE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS core.meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS core.embed_cache (
+    text_hash TEXT PRIMARY KEY, model TEXT NOT NULL, vector BLOB NOT NULL
+);
+"""
+
+
 class IndexMismatch(RuntimeError):
     pass
+
+
+def attach_core(conn: sqlite3.Connection, cfg: Config) -> None:
+    """Attach core.db as `core` and create its tables."""
+    cfg.core_path.parent.mkdir(parents=True, exist_ok=True)
+    conn.execute("ATTACH DATABASE ? AS core", (str(cfg.core_path),))
+    conn.execute("PRAGMA core.journal_mode=WAL")
+    conn.executescript(CORE_SCHEMA)
+    conn.execute("INSERT OR IGNORE INTO core.meta (key, value) VALUES ('schema_version', '1')")
+    conn.commit()
+
+
+def import_cache(cfg: Config, source) -> int:
+    """Copy the embed_cache rows of a version 1 index file into core.db. Skip a row that exists. Return the count."""
+    conn = sqlite3.connect(":memory:", uri=True)
+    try:
+        attach_core(conn, cfg)
+        conn.execute("ATTACH DATABASE ? AS v1", (f"file:{Path(source).resolve()}?mode=ro",))
+        before = conn.execute("SELECT count(*) FROM core.embed_cache").fetchone()[0]
+        conn.execute("INSERT OR IGNORE INTO core.embed_cache SELECT text_hash, model, vector FROM v1.embed_cache")
+        conn.commit()
+        return conn.execute("SELECT count(*) FROM core.embed_cache").fetchone()[0] - before
+    finally:
+        conn.close()
 
 
 def connect(cfg: Config) -> sqlite3.Connection:
@@ -86,6 +119,7 @@ def connect(cfg: Config) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(_schema(cfg.dimension))
+    attach_core(conn, cfg)
     expected = {"model": cfg.model, "dimension": str(cfg.dimension), "schema_version": str(SCHEMA_VERSION)}
     stored = dict(conn.execute("SELECT key, value FROM meta").fetchall())
     if not stored:
@@ -279,13 +313,15 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
     keys = list(hashes)
     for i in range(0, len(keys), 500):
         part = keys[i : i + 500]
-        q = f"SELECT text_hash FROM embed_cache WHERE text_hash IN ({','.join('?' * len(part))})"
-        cached.update(r[0] for r in conn.execute(q, part))
+        # the cache outlives a rebuild, so a vector of another dimension (same model, other truncation) is a miss
+        marks = ",".join("?" * len(part))
+        q = f"SELECT text_hash FROM core.embed_cache WHERE length(vector) = ? AND text_hash IN ({marks})"
+        cached.update(r[0] for r in conn.execute(q, [cfg.dimension * 4, *part]))
     missing = [k for k in keys if k not in cached]
     if missing:
         vectors = embedder.embed_docs([hashes[k] for k in missing])
         conn.executemany(
-            "INSERT OR REPLACE INTO embed_cache (text_hash, model, vector) VALUES (?, ?, ?)",
+            "INSERT OR REPLACE INTO core.embed_cache (text_hash, model, vector) VALUES (?, ?, ?)",
             [(k, cfg.model, sqlite_vec.serialize_float32(v)) for k, v in zip(missing, vectors, strict=True)],
         )
         result.embedded += len(missing)
@@ -335,8 +371,8 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
             conn.execute("INSERT INTO chunks_fts (rowid, heading, text) VALUES (?, ?, ?)", (cid, c.heading, c.text))
             conn.execute(
                 "INSERT INTO chunks_vec (chunk_id, embedding, vault, sensitivity, status)"
-                " SELECT ?, vector, ?, ?, ? FROM embed_cache WHERE text_hash = ?",
-                (cid, m.vault, m.sensitivity, m.status, th),
+                " SELECT ?, vector, ?, ?, ? FROM core.embed_cache WHERE text_hash = ? AND length(vector) = ?",
+                (cid, m.vault, m.sensitivity, m.status, th, cfg.dimension * 4),
             )
             result.chunks += 1
         conn.executemany("INSERT INTO links (from_note, target) VALUES (?, ?)", [(note_id, t) for t in p.links])
@@ -397,7 +433,7 @@ def status(cfg: Config, conn: sqlite3.Connection) -> dict:
         "archived_notes": one("SELECT count(*) FROM notes WHERE status = 'archived'"),
         "chunks": one("SELECT count(*) FROM chunks"),
         "vectors": one("SELECT count(*) FROM chunks_vec"),
-        "cache": one("SELECT count(*) FROM embed_cache"),
+        "cache": one("SELECT count(*) FROM core.embed_cache"),
         "links": one("SELECT count(*) FROM links"),
         "resolved_links": one("SELECT count(*) FROM links WHERE to_note IS NOT NULL"),
         "jira_keys": one("SELECT count(DISTINCT key) FROM jira"),

@@ -46,7 +46,7 @@ def test_search_latency_counts_only_good_calls_without_changes(tmp_path):
 
 
 def test_run_all_scores_with_a_fake_runner_and_reuses_results(vault, tmp_path, monkeypatch):
-    monkeypatch.setattr(agent_eval, "prepare", lambda cfg: cfg)
+    monkeypatch.setattr(agent_eval, "prepare", lambda cfg, **kw: cfg)
     monkeypatch.setattr(agent_eval, "mcp_config", lambda cfg: tmp_path / "mcp.json")
     answers = {"grep": ["Home/Bike/shortlist.md"], "mcp": ["Home/Heating/notes/boiler.md"]}
     calls = []

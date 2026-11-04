@@ -3,12 +3,14 @@ ragnarok MCP tools and Read, both with the same limit of tool calls.
 
 Both agents work in a mirror of the vaults in <data_dir>/eval/vaults. The mirror holds only the notes that are
 not private and not in eval_exclude (for example notes that quote the questions and the expected answers).
-The MCP agent gets a server with its own home <data_dir>/eval: a config with the mirror as root, a copy of the
-index and its own logs/server.log, from which the report reads the search latency.
+The MCP agent gets a server with its own home <data_dir>/eval: a config with the mirror as root, a copy of
+core.db (the embedding cache), its own index and its own logs/server.log, from which the report reads
+the search latency.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -17,7 +19,7 @@ import sqlite3
 import subprocess
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
@@ -54,22 +56,26 @@ def mirror_notes(cfg: Config) -> list[str]:
     return [rel for rel in iter_notes(cfg) if not is_private(cfg, rel) and not excluded(cfg, rel)]
 
 
-def prepare(cfg: Config) -> Config:
-    """Make the mirror, the config and the index copy of the evaluation home. Return the evaluation config."""
+def prepare(cfg: Config, reuse_mirror: bool = False) -> Config:
+    """Make the mirror, the config and the core.db copy of the evaluation home. Return the evaluation config.
+
+    With reuse_mirror and a mirror that exists, keep the mirror and do not copy it again.
+    """
     home = eval_home(cfg)
     mirror = home / "vaults"
-    shutil.rmtree(mirror, ignore_errors=True)
-    for rel in mirror_notes(cfg):
-        target = mirror / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(cfg.note_path(rel), target)
+    if not (reuse_mirror and mirror.is_dir()):
+        shutil.rmtree(mirror, ignore_errors=True)
+        for rel in mirror_notes(cfg):
+            target = mirror / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(cfg.note_path(rel), target)
     (home / "config.toml").write_text(dump_config(replace(cfg, vault_paths={}), root="vaults", data_dir="data"))
     ecfg = load_config(home / "config.toml")
-    if not ecfg.index_path.exists():
-        # a copy of the full index: the paths are the same, so the scan only removes the notes outside the mirror
-        ecfg.index_path.parent.mkdir(parents=True, exist_ok=True)
-        src = sqlite3.connect(cfg.index_path)
-        dst = sqlite3.connect(ecfg.index_path)
+    if cfg.core_path.exists():
+        # the cache of the full home: the mirror index finds its chunks in it and embeds nothing
+        ecfg.core_path.parent.mkdir(parents=True, exist_ok=True)
+        src = sqlite3.connect(cfg.core_path)
+        dst = sqlite3.connect(ecfg.core_path)
         src.backup(dst)
         src.close()
         dst.close()
@@ -82,6 +88,40 @@ def prepare(cfg: Config) -> Config:
     finally:
         conn.close()
     return ecfg
+
+
+def mirror_hash(mirror: Path) -> str:
+    """One SHA-256 over the sorted relative paths and the contents of the mirror files."""
+    if not mirror.is_dir():
+        raise FileNotFoundError(f"no mirror at {mirror}; run `ragnarok eval prepare`")
+    digest = hashlib.sha256()
+    for path in sorted(p for p in mirror.rglob("*") if p.is_file()):
+        digest.update(path.relative_to(mirror).as_posix().encode() + b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
+# the keys of the version 1 Config; the baseline load_config() refuses any other key
+V1_KEYS = (
+    "vaults", "skip_dirs", "private_patterns", "allow_private", "project_markers", "archive_folder",
+    "jira_prefixes", "eval_exclude", "ollama_url", "model", "query_prefix", "doc_prefix", "dimension",
+    "min_words", "max_words",
+)  # fmt: skip
+
+
+def write_baseline_home(cfg: Config, home: Path, mirror: Path) -> Path:
+    """Write config.toml of the baseline home: the v1 keys only, with the mirror of the bet home as root."""
+    lines = [f"root = {json.dumps(str(mirror.resolve()))}", 'data_dir = "data"']
+    for key in V1_KEYS:
+        value = getattr(cfg, key)
+        lines.append(f"{key} = {json.dumps(sorted(value) if isinstance(value, set) else value)}")
+    for vault, rules in cfg.vault_rules.items():
+        lines.append(f"\n[vault_rules.{json.dumps(vault)}]")
+        lines += [f"{key} = {json.dumps(value)}" for key, value in asdict(rules).items()]
+    home.mkdir(parents=True, exist_ok=True)
+    path = home / "config.toml"
+    path.write_text("\n".join(lines) + "\n")
+    return path
 
 
 def mcp_config(cfg: Config) -> Path:
@@ -142,9 +182,10 @@ def run_all(
     model: str,
     workers: int = 4,
     runner: Runner = run_claude,
+    reuse_mirror: bool = False,
 ) -> dict[str, dict[str, dict]]:
     """Run each question with each agent. A result file that exists is used again, so a stopped run continues."""
-    ecfg = prepare(cfg)
+    ecfg = prepare(cfg, reuse_mirror=reuse_mirror)
     mcp_json = mcp_config(cfg)
     mirror = ecfg.root
     jobs = []
@@ -262,11 +303,20 @@ def report(
     return lines
 
 
-def evaluate(cfg: Config, sets_dir: Path, names: list[str], out_dir: Path, calls: int, model: str, limit: int | None):
+def evaluate(
+    cfg: Config,
+    sets_dir: Path,
+    names: list[str],
+    out_dir: Path,
+    calls: int,
+    model: str,
+    limit: int | None,
+    reuse_mirror: bool = False,
+):
     sets = {}
     for name in names:
         questions = json.loads((sets_dir / f"{name}.json").read_text())
         sets[name] = questions[:limit] if limit else questions
-    results = run_all(cfg, sets, out_dir, calls, model)
+    results = run_all(cfg, sets, out_dir, calls, model, reuse_mirror=reuse_mirror)
     latency = search_latency(eval_home(cfg) / "logs" / "server.log")
     return report(cfg, sets, results, latency)
