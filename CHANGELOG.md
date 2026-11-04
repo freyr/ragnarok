@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- The `[vault_paths]` table gives the folder of a vault that is not in `root`. The note keys stay
+  `<vault>/<path in the vault>`, so the current index stays valid. `ragnarok doctor` names each vault folder
+  that does not exist, and `ragnarok inspect` takes the absolute path of a note in such a vault.
 - A note in a project whose `SUMMARY.md` has `state: done` or `state: abandoned` is `archived`. `stage: DONE`
   still archives a project. `find_projects` and `list_project` return the `state`.
 - The `open_projects` tool lists the projects in progress and the paused projects, grouped by state. Its

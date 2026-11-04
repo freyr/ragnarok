@@ -131,6 +131,7 @@ explains each key. The most important keys:
 | Key | What |
 |---|---|
 | `root`, `vaults` | The folder that holds the vaults, and the vault folders to index. |
+| `[vault_paths]` | The folder of a vault that is not in `root`, for example `kb = "~/code/kb"`. A note key stays `<vault>/<path>`. |
 | `private_patterns` | Glob patterns of private notes, for example `"Notes/Journal/**"`. |
 | `model`, `dimension` | The Ollama embedding model and its vector size. A change needs `ragnarok index --rebuild`. |
 | `min_words`, `max_words` | The chunk size limits of the splitter. A change needs `ragnarok index --rebuild`. |

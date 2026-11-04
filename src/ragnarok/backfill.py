@@ -70,7 +70,7 @@ def propose(cfg: Config, vault: str) -> dict:
         if rel.split("/")[0] != vault or rel.rsplit("/", 1)[-1] in SKIP_NAMES:
             continue
         try:
-            text = (cfg.root / rel).read_bytes().decode()
+            text = cfg.note_path(rel).read_bytes().decode()
         except UnicodeDecodeError:
             malformed.append(rel)  # apply writes only notes that decode as UTF-8
             continue
@@ -112,7 +112,7 @@ def coverage(cfg: Config) -> dict:
     counts: dict[str, dict[str, int]] = {}
     for rel in iter_notes(cfg):
         vault = rel.split("/")[0]
-        fm, _ = parse_note((cfg.root / rel).read_text(errors="replace"))
+        fm, _ = parse_note(cfg.note_path(rel).read_text(errors="replace"))
         c = counts.setdefault(vault, {"notes": 0, **dict.fromkeys(KEYS, 0)})
         c["notes"] += 1
         for k in KEYS:
@@ -143,7 +143,7 @@ def export_rows(cfg: Config, proposal: dict) -> list[dict]:
     for row in proposal["rows"]:
         if "description" not in row["set"] or row["private"]:
             continue
-        fm, body = parse_note((cfg.root / row["path"]).read_text(errors="replace"))
+        fm, body = parse_note(cfg.note_path(row["path"]).read_text(errors="replace"))
         h1 = H1_RE.search(body)
         title = fm.get("title") or (h1.group(1).strip() if h1 else Path(row["path"]).stem)
         # redact the whole body first: a cut can split a multi-line credential so that no pattern matches
@@ -218,7 +218,7 @@ def archive(cfg: Config, vault: str) -> Path:
     """Copy the vault to a tar.gz in the backup folder and check that every note is in it."""
     out = backup_dir(cfg) / f"{vault}-{time.strftime('%Y%m%d-%H%M%S')}.tar.gz"
     out.parent.mkdir(parents=True, exist_ok=True)
-    base = cfg.root / vault
+    base = cfg.vault_dir(vault)
 
     def keep(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
         return None if any(p in cfg.skip_dirs for p in Path(info.name).parts) else info
@@ -285,7 +285,7 @@ def apply(cfg: Config, vault: str, proposal: dict) -> ApplyResult:
         rel = row["path"]
         if not row.get("approve"):
             continue
-        path = cfg.root / rel
+        path = cfg.note_path(rel)
         if not path.is_file():
             result.skipped.append(f"{rel}: not found")
             continue

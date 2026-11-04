@@ -298,3 +298,18 @@ def test_server_stays_stopped_while_the_config_file_is_not_usable(served):
         assert notes() == before
     write_config(config_file, dump_config(cfg, root=cfg.root, index_path=cfg.index_path))
     asyncio.run(server.call_tool("open_note", FIELD_STOP))
+
+
+def test_a_vault_outside_root(vault, tmp_path_factory):
+    ops = tmp_path_factory.mktemp("elsewhere") / "ops-kb"
+    (ops / "Runbooks/db-failover").mkdir(parents=True)
+    (ops / "Runbooks/db-failover/SUMMARY.md").write_text("# Failover\nThe database replica takes over.\n")
+    (ops / "Runbooks/db-failover/steps.md").write_text("# Steps\nPromote the database replica.\n")
+    vault.vaults.append("Ops")
+    vault.vault_paths = {"Ops": ops}
+    vault.dimension = len(TopicEmbedder.TOPICS)
+    tools = Tools(vault, connect(vault), TopicEmbedder())
+    assert "Ops/Runbooks/db-failover/steps.md" in [r["path"] for r in tools.search("database replica")["results"]]
+    assert "Promote the database replica." in tools.open_note("Ops/Runbooks/db-failover/steps.md")["text"]
+    notes = tools.list_project("db-failover", vault="Ops")["results"][0]["notes"]
+    assert [n["path"] for n in notes] == ["Ops/Runbooks/db-failover/SUMMARY.md", "Ops/Runbooks/db-failover/steps.md"]

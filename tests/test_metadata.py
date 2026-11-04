@@ -133,6 +133,20 @@ def test_config_paths_are_relative_to_the_config_file(tmp_path, monkeypatch):
     assert Config().index_path == tmp_path / "home/data/index.db"
 
 
+def test_vault_paths_give_the_folder_of_a_vault(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "user"))
+    path = tmp_path / "config.toml"
+    path.write_text('root = "vaults"\nvaults = ["A", "B", "C"]\n\n[vault_paths]\nB = "~/code/b"\nC = "c-kb"\n')
+    cfg = load_config(path)
+    assert [cfg.vault_dir(v) for v in cfg.vaults] == [
+        tmp_path / "vaults/A",
+        tmp_path / "user/code/b",
+        tmp_path / "c-kb",
+    ]
+    assert cfg.note_path("B/x/y.md") == tmp_path / "user/code/b/x/y.md"
+    assert cfg.note_path("A/y.md") == tmp_path / "vaults/A/y.md"
+
+
 def test_the_default_home_is_the_repo_checkout(monkeypatch):
     monkeypatch.delenv("RAGNAROK_HOME", raising=False)
     assert (home_dir() / "pyproject.toml").exists()
@@ -154,10 +168,12 @@ def test_no_jira_prefix_means_no_jira_key(vault):
 def test_vault_rules_round_trip_through_toml(vault, tmp_path):
     from ragnarok.config import dump_config
 
+    vault.vault_paths = {"Studio": tmp_path / "studio-kb"}
     path = tmp_path / "copy.toml"
     path.write_text(dump_config(vault, root="vaults", data_dir="data"))
     copy = load_config(path)
     assert (copy.root, copy.data_dir) == (tmp_path / "vaults", tmp_path / "data")
+    assert copy.vault_paths == vault.vault_paths
     assert (copy.vault_rules, copy.jira_prefixes, copy.vaults) == (vault.vault_rules, vault.jira_prefixes, vault.vaults)
 
 

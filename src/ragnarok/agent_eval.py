@@ -17,6 +17,7 @@ import sqlite3
 import subprocess
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -61,8 +62,8 @@ def prepare(cfg: Config) -> Config:
     for rel in mirror_notes(cfg):
         target = mirror / rel
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(cfg.root / rel, target)
-    (home / "config.toml").write_text(dump_config(cfg, root="vaults", data_dir="data"))
+        shutil.copy2(cfg.note_path(rel), target)
+    (home / "config.toml").write_text(dump_config(replace(cfg, vault_paths={}), root="vaults", data_dir="data"))
     ecfg = load_config(home / "config.toml")
     if not ecfg.index_path.exists():
         # a copy of the full index: the paths are the same, so the scan only removes the notes outside the mirror

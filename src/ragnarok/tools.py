@@ -157,7 +157,7 @@ class Tools:
         ).fetchall()
         projects = []
         for v, project, path, status in rows:
-            fm, _ = read_note(self.cfg.root / path)
+            fm, _ = read_note(self.cfg.note_path(path))
             state = _state(fm, status == "archived")
             if state not in wanted:
                 continue
@@ -177,7 +177,7 @@ class Tools:
             raise FileNotFoundError(f"{path} is not a note in the index. Use a path from a search result.")
         note_id, vault, title, project, area, type_, status, sensitivity, description = row
         self._check_private(sensitivity, path)
-        fm, body = read_note(self.cfg.root / path)
+        fm, body = read_note(self.cfg.note_path(path))
         secs = sections(body)
         if heading is not None:
             wanted = heading.strip().lstrip("#").strip().lower()
@@ -260,8 +260,8 @@ class Tools:
         if not folder:
             return info
         summary, drivers = f"{folder}/SUMMARY.md", f"{folder}/DRIVERS.md"
-        s_fm, s_body = read_note(self.cfg.root / summary) if summary in paths else ({}, "")
-        d_fm = read_note(self.cfg.root / drivers)[0] if drivers in paths else {}
+        s_fm, s_body = read_note(self.cfg.note_path(summary)) if summary in paths else ({}, "")
+        d_fm = read_note(self.cfg.note_path(drivers))[0] if drivers in paths else {}
         description = s_fm.get("description") or d_fm.get("description") or _first_paragraph(s_body)
         info["description"] = redact(str(description))[0] if description else None
         info["stage"] = s_fm.get("stage")

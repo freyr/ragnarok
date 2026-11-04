@@ -138,7 +138,7 @@ def chunk_file(cfg, rel: str):
     """Read, resolve, redact and split one note. Return (meta, chunks, number of redactions)."""
     from .metadata import read_note, resolve
 
-    fm, body = read_note(cfg.root / rel)
+    fm, body = read_note(cfg.note_path(rel))
     meta = resolve(cfg, rel, fm, body)
     chunks, count = chunk_note(cfg, meta, body)
     return meta, chunks, count

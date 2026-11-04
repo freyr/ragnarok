@@ -50,6 +50,8 @@ class VaultRules:
 class Config:
     root: Path = field(default_factory=lambda: Path("~/Documents/Vaults").expanduser())
     vaults: list[str] = field(default_factory=list)
+    # the folder of a vault outside root; a vault with no entry is the folder root/<vault>
+    vault_paths: dict[str, Path] = field(default_factory=dict)
     skip_dirs: set[str] = field(default_factory=lambda: {"node_modules"})
     private_patterns: list[str] = field(default_factory=list)
     allow_private: bool = False
@@ -80,6 +82,14 @@ class Config:
         elif self.data_dir is None:
             self.data_dir = self.index_path.parent
 
+    def vault_dir(self, vault: str) -> Path:
+        return self.vault_paths.get(vault) or self.root / vault
+
+    def note_path(self, key: str) -> Path:
+        """The file of a note key `<vault>/<path in the vault>`."""
+        vault, _, rel = key.partition("/")
+        return self.vault_dir(vault) / rel
+
     def rules(self, vault: str) -> VaultRules:
         return self.vault_rules.get(vault) or VaultRules()
 
@@ -98,6 +108,8 @@ def rules_hash(cfg: Config) -> str:
     values["root"] = str(cfg.root)
     values["skip_dirs"] = sorted(cfg.skip_dirs)
     values["vault_rules"] = {vault: asdict(rules) for vault, rules in sorted(cfg.vault_rules.items())}
+    if cfg.vault_paths:  # only when set, so that an index made before vault_paths keeps its hash
+        values["vault_paths"] = {vault: str(path) for vault, path in sorted(cfg.vault_paths.items())}
     return hashlib.sha1(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
 
@@ -117,6 +129,8 @@ def load_config(path: Path | None = None) -> Config:
             value = path.parent / Path(value).expanduser()
         elif key == "skip_dirs":
             value = set(value)
+        elif key == "vault_paths":
+            value = {vault: path.parent / Path(folder).expanduser() for vault, folder in value.items()}
         elif key == "vault_rules":
             value = {vault: VaultRules(**rules) for vault, rules in value.items()}
         values[key] = value
@@ -128,9 +142,12 @@ def dump_config(cfg: Config, **paths: Path | str) -> str:
     lines = [f"{key} = {json.dumps(str(value))}" for key, value in paths.items()]
     for f in fields(Config):
         value = getattr(cfg, f.name)
-        if f.name in PATH_KEYS or f.name == "vault_rules" or f.name in paths:
+        if f.name in PATH_KEYS or f.name in ("vault_paths", "vault_rules") or f.name in paths:
             continue
         lines.append(f"{f.name} = {json.dumps(sorted(value) if isinstance(value, set) else value)}")
+    if cfg.vault_paths:
+        lines.append("\n[vault_paths]")
+        lines += [f"{json.dumps(vault)} = {json.dumps(str(path))}" for vault, path in cfg.vault_paths.items()]
     for vault, rules in cfg.vault_rules.items():
         lines.append(f"\n[vault_rules.{json.dumps(vault)}]")
         lines += [f"{key} = {json.dumps(value)}" for key, value in asdict(rules).items()]
