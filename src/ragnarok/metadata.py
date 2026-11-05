@@ -366,7 +366,7 @@ def resolve(
     jira = sorted(set(_as_list(fm.get("jira"))) | set(find_jira(cfg, vault, body)))
 
     doc_type = doc_types.get(note_type)  # a config with its own doc_types can lack a type
-    subjects = _targets(fm.get("subject"))[:3]
+    subjects = _targets(fm.get("subject"))
     task = fm.get("task")
     task = task.strip() if isinstance(task, str) and task.strip() else None
     as_of = _iso_date(fm.get("as_of")) if fm.get("as_of") is not None else None

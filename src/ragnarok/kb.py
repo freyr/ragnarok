@@ -570,7 +570,11 @@ def _violations(conn: sqlite3.Connection) -> list[tuple[str, list[str], str | No
 
     for doc_id, text in rows("SELECT doc_id, target_text FROM doc_subject WHERE entity_id IS NULL"):
         found.append(("ref", [doc_id], f"subject: {text}"))
-    for id_, text in rows("SELECT id, owner_text FROM doc WHERE owner_text IS NOT NULL AND owner IS NULL"):
+    # an entity document carries the owner of its entity: the entity row reports it once
+    for id_, text in rows(
+        "SELECT id, owner_text FROM doc WHERE owner_text IS NOT NULL AND owner IS NULL"
+        " AND id NOT IN (SELECT doc_id FROM entity)"
+    ):
         found.append(("ref", [id_], f"owner: {text}"))
     for id_, text in rows("SELECT id, owner_text FROM entity WHERE owner_text IS NOT NULL AND owner IS NULL"):
         found.append(("ref", [id_], f"owner: {text}"))
@@ -665,11 +669,17 @@ def report(
     for doc_id, entity_id in conn.execute("SELECT doc_id, entity_id FROM doc_subject WHERE entity_id IS NOT NULL"):
         subjects.setdefault(doc_id, set()).add(entity_id)
 
+    entity_docs = {
+        doc_id for doc_id, entity_id in conn.execute("SELECT doc_id, id FROM entity") if entity_id in (entities or ())
+    }
+
     def in_scope(node_id: str) -> bool:
         doc = doc_of.get(node_id)
         if doc not in info or (collection is not None and info[doc][0] != collection):
             return False
-        return entities is None or node_id in entities or bool(subjects.get(doc, set()) & entities)
+        return (
+            entities is None or node_id in entities or doc in entity_docs or bool(subjects.get(doc, set()) & entities)
+        )
 
     result: dict = {check: {"count": 0} for check in CHECKS}
     for check in LISTED:

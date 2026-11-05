@@ -117,12 +117,27 @@ def test_two_canonical_docs_give_canonical_twice(cfg):
 
 
 def test_state_doc_with_no_subject_gives_subjects(cfg):
-    # the importer keeps at most 3 subjects, so only the missing subject can occur here
     put(cfg, "none.md", howto(None, "Alpha task"))
     put(cfg, "ok.md", howto("'[[Sys B]]'", "Gamma task"))
     conn, _ = build(cfg)
     ids = {p: i for p, i in conn.execute("SELECT path, id FROM doc")}
     assert [(i, d) for i, d in violations(conn, "subjects")] == [([ids["Kb/none.md"]], "0 subjects")]
+
+
+def test_state_doc_with_four_subjects_gives_one_subjects_violation(cfg):
+    four = "['[[Sys A]]', '[[Sys B]]', '[[Third]]', '[[Fourth]]']"
+    put(cfg, "many.md", howto(four, "Delta task"))
+    conn, _ = build(cfg)
+    ids = {p: i for p, i in conn.execute("SELECT path, id FROM doc")}
+    assert violations(conn, "subjects") == [([ids["Kb/many.md"]], "4 subjects")]
+    assert conn.execute("SELECT count(*) FROM doc_subject WHERE doc_id = ?", (ids["Kb/many.md"],)).fetchone()[0] == 4
+    assert conn.execute("SELECT primary_subject FROM doc WHERE id = ?", (ids["Kb/many.md"],)).fetchone()[0] == "sys-a"
+
+
+def test_unresolved_owner_of_an_entity_document_gives_one_ref(cfg):
+    put(cfg, "entities/Sys A.md", SYS_A.replace("kind: system\n", "kind: system\nowner: '[[ghost]]'\n"))
+    conn, _ = build(cfg)
+    assert violations(conn, "ref") == [(["sys-a"], "owner: ghost")]
 
 
 def test_check_replaces_the_violations_after_a_second_import(cfg):
@@ -147,5 +162,11 @@ def test_kb_check_filters_by_subject(cfg):
     assert only_a["M1"]["count"] == 1
     assert [v["detail"] for v in only_a["M1"]["violations"]] == ["broken-a"]
     assert tools.kb_check(collection="Other")["M1"]["count"] == 0
+    # a broken link in the entity document counts for the entity as the subject
+    put(cfg, "entities/Sys A.md", SYS_A + "See [[broken-in-entity]].\n")
+    update(cfg, conn, emb)
+    own = tools.kb_check(subject="sys-a")
+    assert sorted(v["detail"] for v in own["M1"]["violations"]) == ["broken-a", "broken-in-entity"]
+    assert tools.kb_check(subject="sys-b")["M1"]["count"] == 1
     with pytest.raises(LookupError):
         tools.kb_check(subject="Nobody Here")
