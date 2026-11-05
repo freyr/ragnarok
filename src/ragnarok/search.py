@@ -275,10 +275,12 @@ def search(
     resolved: list[dict] | None = None,
     trace: Trace | None = None,
     authority: bool = True,
+    entity_first: bool | None = None,
 ) -> list[Hit]:
     """The ranked hits. `subject` is an entity ID or a name, or a list of them (any of them matches); `resolved`
     gets the entity of each name. The score is the RRF score times the authority factors; `authority=False` turns
-    them off."""
+    them off. The entity documents of the query subjects go first when `entity_first` (None: `kb.entity_first`)
+    and `authority` are true."""
     if include_private and not cfg.allow_private:
         raise PrivateNotAllowed("include_private needs allow_private = true in the configuration")
     # an empty list is no filter, not a filter that nothing passes
@@ -334,7 +336,7 @@ def search(
         factors = _authority(cfg, conn, query, list(scores), subject_ids or ()) if authority else {}
         final = {n: scores[n] * math.prod(factors.get(n, {}).values()) for n in scores}
         order = sorted(scores, key=lambda n: -final[n])
-        on = authority and cfg.kb.entity_first
+        on = authority and (cfg.kb.entity_first if entity_first is None else entity_first)
         first = _entity_first(cfg, conn, query, subject_ids or (), filters) if on else None
         ahead = [e["doc_id"] for e in first or []]
         order = ahead + [n for n in order if n not in ahead]

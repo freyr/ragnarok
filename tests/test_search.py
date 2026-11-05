@@ -412,6 +412,8 @@ def test_entity_first_is_off_with_the_knob_or_without_authority(kb_index):
         hits = search(c, conn, emb, "deploy the tiers service", limit=50, authority=authority)
         assert first(hits) == []
         assert all(h.score is not None for h in hits)
+    # the keyword of a caller turns it off as well
+    assert first(search(cfg, conn, emb, "deploy the tiers service", limit=50, entity_first=False)) == []
 
 
 def test_the_trace_records_the_entity_first_documents_at_their_final_rank(kb_index):

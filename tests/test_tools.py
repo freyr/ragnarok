@@ -204,12 +204,17 @@ def test_server_search_takes_class_and_subject(tmp_path):
         asyncio.run(server.call_tool("search", {"query": "deploy", "subject": "Core"}))
 
 
-def test_find_projects_ranks_no_project_by_an_entity_first_hit(tmp_path):
-    tools = Tools(*kb_setup(tmp_path))
-    # the entity document of Tiers goes first in search, with no score; find_projects ranks by the scored notes
-    assert tools.search("deploy tiers service")["results"][0]["entity_first"] is True
-    notes = [p for r in tools.find_projects("deploy tiers service")["results"] for p in r["matching_notes"]]
-    assert "Kb/entities/Loyalty Tiers.md" not in notes and "Kb/howto/deploy-tiers.md" in notes
+def test_find_projects_is_the_same_as_before_entity_first(tmp_path):
+    cfg, conn, emb = kb_setup(tmp_path)
+    tools = Tools(cfg, conn, emb)
+    before = Tools(dataclasses.replace(cfg, kb=dataclasses.replace(cfg.kb, entity_first=False)), conn, emb)
+    query = "deploy tiers service"
+    assert tools.search(query)["results"][0]["entity_first"] is True
+    projects = [(r["project"], r["score"], r["matching_notes"]) for r in tools.find_projects(query)["results"]]
+    expected = [(r["project"], r["score"], r["matching_notes"]) for r in before.find_projects(query)["results"]]
+    assert projects == expected
+    # the entity document ranks on its own RRF score in its project
+    assert "Kb/entities/Loyalty Tiers.md" in dict((p, n) for p, _, n in projects)["entities"]
 
 
 def test_server_errors_carry_their_reason(tools):
