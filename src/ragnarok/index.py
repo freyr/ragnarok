@@ -673,12 +673,13 @@ def _warn_duplicate_ids(conn: sqlite3.Connection, contested: list[str], result: 
     """Warn for each note of this update that still has a provisional ID because another note holds its ID."""
     for rel in contested:
         row = conn.execute(
-            "SELECT d.declared_id, h.path FROM doc d JOIN node n ON n.id = d.id JOIN doc h ON h.id = d.declared_id"
-            " WHERE d.path = ? AND n.provisional = 1",
+            "SELECT d.declared_id, e.id IS NOT NULL FROM doc d JOIN node n ON n.id = d.id"
+            " LEFT JOIN entity e ON e.doc_id = d.id WHERE d.path = ? AND n.provisional = 1",
             (rel,),
         ).fetchone()
-        if row:
-            result.warnings.append(f"{rel} has the id {row[0]} of {row[1]}; it gets a provisional ID")
+        holder = _holder(conn, row[0], bool(row[1])) if row else None
+        if holder is not None:
+            result.warnings.append(f"{rel} has the id {row[0]} of {holder}; it gets a provisional ID")
 
 
 def _embed_missing(cfg: Config, conn: sqlite3.Connection, embedder, chunks) -> int:

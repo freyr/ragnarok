@@ -108,11 +108,15 @@ CREATE INDEX IF NOT EXISTS main.entity_canonical_source ON entity_canonical (sou
 """
 
 
+# letters that NFKD does not decompose and that have a clear Latin base
+_FOLD = str.maketrans({"ł": "l", "ø": "o", "đ": "d", "ħ": "h", "ß": "ss", "æ": "ae", "œ": "oe"})
+
+
 def normalize_alias(text: str) -> str:
-    """Lower case, no diacritics, single spaces. A letter with no decomposition (such as ł) stays."""
+    """Lower case, no diacritics, single spaces. A letter with no decomposition (such as ł) folds by a map."""
     decomposed = unicodedata.normalize("NFKD", text)
     plain = "".join(c for c in decomposed if not unicodedata.combining(c))
-    return " ".join(plain.lower().split())
+    return " ".join(plain.lower().translate(_FOLD).split())
 
 
 def entity_id_of(doc_id: str) -> str:
@@ -226,17 +230,14 @@ def parse(cfg: Config, meta, fm: dict) -> KbDoc:
         if norm and norm not in seen:
             seen.add(norm)
             doc.aliases.append((norm, text))
-    definitions = cfg.kb.attributes.get(doc.kind or "", {})
     for item in fm.get("facts") or []:
         if not isinstance(item, dict) or not str(item.get("attribute") or "").strip():
             continue
         attribute = str(item["attribute"]).strip()
-        definition = definitions.get(attribute)
-        live = definition is not None and definition.live
         doc.facts.append(
             (
                 attribute,
-                None if live else _text(item.get("value")),
+                _text(item.get("value")),
                 _text(item.get("scope")),
                 _date(item.get("valid_from")),
                 _date(item.get("valid_until")),

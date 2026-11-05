@@ -9,6 +9,7 @@ from test_index import FakeEmbedder
 
 from ragnarok.config import AttributeDef, Config, DocType, KbConfig, RelationType
 from ragnarok.index import connect, update
+from ragnarok.kb import normalize_alias
 
 NOTES = {
     "Kb/entities/Stage.md": (
@@ -17,6 +18,7 @@ NOTES = {
         "facts:\n"
         "  - {attribute: aws_account, value: '1234', as_of: 2026-10-01}\n"
         "  - {attribute: monthly_cost, source: 'cost-explorer:1234'}\n"
+        "  - {attribute: monthly_cost, value: '99', source: 'cost-explorer:5678'}\n"
         "partOf: '[[Billing System]]'\n---\n# Stage\nThe stage environment.\n"
     ),
     "Kb/entities/Billing System.md": (
@@ -105,11 +107,13 @@ def test_live_fact_keeps_only_the_source(kb):
     facts = rows(
         conn,
         "SELECT attribute, value, as_of, source_ref, origin, source_doc FROM fact WHERE entity_id = 'env-stage'"
-        " ORDER BY attribute",
+        " ORDER BY attribute, source_ref",
     )
     assert facts == [
         ("aws_account", "1234", "2026-10-01", None, "declared", "env-stage~doc"),
         ("monthly_cost", None, None, "cost-explorer:1234", "declared", "env-stage~doc"),
+        # a live fact with a value in the file keeps the value: the later check reports it
+        ("monthly_cost", "99", None, "cost-explorer:5678", "declared", "env-stage~doc"),
     ]
 
 
@@ -288,7 +292,7 @@ def test_provisional_entity_document_gets_its_id_when_it_is_free(kb):
     update(kb, conn, emb)
     assert rows(conn, "SELECT id, doc_id FROM entity WHERE name LIKE 'Stage%'") == [("env-stage", "env-stage~doc")]
     assert rows(conn, "SELECT count(*) FROM fact WHERE entity_id = 'env-stage' AND source_doc = 'env-stage~doc'") == [
-        (2,)
+        (3,)
     ]
     assert rows(conn, "SELECT src, source_doc FROM relation WHERE rel = 'partOf' AND dst_text = 'Billing System'") == [
         ("env-stage", "env-stage~doc")
@@ -307,3 +311,17 @@ def test_rules_change_with_no_file_change_rewrites_no_entity_document(kb):
     assert rows(conn, "SELECT identity_key FROM doc WHERE path = ?", HOW_TO) == [
         ("Kb|how-to|sys-billing|deploy the service",)
     ]
+
+
+def test_normalize_alias_folds_letters_that_have_no_decomposition():
+    # the expected strings are written by hand
+    assert normalize_alias("Łódź Ørsted Đurđ") == "lodz orsted durd"
+    assert normalize_alias("Straße Æther Œuvre Ħal") == "strasse aether oeuvre hal"
+
+
+@pytest.mark.parametrize("entity_path", ["Kb/a-entity.md", "Kb/z-entity.md"])
+def test_shared_id_of_an_entity_and_a_plain_document_warns(kb, entity_path):
+    (kb.root / entity_path).write_text("---\nid: dup-1\ntype: entity\nkind: group\n---\n# Entity\nA team.\n")
+    (kb.root / "Kb/m-plain.md").write_text("---\nid: dup-1\n---\n# Plain\nA note.\n")
+    result = update(kb, connect(kb), FakeEmbedder())
+    assert any("dup-1" in w for w in result.warnings)
