@@ -44,7 +44,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--vault")
     sp.add_argument("--project")
     sp.add_argument("--area")
-    sp.add_argument("--type")
+    sp.add_argument("--type", action="append", help="a document type (repeatable: any of them)")
+    sp.add_argument("--collection")
+    sp.add_argument("--class", dest="class_", choices=["state", "record", "none"])
+    sp.add_argument("--subject", action="append", help="an entity ID, name or alias (repeatable: any of them)")
+    sp.add_argument("--status", action="append", help="active, archived or superseded (repeatable: any of them)")
     sp.add_argument("--no-archived", action="store_true", help="only notes with status active")
     sp.add_argument("--include-private", action="store_true", help="needs allow_private = true in the config")
     sp.add_argument("--limit", type=int, default=8)
@@ -323,6 +327,10 @@ def cmd_search(cfg, args) -> int:
             "type": args.type,
             "include_archived": not args.no_archived,
             "include_private": args.include_private,
+            "collection": args.collection,
+            "class": args.class_,
+            "subject": args.subject,
+            "status": args.status,
             "limit": args.limit,
             "mode": args.mode,
         }
@@ -338,14 +346,18 @@ def cmd_search(cfg, args) -> int:
             type=args.type,
             include_archived=not args.no_archived,
             include_private=args.include_private,
+            collection=args.collection,
+            class_=args.class_,
+            subject=args.subject,
+            status=args.status,
             limit=args.limit,
             mode=args.mode,
             trace=trace,
         )
-    except (IndexMismatch, EmbedError, PrivateNotAllowed) as e:
+    except (IndexMismatch, EmbedError, PrivateNotAllowed, LookupError) as e:
         print(f"ragnarok search: {e}", file=sys.stderr)
         if trace:
-            trace.finish(error=type(e).__name__)
+            trace.finish(error=getattr(e, "trace_label", type(e).__name__))
         return 1
     trace.finish()
     ms = (time.monotonic() - start) * 1000

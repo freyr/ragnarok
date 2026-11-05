@@ -5,7 +5,8 @@ from __future__ import annotations
 import contextlib
 import re
 import sqlite3
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from datetime import date
 
 import numpy as np
 
@@ -27,6 +28,16 @@ class PrivateNotAllowed(PermissionError):
     pass
 
 
+class SubjectNotResolved(LookupError):
+    """A `subject` name with no entity or with more than one. The trace labels it QUERY: the query was wrong."""
+
+    trace_label = "QUERY"
+
+    def __init__(self, message: str, candidates: list[dict]):
+        super().__init__(message)
+        self.candidates = candidates
+
+
 @dataclass
 class Hit:
     path: str
@@ -42,9 +53,20 @@ class Hit:
     score: float
     dense_rank: int | None
     fts_rank: int | None
+    # the scent fields: what the agent needs to judge the document before it reads it
+    id: str | None = None
+    class_: str | None = None
+    subjects: list[dict] = field(default_factory=list)
+    canonical: bool = False
+    as_of: str | None = None
+    review_warning: str | None = None
+    successor: dict | None = None
+    dispute: dict | None = None
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        out = asdict(self)
+        out["class"] = out.pop("class_")
+        return out
 
 
 def fts_query(query: str) -> str:
@@ -53,48 +75,82 @@ def fts_query(query: str) -> str:
     return " OR ".join(f'"{w}"' for w in dict.fromkeys(words))
 
 
+Values = str | list[str] | tuple[str, ...] | None
+
+
 @dataclass(frozen=True)
 class Filters:
     vault: str | None = None
     project: str | None = None
     area: str | None = None
-    type: str | None = None
+    type: Values = None
     include_archived: bool = True
     include_private: bool = False
+    collection: Values = None
+    class_: Values = None
+    status: Values = None
+    subject: tuple[str, ...] | None = None  # entity IDs, after the names resolve
+
+
+COLUMNS = ("vault", "project", "area", "type", "collection", "class", "status")
+STAT = {"collection", "type", "class", "area", "status"}  # the filter columns that `idx.stat` counts
+
+
+def _value(filters: Filters, column: str) -> tuple[str, ...] | None:
+    """The values of a column filter: one string or a list, as a tuple."""
+    value = getattr(filters, "class_" if column == "class" else column)
+    return (value,) if isinstance(value, str) else (tuple(value) if value is not None else None)
 
 
 def eligibility(filters: Filters) -> tuple[str, list]:
-    """SQL condition on the alias d (a doc row) and its parameters."""
+    """SQL condition on the alias d (a doc row) and its parameters. A redirect is never eligible."""
     where, params = [], []
-    for column in ("vault", "project", "area", "type"):
-        value = getattr(filters, column)
-        if value is not None:
-            where.append(f"d.{column} = ?")
-            params.append(value)
+    for column in COLUMNS:
+        values = _value(filters, column)
+        if values is not None:
+            where.append(f"d.{column} IN ({', '.join('?' * len(values))})")
+            params.extend(values)
+    if filters.subject is not None:
+        marks = ", ".join("?" * len(filters.subject))
+        where.append(f"EXISTS (SELECT 1 FROM doc_subject s WHERE s.doc_id = d.id AND s.entity_id IN ({marks}))")
+        params.extend(filters.subject)
     if not filters.include_archived:
         where.append("d.status = 'active'")
     if not filters.include_private:
         where.append("d.sensitivity = 'normal'")
-    return (" AND ".join(where) or "1"), params
-
-
-COLUMNS = ("vault", "project", "area", "type")
+    where.append("d.status != 'redirect'")
+    return " AND ".join(where), params
 
 
 def active_filters(filters: Filters) -> list[str]:
-    """The filters that apply: the columns that have a value, `archived` and `private`."""
-    names = [c for c in COLUMNS if getattr(filters, c) is not None]
+    """The filters that apply: the columns that have a value, `subject`, `archived` and `private`."""
+    names = [c for c in COLUMNS if _value(filters, c) is not None] + ["subject"] * (filters.subject is not None)
     return names + ["archived"] * (not filters.include_archived) + ["private"] * (not filters.include_private)
 
 
 def filter_checks(doc: dict, filters: Filters) -> dict[str, bool]:
-    """For each filter that applies: does the doc row pass it?"""
-    passes = {"archived": lambda: doc["status"] == "active", "private": lambda: doc["sensitivity"] == "normal"}
-    return {n: passes[n]() if n in passes else doc[n] == getattr(filters, n) for n in active_filters(filters)}
+    """For each filter that applies: does the doc row pass it? A redirect fails the rule that no filter turns off."""
+    passes = {
+        "archived": lambda: doc["status"] == "active",
+        "private": lambda: doc["sensitivity"] == "normal",
+        "subject": lambda: bool(set(doc["subjects"]) & set(filters.subject or ())),
+    }
+    checks = {n: passes[n]() if n in passes else doc[n] in _value(filters, n) for n in active_filters(filters)}
+    return checks | ({"redirect": False} if doc["status"] == "redirect" else {})
 
 
 def _plan(conn, filters: Filters, exact_limit: int) -> dict:
-    """The eligible units, the selectivity of each filter alone, and the scan mode."""
+    """The eligible units (an SQL count), the selectivity of each filter alone, and the scan mode.
+
+    The selectivity of a filter on a column of `idx.stat` is the sum of the units of its values in `stat`: for a
+    list of subjects it is an upper bound, as a document can have more than one of them. `vault` and `project` have
+    no `stat` row, so their selectivity is an SQL count.
+    """
+
+    def counted(column: str, values) -> int:
+        marks = ", ".join("?" * len(values))
+        sql = f'SELECT coalesce(sum(n_units), 0) FROM idx.stat WHERE "column" = ? AND value IN ({marks})'
+        return conn.execute(sql, [column, *values]).fetchone()[0]
 
     def units(f: Filters) -> int:
         predicate, params = eligibility(f)
@@ -104,12 +160,16 @@ def _plan(conn, filters: Filters, exact_limit: int) -> dict:
     total = conn.execute("SELECT count(*) FROM unit").fetchone()[0]
     selectivity = {}
     for name in active_filters(filters):
-        alone = Filters(
-            **{c: getattr(filters, c) if c == name else None for c in COLUMNS},
-            include_archived=name != "archived",
-            include_private=name != "private",
-        )
-        n = units(alone)
+        if name in STAT:
+            n = counted(name, _value(filters, name))
+        elif name == "subject":
+            n = counted("subject", filters.subject)
+        elif name == "archived":
+            n = counted("status", ["active"])
+        elif name == "private":
+            n = counted("sensitivity", ["normal"])
+        else:
+            n = units(Filters(**{name: getattr(filters, name)}, include_private=True))
         selectivity[name] = {"units": n, "selectivity": round(n / total, 5) if total else None}
     eligible = units(filters)
     return {
@@ -118,6 +178,29 @@ def _plan(conn, filters: Filters, exact_limit: int) -> dict:
         "selectivity": selectivity,
         "mode": "exact" if eligible <= exact_limit else "over_limit",
     }
+
+
+def resolve_subjects(conn, names: Values, allow_private: bool, trace: Trace | None) -> list[dict]:
+    """The entity of each subject name: an ID, else an alias or a name. The trace gets every name and its
+    candidates; a name with no entity or more than one raises SubjectNotResolved with the candidates."""
+    from . import kb  # kb imports fts_query from this module
+
+    names = [names] if isinstance(names, str) else list(names)
+    entries = []
+    for name in names:
+        candidates = kb.resolve(conn, name, allow_private)
+        selected = candidates[0]["id"] if len(candidates) == 1 else None
+        entries.append({"name": name, "candidates": candidates, "selected": selected})
+    if trace:
+        trace.set("ragnarok.entities", entries)
+    resolved = []
+    for e in entries:
+        try:
+            entity_id = kb.pick(e["candidates"], e["name"])
+        except LookupError as error:
+            raise SubjectNotResolved(str(error), e["candidates"]) from None
+        resolved.append({"name": e["name"], "id": entity_id, "matched_by": e["candidates"][0]["matched_by"]})
+    return resolved
 
 
 def _dense(conn, vector, filters: Filters) -> tuple[list[int], int]:
@@ -171,17 +254,30 @@ def search(
     vault: str | None = None,
     project: str | None = None,
     area: str | None = None,
-    type: str | None = None,
+    type: Values = None,
     include_archived: bool = True,
     include_private: bool = False,
+    collection: Values = None,
+    class_: Values = None,
+    subject: Values = None,
+    status: Values = None,
     limit: int = 8,
     mode: str = "hybrid",
     warnings: list[str] | None = None,
+    resolved: list[dict] | None = None,
     trace: Trace | None = None,
 ) -> list[Hit]:
+    """The ranked hits. `subject` is an entity ID or a name, or a list of them (any of them matches); `resolved`
+    gets the entity of each name."""
     if include_private and not cfg.allow_private:
         raise PrivateNotAllowed("include_private needs allow_private = true in the configuration")
-    filters = Filters(vault, project, area, type, include_archived, include_private)
+    subjects = resolve_subjects(conn, subject, include_private, trace) if subject is not None else None
+    if resolved is not None and subjects:
+        resolved.extend(subjects)
+    subject_ids = tuple(dict.fromkeys(e["id"] for e in subjects)) if subjects is not None else None
+    filters = Filters(
+        vault, project, area, type, include_archived, include_private, collection, class_, status, subject_ids
+    )
     stage = trace.stage if trace else lambda name: contextlib.nullcontext()
     plan, vector = None, None
     if trace:
@@ -230,12 +326,49 @@ def search(
             heading, text = conn.execute("SELECT heading_path, text FROM unit WHERE id = ?", (best[nid][1],)).fetchone()
             words = text.split()
             snippet = " ".join(words[:SNIPPET_WORDS]) + (" …" if len(words) > SNIPPET_WORDS else "")
-            hits.append(Hit(*n, heading, snippet, round(scores[nid], 5), *ranks[nid]))
+            hits.append(
+                Hit(*n, heading, snippet, round(scores[nid], 5), *ranks[nid], **_scent(conn, nid, include_private))
+            )
     if trace:
         if plan is not None:
             trace.set("ragnarok.plan", {**plan, "pools": pools, "pool_limit": CANDIDATES})
         safely("candidates", _record, conn, trace, filters, (query, vector), scores, ranks, best, order, top)
     return hits
+
+
+def _scent(conn, doc_id: str, include_private: bool) -> dict:
+    """The scent fields of a document. A private subject or successor shows no name or path without
+    include_private."""
+    class_, as_of, review_by, successor, owner, due = conn.execute(
+        "SELECT class, as_of, review_by, superseded_by, dispute_owner_text, dispute_due FROM doc WHERE id = ?",
+        (doc_id,),
+    ).fetchone()
+    visible = "" if include_private else " AND d.sensitivity = 'normal'"
+    subjects = [
+        {"id": entity_id, "name": name or text}
+        for entity_id, text, name in conn.execute(
+            "SELECT s.entity_id, s.target_text, (SELECT e.name FROM entity e JOIN doc d ON d.id = e.doc_id"
+            f" WHERE e.id = s.entity_id{visible}) FROM doc_subject s WHERE s.doc_id = ? ORDER BY s.ord",
+            (doc_id,),
+        )
+    ]
+    canonical = conn.execute("SELECT 1 FROM entity_canonical WHERE doc_id = ? LIMIT 1", (doc_id,)).fetchone()
+    warning = None
+    if class_ == "state" and review_by and review_by < date.today().isoformat():
+        warning = f"The review date {review_by} is in the past: the content can be out of date."
+    if successor is not None:
+        row = conn.execute(f"SELECT d.path FROM doc d WHERE d.id = ?{visible}", (successor,)).fetchone()
+        successor = {"id": successor, "path": row[0] if row else None}
+    return {
+        "id": doc_id,
+        "class_": class_,
+        "subjects": subjects,
+        "canonical": canonical is not None,
+        "as_of": as_of,
+        "review_warning": warning,
+        "successor": successor,
+        "dispute": {"owner": owner, "due": due} if owner or due else None,
+    }
 
 
 def _first_seen(doc_ids) -> dict[str, int]:
@@ -279,11 +412,14 @@ def _record(conn, trace: Trace, filters: Filters, probe, scores, ranks, best, or
         gold_ids[path] = row[0] if row else None
     wanted = in_top | {i for i in gold_ids.values() if i}
     marks = ",".join("?" * len(wanted))
-    cols = ("id", "path", "vault", "project", "area", "type", "status", "sensitivity", "mtime_ns")
+    cols = ("id", "path", "vault", "project", "area", "type", "collection", "class", "status", "sensitivity")
     docs = {
-        r[0]: dict(zip(cols, r, strict=True))
+        r[0]: dict(zip(cols, r, strict=True), subjects=[])
         for r in conn.execute(f"SELECT {', '.join(cols)} FROM doc WHERE id IN ({marks})", list(wanted))
     }
+    sql = f"SELECT doc_id, entity_id FROM doc_subject WHERE entity_id IS NOT NULL AND doc_id IN ({marks})"
+    for nid, entity_id in conn.execute(sql, list(wanted)):
+        docs[nid]["subjects"].append(entity_id)
 
     gold_set = {i for i in gold_ids.values() if i}
     before = (safely("prefilter ranks", _prefilter_ranks, conn, *probe) if gold_set else None) or {}

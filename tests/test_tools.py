@@ -1,10 +1,11 @@
 import asyncio
 import dataclasses
+import json
 import os
 import time
 
 import pytest
-from test_search import EXTRA, TopicEmbedder
+from test_search import EXTRA, TopicEmbedder, kb_setup
 
 from ragnarok import server as server_module
 from ragnarok.config import dump_config
@@ -182,6 +183,24 @@ def test_server_lists_the_tools(tools):
         "get_entity",
         "related",
     }
+    search_input = next(t for t in asyncio.run(server.list_tools()) if t.name == "search").input_schema
+    assert {"collection", "class", "subject", "status", "type"} <= set(search_input["properties"])
+    assert "class_" not in search_input["properties"]
+    for rule in ("resolve the entities first", "live value", "subject and type"):
+        assert rule in server.instructions
+
+
+def test_server_search_takes_class_and_subject(tmp_path):
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    server = build(tools=Tools(*kb_setup(tmp_path)))
+    arguments = {"query": "deploy service", "class": "state", "subject": ["Tiers"], "limit": 50}
+    result = asyncio.run(server.call_tool("search", arguments))
+    payload = json.loads(result.content[0].text)
+    assert [r["path"] for r in payload["results"]] == ["Kb/howto/deploy-tiers.md"]
+    assert payload["subjects"][0]["id"] == "feat-tiers"
+    with pytest.raises(ToolError, match="ambiguous: feat-tiers, sys-billing"):
+        asyncio.run(server.call_tool("search", {"query": "deploy", "subject": "Core"}))
 
 
 def test_server_errors_carry_their_reason(tools):

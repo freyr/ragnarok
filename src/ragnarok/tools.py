@@ -95,7 +95,7 @@ def traced(fn):
         try:
             result = fn(self, *args, **kwargs)
         except Exception as e:
-            trace.finish(error=type(e).__name__)
+            trace.finish(error=getattr(e, "trace_label", type(e).__name__))
             raise
         finally:
             self.trace = None
@@ -150,8 +150,11 @@ class Tools:
     @traced
     def search(self, query: str, **filters) -> dict:
         warnings = self.scan()
-        hits = search(self.cfg, self.conn, self.embedder, query, warnings=warnings, trace=self.trace, **filters)
-        return {"results": [h.as_dict() for h in hits], "warnings": warnings}
+        resolved: list[dict] = []
+        hits = search(
+            self.cfg, self.conn, self.embedder, query, warnings=warnings, resolved=resolved, trace=self.trace, **filters
+        )
+        return {"results": [h.as_dict() for h in hits], "subjects": resolved, "warnings": warnings}
 
     @traced
     def find_projects(self, query: str, vault: str | None = None, limit: int = 5) -> dict:

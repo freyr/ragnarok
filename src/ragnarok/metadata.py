@@ -106,6 +106,8 @@ class NoteMeta:
     supersedes: list[str] = field(default_factory=list)  # the target texts of `supersedes`, in file order
     as_of: str | None = None
     review_by: str | None = None
+    dispute_owner_text: str | None = None  # `dispute: {owner, due}`: an open dispute of the content
+    dispute_due: str | None = None
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -381,6 +383,8 @@ def resolve(
     owner_text = _first_target(fm.get("owner"))
     superseded_by_text = _first_target(fm.get("superseded_by"))
     supersedes = _targets(fm.get("supersedes"))
+    dispute = fm.get("dispute") if isinstance(fm.get("dispute"), dict) else {}
+    dispute_due = _iso_date(dispute["due"]) if dispute.get("due") is not None else None
 
     return NoteMeta(
         vault=vault,
@@ -405,6 +409,8 @@ def resolve(
         supersedes=supersedes,
         as_of=as_of,
         review_by=review_by,
+        dispute_owner_text=_first_target(dispute.get("owner")),
+        dispute_due=dispute_due,
     )
 
 

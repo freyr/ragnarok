@@ -8,9 +8,11 @@ import logging
 import threading
 import time
 from pathlib import Path
+from typing import Annotated
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from pydantic import Field
 
 from .config import Config, config_path, load_config
 from .embed import EmbedError, OllamaEmbedder
@@ -27,7 +29,10 @@ INSTRUCTIONS = (
     "Search the user's Obsidian vaults ({vaults}). "
     "When a prompt continues or resembles earlier work but does not name the project, call find_projects first, "
     "then list_project on the best match. Use search for facts, open_note to read a note, and find_by_jira for "
-    "Jira keys. Results hold note paths; cite them. A result can be unrelated: read the text before you use it."
+    "Jira keys. Results hold note paths; cite them. A result can be unrelated: read the text before you use it. "
+    "For the knowledge base: resolve the entities first (find_entity, then get_entity and related); a live value "
+    "(a cost, a count, a current state) comes from the skill that get_entity names, never from a note; for a "
+    "question with one true answer, call search with subject and type. kb_check counts the integrity violations."
 )
 
 
@@ -137,6 +142,8 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
             try:
                 with lock:
                     state["ids"] = _ids(kwargs.pop("ctx", None))
+                    if "class" in kwargs:  # the MCP input name of the parameter class_ (a Python keyword)
+                        kwargs["class_"] = kwargs.pop("class")
                     return fn(*args, **kwargs)
             except EXPECTED as e:
                 # the client sees the text of a ToolError only; other exceptions show as a bare failure
@@ -171,16 +178,27 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
         vault: str | None = None,
         project: str | None = None,
         area: str | None = None,
-        type: str | None = None,
+        type: str | list[str] | None = None,
         include_archived: bool = True,
         include_private: bool = False,
+        collection: str | None = None,
+        class_: Annotated[str | None, Field(alias="class")] = None,
+        subject: str | list[str] | None = None,
+        status: str | list[str] | None = None,
         limit: int = 8,
         ctx: Context | None = None,
     ) -> dict:
         """Hybrid search (meaning and keywords) over the vault notes. Returns notes, each with its best section.
 
-        Filters: vault (the name of a vault folder), project (folder slug), area, type (research,
-        spec, plan, summary, drivers, guide, note, ...). include_private works only when the user allows it.
+        Filters: vault (the name of a vault folder), project (folder slug), area, type (research, spec, plan,
+        how-to, decision, ..., one or a list), collection, class (state, record or none), status (active, archived,
+        superseded; one or a list) and subject (an entity ID, name or alias, or a list: any of them matches). A
+        redirect is never a result. include_private works only when the user allows it.
+
+        Resolve the entities first (find_entity); for a question with one true answer use subject and type; a live
+        value comes from the skill that get_entity names, not from a note. An unknown or ambiguous subject is an
+        error with the candidate IDs. Each result has id, class, subjects, canonical, as_of, review_warning,
+        successor and dispute; "subjects" gives the entity of each subject name.
         """
         return get().search(
             query,
@@ -190,6 +208,10 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
             type=type,
             include_archived=include_archived,
             include_private=include_private,
+            collection=collection,
+            class_=class_,
+            subject=subject,
+            status=status,
             limit=limit,
         )
 

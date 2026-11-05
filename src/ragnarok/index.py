@@ -116,7 +116,9 @@ CREATE TABLE IF NOT EXISTS main.doc (
     superseded_by TEXT,
     superseded_by_text TEXT,
     as_of TEXT,
-    review_by TEXT
+    review_by TEXT,
+    dispute_owner_text TEXT,
+    dispute_due TEXT
 );
 CREATE INDEX IF NOT EXISTS main.doc_project ON doc (vault, project);
 CREATE TABLE IF NOT EXISTS main.doc_subject (
@@ -500,7 +502,7 @@ def _same(cfg: Config, conn: sqlite3.Connection, doc_id: str, m, chunks, kbdoc: 
     """
     row = conn.execute(
         "SELECT title, project, area, type, status, sensitivity, description, class, task, canonical,"
-        " owner_text, superseded_by_text, as_of, review_by FROM doc WHERE id = ?",
+        " owner_text, superseded_by_text, as_of, review_by, dispute_owner_text, dispute_due FROM doc WHERE id = ?",
         (doc_id,),
     ).fetchone()
     base = (m.title, m.project, m.area, m.type, m.status, m.sensitivity, m.description)
@@ -512,6 +514,8 @@ def _same(cfg: Config, conn: sqlite3.Connection, doc_id: str, m, chunks, kbdoc: 
         m.superseded_by_text,
         m.as_of,
         m.review_by,
+        m.dispute_owner_text,
+        m.dispute_due,
     )
     if row != (*base, *extra):
         return False
@@ -636,7 +640,10 @@ def update(
         result.removed += 1
     claimed = _claim_free_ids(conn)
     _warn_duplicate_ids(conn, contested, result)
-    if result.added or result.changed or result.moved or result.removed or result.rederived or claimed or rederive:
+    touched = (
+        result.added or result.changed or result.moved or result.removed or result.rederived or claimed or rederive
+    )
+    if touched:
         resolve_links(conn)
         kb.resolve_refs(conn)
         kb.check_violations(conn)
@@ -644,6 +651,8 @@ def update(
         conn.execute("INSERT OR REPLACE INTO main.meta (key, value) VALUES ('rules_hash', ?)", (rules,))
     conn.commit()
     result.reconciled = reconcile(cfg, conn, embedder, result)
+    if touched or result.reconciled:
+        refresh_stat(conn)
     if result.deferred:
         result.warnings.append(NOT_CURRENT)
     result.seconds = time.monotonic() - start
@@ -786,8 +795,8 @@ def _write(
         conn.execute(
             "INSERT INTO doc (id, vault, path, title, project, area, type, status, sensitivity, description,"
             " mtime_ns, size, hash, declared_id, class, mode, collection, owner, owner_text, primary_subject, task,"
-            " identity_key, canonical, superseded_by, superseded_by_text, as_of, review_by)"
-            " VALUES (" + ", ".join("?" * 27) + ")",
+            " identity_key, canonical, superseded_by, superseded_by_text, as_of, review_by, dispute_owner_text,"
+            " dispute_due) VALUES (" + ", ".join("?" * 29) + ")",
             (
                 doc_id,
                 m.vault,
@@ -816,6 +825,8 @@ def _write(
                 m.superseded_by_text,
                 m.as_of,
                 m.review_by,
+                m.dispute_owner_text,
+                m.dispute_due,
             ),
         )
         conn.executemany(
@@ -833,6 +844,29 @@ def _write(
         )
         conn.executemany("INSERT INTO jira (key, doc_id) VALUES (?, ?)", [(k, doc_id) for k in m.jira])
         kb.write(conn, doc_id, p.kbdoc)
+
+
+STAT_COLUMNS = ("collection", "type", "class", "area", "status", "sensitivity")
+
+
+def refresh_stat(conn: sqlite3.Connection) -> None:
+    """Write `idx.stat` again: the docs and the units of each value of the filter columns and of each subject."""
+    units = "LEFT JOIN (SELECT doc_id, count(*) AS n FROM unit GROUP BY doc_id) u ON u.doc_id = d.id"
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    conn.execute("DELETE FROM idx.stat")
+    for column in STAT_COLUMNS:
+        conn.execute(
+            f'INSERT INTO idx.stat ("column", value, n_docs, n_units, updated) SELECT ?, d.{column}, count(*),'
+            f" coalesce(sum(u.n), 0), ? FROM doc d {units} GROUP BY d.{column}",
+            (column, now),
+        )
+    conn.execute(
+        "INSERT INTO idx.stat (\"column\", value, n_docs, n_units, updated) SELECT 'subject', s.entity_id,"
+        f" count(DISTINCT d.id), coalesce(sum(u.n), 0), ? FROM (SELECT DISTINCT doc_id, entity_id FROM doc_subject"
+        f" WHERE entity_id IS NOT NULL) s JOIN doc d ON d.id = s.doc_id {units} GROUP BY s.entity_id",
+        (now,),
+    )
+    conn.commit()
 
 
 def reconcile(cfg: Config, conn: sqlite3.Connection, embedder, result: UpdateResult | None = None) -> int:
