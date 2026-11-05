@@ -142,3 +142,55 @@ def test_related_depth_is_the_shortest_valid_path(tools):
 def test_related_with_an_unknown_relation_is_an_error(tools):
     with pytest.raises(ValueError, match="dependson.*dependsOn"):
         tools.related("sys-core", relation="dependson")
+
+
+def ends(result):
+    return sorted((e["source"]["id"], e["relation"], e["target"]["id"], e["depth"]) for e in result["edges"])
+
+
+def test_related_both_at_depth_one_gives_the_out_and_in_edges_once(tools):
+    result = tools.related("sys-core", direction="both")
+    assert ends(result) == [
+        ("sys-core", "dependsOn", "feat-tiers", 1),
+        ("sys-core", "dependsOn", "sys-gateway", 1),
+        ("sys-core", "partOf", "plat-bet", 1),
+        ("sys-engine", "partOf", "sys-core", 1),
+    ]
+
+
+def test_related_both_at_depth_two_goes_out_then_in(tools):
+    # Core -> Tiers (out), then Acme -> Tiers and Beta -> Tiers (in)
+    result = tools.related("sys-core", direction="both", kind="client", depth=2)
+    assert ends(result) == [
+        ("client-acme", "requests", "feat-tiers", 2),
+        ("client-beta", "requests", "feat-tiers", 2),
+    ]
+    assert tools.related("sys-core", direction="both", kind="client")["edges"] == []
+
+
+def test_related_both_stops_at_a_cycle(tools):
+    result = tools.related("cyc-a", relation="dependsOn", direction="both", depth=3)
+    assert ends(result) == [
+        ("cyc-a", "dependsOn", "cyc-b", 1),
+        ("cyc-b", "dependsOn", "cyc-c", 2),
+        ("cyc-c", "dependsOn", "cyc-a", 1),
+    ]
+
+
+def test_related_both_trace_records_the_edges_before_the_filters(tools):
+    result = tools.related("Core System", direction="both", kind="feature")
+    assert ends(result) == [("sys-core", "dependsOn", "feat-tiers", 1)]
+    (entry,) = find_line(tools.cfg, result["trace_id"])["ragnarok.entities"]
+    assert sorted((e["src"], e["dst"]) for e in entry["edges_before"]) == [
+        ("sys-core", "feat-tiers"),
+        ("sys-core", "plat-bet"),
+        ("sys-core", "sys-gateway"),
+        ("sys-engine", "sys-core"),
+    ]
+    assert [(e["src"], e["dst"]) for e in entry["edges"]] == [("sys-core", "feat-tiers")]
+    # the reached entity of the in edge is its source
+    assert sorted(entry["removed"], key=lambda r: r["id"]) == [
+        {"id": "plat-bet", "filter": "kind"},
+        {"id": "sys-engine", "filter": "kind"},
+        {"id": "sys-gateway", "filter": "kind"},
+    ]

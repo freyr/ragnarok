@@ -306,7 +306,8 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
         """The exact join through the declared relations of an entity, to depth 3 (no cycle).
 
         entity is an ID or a name; an ambiguous name is an error with the candidate IDs. direction is out (the
-        entity is the source) or in (the entity is the target: the clients of a feature). relation names one
+        entity is the source), in (the entity is the target: the clients of a feature) or both (each hop follows
+        a relation out or in). relation names one
         relation type. kind keeps the edges whose far end has the kind. as_of (default today) drops an edge that is
         not valid then, with each edge behind it. Each edge has its source and target (id, kind, name), relation,
         origin, confidence, validity, source_doc and depth. Only declared edges unless include_extracted is true.
