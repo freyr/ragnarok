@@ -233,21 +233,23 @@ def search(
             hits.append(Hit(*n, heading, snippet, round(scores[nid], 5), *ranks[nid]))
     if trace:
         if plan is not None:
-            trace.set("ragnarok.plan", {**plan, "pools": pools})
+            trace.set("ragnarok.plan", {**plan, "pools": pools, "pool_limit": CANDIDATES})
         safely("candidates", _record, conn, trace, filters, (query, vector), scores, ranks, best, order, top)
     return hits
 
 
 def _first_seen(doc_ids) -> dict[str, int]:
-    """The rank of each document: the position of its first unit in a ranked list of unit owners."""
+    """The rank of the best unit of each document: the 1-based position of its first unit in a ranked list of
+    unit owners. A pool holds the first CANDIDATES units, so a rank at or below CANDIDATES is inside the pool."""
     ranks: dict[str, int] = {}
-    for d in doc_ids:
-        ranks.setdefault(d, len(ranks) + 1)
+    for position, d in enumerate(doc_ids, start=1):
+        ranks.setdefault(d, position)
     return ranks
 
 
 def _prefilter_ranks(conn, query: str, vector) -> dict[str, tuple[int | None, int | None]]:
-    """The note rank of every document with no filter: an exact scan of all units, and the unfiltered FTS list."""
+    """The unit rank of the best unit of every document with no filter: an exact scan of all units and the
+    unfiltered FTS list. None means no vector or no match."""
     dense: dict[str, int] = {}
     if vector is not None:
         rows = conn.execute("SELECT unit_id, doc_id, embedding FROM unit_emb").fetchall()

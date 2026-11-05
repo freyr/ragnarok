@@ -239,3 +239,24 @@ def test_every_read_tool_records_the_returned_documents(tools):
         assert sorted(d["path"] for d in docs) == sorted(set(returned(result))), name
         assert docs and all(d["id"] for d in docs), name
         assert [s["id"] for s in line["ragnarok.returned.status"]] == [d["id"] for d in docs], name
+
+
+@pytest.mark.parametrize("method", ["dense", "fts"])
+def test_prefilter_rank_tells_inside_the_pool_from_outside(tools, monkeypatch, method):
+    from ragnarok import search as search_module
+
+    monkeypatch.setattr(search_module, "CANDIDATES", 10)
+    hits = tools.search("boiler", limit=100)["results"]  # one unit for each note, so unit rank = note rank
+    ranked = {h["path"] for h in hits if h[f"{method}_rank"] is not None}
+    inside = sorted(ranked)[0]
+    outside = next(PEER.format(i) for i in range(60) if PEER.format(i) not in ranked)
+    monkeypatch.setenv(GOLD_ENV, json.dumps([inside, outside]))
+    result = tools.search("boiler", project="Astro")
+    line = line_of(tools.cfg, result["trace_id"])
+    assert line["ragnarok.plan"]["pool_limit"] == 10
+    records = {c["path"]: c for c in line["ragnarok.candidates"] if c.get("gold")}
+    for path in (inside, outside):
+        assert records[path]["filters"]["project"] is False
+        assert records[path][f"{method}_rank"] is None
+    assert 1 <= records[inside][f"prefilter_{method}_rank"] <= 10
+    assert records[outside][f"prefilter_{method}_rank"] > 10
