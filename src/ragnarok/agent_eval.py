@@ -3,9 +3,9 @@ ragnarok MCP tools and Read, both with the same limit of tool calls.
 
 Both agents work in a mirror of the vaults in <data_dir>/eval/vaults. The mirror holds only the notes that are
 not private and not in eval_exclude (for example notes that quote the questions and the expected answers).
-The MCP agent gets a server with its own home <data_dir>/eval: a config with the mirror as root, a copy of
-core.db (the embedding cache), its own index and its own logs/server.log, from which the report reads
-the search latency.
+The MCP agent gets a server with its own home <data_dir>/eval: a config with the mirror as root, copies of
+core.db and index.db (the update drops the notes that are not in the mirror) and its own logs/server.log, from
+which the report reads the search latency.
 """
 
 from __future__ import annotations
@@ -57,7 +57,9 @@ def mirror_notes(cfg: Config) -> list[str]:
 
 
 def prepare(cfg: Config, reuse_mirror: bool = False) -> Config:
-    """Make the mirror, the config and the core.db copy of the evaluation home. Return the evaluation config.
+    """Make the mirror, the config and the copies of core.db and index.db of the evaluation home.
+
+    Return the evaluation config.
 
     With reuse_mirror and a mirror that exists, keep the mirror and do not copy it again.
     """
@@ -71,20 +73,27 @@ def prepare(cfg: Config, reuse_mirror: bool = False) -> Config:
             shutil.copy2(cfg.note_path(rel), target)
     (home / "config.toml").write_text(dump_config(replace(cfg, vault_paths={}), root="vaults", data_dir="data"))
     ecfg = load_config(home / "config.toml")
-    if cfg.core_path.exists():
-        # the cache of the full home: the mirror index finds its chunks in it and embeds nothing
-        ecfg.core_path.parent.mkdir(parents=True, exist_ok=True)
-        src = sqlite3.connect(cfg.core_path)
-        dst = sqlite3.connect(ecfg.core_path)
-        src.backup(dst)
-        src.close()
-        dst.close()
+    # the files of the full home: the mirror index finds its notes and the cache in them and embeds nothing
+    copied = False
+    for src_path, dst_path in ((cfg.core_path, ecfg.core_path), (cfg.index_path, ecfg.index_path)):
+        if src_path.exists():
+            dst_path.parent.mkdir(parents=True, exist_ok=True)
+            src = sqlite3.connect(src_path)
+            dst = sqlite3.connect(dst_path)
+            src.backup(dst)
+            src.close()
+            dst.close()
+            copied = True
     from .embed import OllamaEmbedder
     from .index import connect, update
 
     conn = connect(ecfg)
     try:
         update(ecfg, conn, OllamaEmbedder(ecfg))  # before the run, so no search call pays for this scan
+        if copied:
+            # the copies held the private and excluded notes of the full home: free their pages
+            conn.execute("VACUUM main")
+            conn.execute("VACUUM idx")
     finally:
         conn.close()
     return ecfg

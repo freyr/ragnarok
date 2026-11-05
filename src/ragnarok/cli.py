@@ -18,6 +18,8 @@ COMMANDS = {
     "survey": "Print the facts that the path rules of a vault need",
     "eval": "Run the evaluation sets, make the mirror (prepare) or print its hash (mirror-hash)",
     "cache": "Work with the embedding cache in core.db",
+    "migrate": "Move a version 1 index into core.db and a new index.db, with no new embedding",
+    "backup": "Copy core.db with the SQLite backup API",
     "init": "Set up this computer: config, Ollama, model, index and the MCP server in Claude Code",
     "doctor": "Check the six parts of the setup and print the fix for each failure",
 }
@@ -58,8 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
     cp = parsers["cache"]
     cp.add_argument("action", choices=["import"])
     cp.add_argument("--from", dest="source", type=Path, required=True, help="a version 1 index file")
+    parsers["backup"].add_argument("--to", type=Path, help="the copy (default <data_dir>/backups/core-<UTC time>.db)")
     parsers["index"].add_argument("--min-words", type=int, help="build a separate index with this minimum chunk size")
-    parsers["index"].add_argument("--rebuild", action="store_true", help="delete the index and make it again")
+    parsers["index"].add_argument(
+        "--rebuild", action="store_true", help="delete the index and the derived core tables and make them again"
+    )
     parsers["chunks"].add_argument("--stats", action="store_true", help="print totals for all vaults")
     parsers["chunks"].add_argument("--min-words", type=int, help="override min_words from the config")
     parsers["chunks"].add_argument("paths", nargs="*", help="print the chunks of these notes")
@@ -147,15 +152,11 @@ def _with_min_words(cfg, min_words):
 
 def cmd_index(cfg, args) -> int:
     from .embed import EmbedError, OllamaEmbedder
-    from .index import IndexMismatch, connect, update
+    from .index import IndexMismatch, connect, rebuild, update
 
     cfg = _with_min_words(cfg, args.min_words)
-
-    if args.rebuild:
-        for suffix in ("", "-wal", "-shm"):
-            cfg.index_path.with_name(cfg.index_path.name + suffix).unlink(missing_ok=True)
     try:
-        conn = connect(cfg)
+        conn = rebuild(cfg) if args.rebuild else connect(cfg)
     except IndexMismatch as e:
         print(e, file=sys.stderr)
         return 1
@@ -177,6 +178,28 @@ def cmd_cache(cfg, args) -> int:
         print(f"No index file at {args.source}.", file=sys.stderr)
         return 1
     print(f"imported {import_cache(cfg, args.source)} rows into {cfg.core_path}")
+    return 0
+
+
+def cmd_migrate(cfg, args) -> int:
+    from .index import IndexMismatch, migrate
+
+    try:
+        target, copied = migrate(cfg)
+    except IndexMismatch as e:
+        print(e, file=sys.stderr)
+        return 1
+    print(f"backup {target}\ncopied {copied} cache rows into {cfg.core_path}\nnext: ragnarok index")
+    return 0
+
+
+def cmd_backup(cfg, args) -> int:
+    from .index import backup
+
+    if not cfg.core_path.exists():
+        print(f"No core file at {cfg.core_path}.", file=sys.stderr)
+        return 1
+    print(f"backup {backup(cfg, args.to)}")
     return 0
 
 
@@ -425,6 +448,8 @@ HANDLERS = {
     "chunks": cmd_chunks,
     "index": cmd_index,
     "cache": cmd_cache,
+    "migrate": cmd_migrate,
+    "backup": cmd_backup,
     "status": cmd_status,
     "search": cmd_search,
 }

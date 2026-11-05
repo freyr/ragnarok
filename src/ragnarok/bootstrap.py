@@ -132,7 +132,10 @@ def doctor(cfg: Config, config_file: Path, home: Path) -> list[Check]:
         )
 
     notes, detail = index_notes(cfg)
-    fix = "ragnarok index --rebuild" if cfg.index_path.exists() else "ragnarok index"
+    if "ragnarok migrate" in detail:
+        fix = "ragnarok migrate"
+    else:
+        fix = "ragnarok index --rebuild" if cfg.index_path.exists() else "ragnarok index"
     checks.append(Check("index", bool(notes), f"{notes} notes in {detail}" if notes else detail, fix))
 
     command = mcp_command()

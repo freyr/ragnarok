@@ -41,7 +41,8 @@ def seed_index(cfg, specs, vectors, text="needle"):
             (doc, vault, f"{doc}.md", project, area, type_, status, sensitivity),
         )
         conn.execute(
-            "INSERT INTO unit (id, doc_id, ord, heading_path, text, text_hash, words) VALUES (?, ?, 0, 'h', ?, ?, 1)",
+            "INSERT INTO unit (id, doc_id, doc_hash, ord, heading_path, text, text_hash, words)"
+            " VALUES (?, ?, 'h', 0, 'h', ?, ?, 1)",
             (i, doc, text, f"t{i}"),
         )
         conn.execute("INSERT INTO unit_fts (rowid, heading_path, text) VALUES (?, 'h', ?)", (i, text))

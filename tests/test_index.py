@@ -48,6 +48,7 @@ def test_full_index_then_no_new_embeddings(cfg):
     assert (second.added, second.changed, second.removed, second.embedded, second.rederived) == (0, 0, 0, 0, 0)
     st = status(cfg, conn)
     assert st["notes"] == first.notes and st["chunks"] == st["vectors"] == first.chunks
+    assert (st["core"], st["index"]) == (str(cfg.core_path), str(cfg.index_path))
 
 
 def test_changed_note_is_rewritten_and_only_new_chunks_are_embedded(cfg):
@@ -353,23 +354,25 @@ def test_duplicate_frontmatter_id_gives_a_provisional_id_and_a_warning(cfg):
 BOILER = "Home/Heating/notes/boiler.md"
 
 
-def test_version_1_file_gives_index_mismatch(cfg):
+def test_connect_on_a_v1_file_names_the_migrate_command(cfg):
     import sqlite3
 
     v1 = sqlite3.connect(cfg.index_path)
     v1.executescript(
         "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
         "CREATE TABLE jira (key TEXT NOT NULL, note_id INTEGER NOT NULL);"
+        "CREATE TABLE embed_cache (text_hash TEXT PRIMARY KEY, model TEXT NOT NULL, vector BLOB NOT NULL);"
     )
     v1.executemany(
         "INSERT INTO meta VALUES (?, ?)", [("model", cfg.model), ("dimension", "8"), ("schema_version", "1")]
     )
     v1.commit()
     v1.close()
-    with pytest.raises(IndexMismatch):
+    before = cfg.index_path.read_bytes()
+    with pytest.raises(IndexMismatch, match="Run `ragnarok migrate`"):
         connect(cfg)
-    tables = sqlite3.connect(cfg.index_path).execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
-    assert sorted(tables) == [("jira",), ("meta",)]
+    assert cfg.index_path.read_bytes() == before
+    assert not cfg.core_path.exists()
 
 
 def test_frontmatter_id_moves_from_one_note_to_another_in_one_update(cfg):
@@ -400,3 +403,62 @@ def test_case_only_rename_with_an_edit_keeps_the_id(cfg):
     assert result.warnings == []
     assert conn.execute("SELECT id FROM doc WHERE path = ?", (dst,)).fetchone() == ("x-1",)
     assert conn.execute("SELECT count(*) FROM doc WHERE path = ?", (BOILER,)).fetchone() == (0,)
+
+
+def test_delete_of_a_unit_deletes_its_vector_and_fts_row(cfg):
+    conn, _, _ = build(cfg)
+    uid = conn.execute("SELECT min(id) FROM unit").fetchone()[0]
+    assert count(conn, f"SELECT count(*) FROM unit_emb WHERE unit_id = {uid}") == 1
+    conn.execute("DELETE FROM unit WHERE id = ?", (uid,))
+    assert count(conn, f"SELECT count(*) FROM unit_emb WHERE unit_id = {uid}") == 0
+    assert count(conn, f"SELECT count(*) FROM unit_fts WHERE rowid = {uid}") == 0
+    assert count(conn, "SELECT count(*) FROM unit_fts") == count(conn, "SELECT count(*) FROM unit")
+
+
+def test_reconcile_splits_a_doc_whose_units_have_an_old_hash(cfg):
+    conn, emb, _ = build(cfg)
+    doc_of = lambda p: conn.execute("SELECT id, hash FROM doc WHERE path = ?", (p,)).fetchone()  # noqa: E731
+    boiler, boiler_hash = doc_of(BOILER)
+    field_stop, _ = doc_of(FIELD_STOP)
+    units = count(conn, "SELECT count(*) FROM unit")
+    conn.execute("UPDATE unit SET doc_hash = 'old', text = 'stale' WHERE doc_id = ?", (boiler,))
+    conn.execute("DELETE FROM unit WHERE doc_id = ?", (field_stop,))
+    conn.execute(
+        "INSERT INTO unit (doc_id, doc_hash, ord, heading_path, text, text_hash, words)"
+        " VALUES ('~gone', 'h', 0, 'h', 'orphan', 'x', 1)"
+    )
+    conn.commit()
+    calls = emb.calls
+    assert index.reconcile(cfg, conn, emb) == 2
+    assert emb.calls == calls  # the embedding cache holds the units
+    rows = conn.execute("SELECT doc_hash, text FROM unit WHERE doc_id = ?", (boiler,)).fetchall()
+    assert rows and all(h == boiler_hash and t != "stale" for h, t in rows)
+    assert count(conn, "SELECT count(*) FROM unit") == count(conn, "SELECT count(*) FROM unit_emb") == units
+    assert count(conn, "SELECT count(*) FROM unit_fts") == units
+    assert index.reconcile(cfg, conn, emb) == 0
+
+
+def test_update_reconciles_a_doc_with_no_units(cfg):
+    conn, emb, _ = build(cfg)
+    conn.execute("DELETE FROM unit WHERE doc_id = (SELECT id FROM doc WHERE path = ?)", (BOILER,))
+    conn.commit()
+    update(cfg, conn, emb)
+    assert count(conn, f"SELECT count(*) FROM unit JOIN doc d ON d.id = doc_id WHERE d.path = '{BOILER}'") > 0
+
+
+def test_changed_derived_ddl_needs_rebuild(cfg):
+    conn, _, _ = build(cfg)
+    conn.execute("UPDATE main.meta SET value = 'old' WHERE key = 'derived_ddl'")
+    conn.commit()
+    conn.close()
+    with pytest.raises(IndexMismatch, match="Run `ragnarok index --rebuild`"):
+        connect(cfg)
+
+
+def test_changed_index_ddl_needs_rebuild(cfg):
+    conn, _, _ = build(cfg)
+    conn.execute("UPDATE idx.meta SET value = 'old' WHERE key = 'index_ddl'")
+    conn.commit()
+    conn.close()
+    with pytest.raises(IndexMismatch, match="Run `ragnarok index --rebuild`"):
+        connect(cfg)

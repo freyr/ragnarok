@@ -57,6 +57,24 @@ def test_doctor_names_each_failure_and_its_fix(home, monkeypatch):
     assert checks["mcp"].fix.endswith(f"uv --directory {home} run ragnarok serve")
 
 
+def test_doctor_names_migrate_for_a_version_1_index(home, tmp_path, monkeypatch):
+    import sqlite3
+
+    fake_setup(monkeypatch, None, None)
+    config = home / "config.toml"
+    config.write_text(f'root = "{tmp_path / "vaults"}"\nvaults = ["Home"]\ndimension = 8\n')
+    cfg = load_config(config)
+    cfg.index_path.parent.mkdir(parents=True)
+    v1 = sqlite3.connect(cfg.index_path)
+    v1.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    v1.execute("CREATE TABLE embed_cache (text_hash TEXT PRIMARY KEY, model TEXT NOT NULL, vector BLOB NOT NULL)")
+    v1.execute("INSERT INTO meta VALUES ('schema_version', '1')")
+    v1.commit()
+    v1.close()
+    check = {c.part: c for c in bootstrap.doctor(cfg, config, home)}["index"]
+    assert (check.ok, check.fix) == (False, "ragnarok migrate")
+
+
 class FakeEmbedder:
     def __init__(self, cfg):
         self.cfg = cfg
