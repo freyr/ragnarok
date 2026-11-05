@@ -181,6 +181,9 @@ CREATE TABLE IF NOT EXISTS idx.unit_emb (
 CREATE TRIGGER IF NOT EXISTS idx.unit_delete AFTER DELETE ON unit BEGIN
     DELETE FROM unit_fts WHERE rowid = old.id;
 END;
+CREATE VIRTUAL TABLE IF NOT EXISTS idx.entity_fts USING fts5(
+    entity_id UNINDEXED, name, aliases, tokenize = 'porter unicode61 remove_diacritics 2'
+);
 CREATE TABLE IF NOT EXISTS idx.stat (
     "column" TEXT NOT NULL,
     value TEXT NOT NULL,

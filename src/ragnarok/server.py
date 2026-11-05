@@ -249,4 +249,23 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
         """
         return get().kb_check(collection=collection, subject=subject)
 
+    @server.tool()
+    @timed
+    def find_entity(name: str, kind: str | None = None, limit: int = 5, ctx: Context | None = None) -> dict:
+        """Resolve a name to entity IDs: an exact alias first, then the words of the names, then the entity text.
+
+        Each entity has its id, kind, name, aliases, owner, canonical documents, how it matched (alias, name or text)
+        and a score. An ambiguous alias gives all its entities. kind narrows the result.
+        """
+        return get().find_entity(name, kind=kind, limit=limit)
+
+    @server.tool()
+    @timed
+    def get_entity(id: str, as_of: str | None = None, ctx: Context | None = None) -> dict:
+        """An entity by its ID: the facts valid at as_of (default today), canonical documents and relation counts.
+
+        A live attribute is a pointer {attribute, system, skill, key}, never a value: call the skill for the value.
+        """
+        return get().get_entity(id, as_of=as_of)
+
     return server

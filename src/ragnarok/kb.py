@@ -10,8 +10,11 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import date
 
+import numpy as np
+
 from .config import Config
 from .metadata import _identity_key, _iso_date, _targets
+from .search import fts_query
 
 DOC_SUFFIX = "~doc"  # the doc node of an entity document is `<entity id>~doc` (decision 6)
 
@@ -312,6 +315,15 @@ def write(conn: sqlite3.Connection, doc_id: str, kb: KbDoc) -> None:
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (entity_id, kb.kind, kb.name, kb.owner_text, kb.status, kb.as_of, kb.review_by, doc_id),
         )
+        # the FTS row is in index.db, and it lives and dies with the entity row
+        conn.execute(
+            "INSERT INTO entity_fts (entity_id, name, aliases) VALUES (?, ?, ?)",
+            (
+                entity_id,
+                kb.name,
+                " ".join(alias for norm, alias in rows["aliases"] if norm != normalize_alias(kb.name)),
+            ),
+        )
         conn.executemany(
             "INSERT INTO entity_alias (entity_id, alias_norm, alias) VALUES (?, ?, ?)",
             [(entity_id, norm, alias) for norm, alias in rows["aliases"]],
@@ -336,6 +348,7 @@ def write(conn: sqlite3.Connection, doc_id: str, kb: KbDoc) -> None:
 
 def delete(conn: sqlite3.Connection, doc_id: str) -> None:
     """Delete the entity node of the doc and the facts, relations and canonical rows that it declares."""
+    conn.execute("DELETE FROM entity_fts WHERE entity_id IN (SELECT id FROM entity WHERE doc_id = ?)", (doc_id,))
     conn.execute("DELETE FROM node WHERE id IN (SELECT id FROM entity WHERE doc_id = ?)", (doc_id,))
     conn.execute("DELETE FROM fact WHERE source_doc = ? AND origin = 'declared'", (doc_id,))
     conn.execute("DELETE FROM relation WHERE source_doc = ? AND origin = 'declared'", (doc_id,))
@@ -351,6 +364,7 @@ def rename(conn: sqlite3.Connection, old: str, new: str) -> None:
         ("entity", ("owner",)),
         ("doc", ("owner", "primary_subject", "superseded_by")),
         ("doc_subject", ("entity_id",)),
+        ("entity_fts", ("entity_id",)),
     ):
         for column in columns:
             conn.execute(f"UPDATE {table} SET {column} = ? WHERE {column} = ?", (new, old))
@@ -694,3 +708,168 @@ def report(
         if rule in LISTED:
             result[rule]["violations"].append({"nodes": nodes, "detail": detail})
     return result
+
+
+# --- the read path: find_entity and get_entity ------------------------------------------------------------------
+
+
+def _visible(allow_private: bool) -> str:
+    return "" if allow_private else " AND d.sensitivity = 'normal'"
+
+
+def _alias_hits(conn: sqlite3.Connection, name: str, kind: str | None, allow_private: bool) -> list[tuple[str, float]]:
+    rows = conn.execute(
+        "SELECT DISTINCT e.id FROM entity_alias a JOIN entity e ON e.id = a.entity_id JOIN doc d ON d.id = e.doc_id"
+        f" WHERE a.alias_norm = ? AND (? IS NULL OR e.kind = ?){_visible(allow_private)} ORDER BY e.id",
+        (normalize_alias(name), kind, kind),
+    )
+    return [(i, 1.0) for (i,) in rows]
+
+
+def _name_hits(
+    conn: sqlite3.Connection, name: str, kind: str | None, limit: int, allow_private: bool
+) -> list[tuple[str, float]]:
+    match = fts_query(name)
+    if not match:
+        return []
+    rows = conn.execute(
+        "SELECT f.entity_id, -bm25(entity_fts, 0.0, 2.0, 1.0) AS score FROM entity_fts f"
+        " JOIN entity e ON e.id = f.entity_id JOIN doc d ON d.id = e.doc_id"
+        f" WHERE entity_fts MATCH ? AND (? IS NULL OR e.kind = ?){_visible(allow_private)}"
+        " ORDER BY score DESC, f.entity_id LIMIT ?",
+        (match, kind, kind, limit),
+    )
+    return [(i, score) for i, score in rows]
+
+
+def _text_hits(
+    conn: sqlite3.Connection, embedder, name: str, kind: str | None, limit: int, allow_private: bool
+) -> list[tuple[str, float]]:
+    """The entities whose document has a unit near the name: the exact scan over the units of entity documents."""
+    rows = conn.execute(
+        "SELECT e.id, m.embedding FROM unit_emb m JOIN unit u ON u.id = m.unit_id"
+        " JOIN entity e ON e.doc_id = u.doc_id JOIN doc d ON d.id = e.doc_id"
+        f" WHERE (? IS NULL OR e.kind = ?){_visible(allow_private)} ORDER BY e.id, u.ord",
+        (kind, kind),
+    ).fetchall()
+    if not rows:
+        return []
+    matrix = np.frombuffer(b"".join(r[1] for r in rows), dtype=np.float32).reshape(len(rows), -1)
+    query = np.asarray(embedder.embed_query(name), dtype=np.float32)
+    scores = matrix @ (query / np.linalg.norm(query))
+    best: dict[str, float] = {}
+    for (entity_id, _), score in zip(rows, scores.tolist(), strict=True):
+        if score > best.get(entity_id, -2.0):  # the first unit of a document comes first, so a tie keeps it
+            best[entity_id] = score
+    return sorted(best.items(), key=lambda item: (-item[1], item[0]))[:limit]
+
+
+def _canonical(conn: sqlite3.Connection, entity_id: str, allow_private: bool) -> list[dict]:
+    rows = conn.execute(
+        "SELECT c.aspect, d.id, d.path, d.title FROM entity_canonical c JOIN doc d ON d.id = c.doc_id"
+        f" WHERE c.entity_id = ?{_visible(allow_private)} ORDER BY c.aspect, d.path",
+        (entity_id,),
+    )
+    return [{"aspect": a, "id": i, "path": p, "title": t} for a, i, p, t in rows]
+
+
+def find(
+    conn: sqlite3.Connection, embedder, name: str, kind: str | None, limit: int, allow_private: bool
+) -> tuple[list[dict], list[dict]]:
+    """The entities for a name, and the trace candidates. The first stage with a result answers: an exact alias,
+    then the words of the name and the aliases, then the text of the entity documents."""
+    kind = kind.strip().lower() if kind else None
+    matched_by, hits = "alias", _alias_hits(conn, name, kind, allow_private)
+    if not hits:
+        matched_by, hits = "name", _name_hits(conn, name, kind, limit, allow_private)
+    if not hits:
+        matched_by, hits = "text", _text_hits(conn, embedder, name, kind, limit, allow_private)
+    candidates = [{"id": i, "matched_by": matched_by, "score": round(score, 5)} for i, score in hits]
+    results = []
+    for hit in candidates:
+        kind_, name_, owner = conn.execute("SELECT kind, name, owner FROM entity WHERE id = ?", (hit["id"],)).fetchone()
+        aliases = conn.execute("SELECT alias FROM entity_alias WHERE entity_id = ? ORDER BY rowid", (hit["id"],))
+        results.append(
+            {
+                "id": hit["id"],
+                "kind": kind_,
+                "name": name_,
+                "aliases": [a for (a,) in aliases],
+                "owner": owner,
+                "canonical": _canonical(conn, hit["id"], allow_private),
+                "matched_by": matched_by,
+                "score": hit["score"],
+            }
+        )
+    return results, candidates
+
+
+def selected(candidates: list[dict]) -> str | None:
+    """The candidate that the call picks: the top one, unless the top two have the same score."""
+    if not candidates or (len(candidates) > 1 and candidates[0]["score"] == candidates[1]["score"]):
+        return None
+    return candidates[0]["id"]
+
+
+def get(conn: sqlite3.Connection, entity_id: str, as_of: str | None, allow_private: bool) -> dict:
+    """The entity with its facts valid at `as_of`, its live pointers, canonical documents and relation counts."""
+    row = conn.execute(
+        "SELECT e.kind, e.name, e.owner, e.status, e.as_of, e.review_by FROM entity e JOIN doc d ON d.id = e.doc_id"
+        f" WHERE e.id = ?{_visible(allow_private)}",
+        (entity_id,),
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"No entity with the id {entity_id!r}. Use an id from find_entity.")
+    kind, name, owner, status, entity_as_of, review_by = row
+    day = _iso_date(as_of) if as_of else date.today().isoformat()
+    valid = " AND (valid_from IS NULL OR valid_from <= :day) AND (valid_until IS NULL OR valid_until >= :day)"
+    live = {
+        attribute: (system, skill)
+        for attribute, system, skill in conn.execute(
+            "SELECT name, system, skill FROM attribute_def WHERE kind = ? AND live = 1", (kind,)
+        )
+    }
+    facts, pointers = [], []
+    for attribute, value, scope, valid_from, valid_until, fact_as_of, source in conn.execute(
+        "SELECT attribute, value, scope, valid_from, valid_until, as_of, source_ref FROM fact"
+        f" WHERE entity_id = :id AND status = 'active'{valid} ORDER BY id",
+        {"id": entity_id, "day": day},
+    ):
+        if attribute in live:
+            # a live attribute is a pointer: the value is in the system of record, never in the result
+            system, skill = live[attribute]
+            pointers.append({"attribute": attribute, "system": system, "skill": skill, "key": source})
+        else:
+            facts.append(
+                {
+                    "attribute": attribute,
+                    "value": value,
+                    "scope": scope,
+                    "valid_from": valid_from,
+                    "valid_until": valid_until,
+                    "as_of": fact_as_of,
+                    "source": source,
+                }
+            )
+    counts: dict = {"out": {}, "in": {}}
+    for direction, column, other in (("out", "src", "dst"), ("in", "dst", "src")):
+        for rel, n in conn.execute(
+            f"SELECT rel, count(*) FROM relation WHERE {column} = :id AND {other} IS NOT NULL AND origin = 'declared'"
+            f"{valid} GROUP BY rel ORDER BY rel",
+            {"id": entity_id, "day": day},
+        ):
+            counts[direction][rel] = n
+    return {
+        "id": entity_id,
+        "kind": kind,
+        "name": name,
+        "owner": owner,
+        "status": status,
+        "as_of": entity_as_of,
+        "review_by": review_by,
+        "valid_at": day,
+        "facts": facts,
+        "live": pointers,
+        "canonical": _canonical(conn, entity_id, allow_private),
+        "relations": counts,
+    }

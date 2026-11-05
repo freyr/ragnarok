@@ -293,6 +293,28 @@ class Tools:
         result = kb.report(self.conn, collection, subject, self.cfg.allow_private)
         return {**result, "warnings": warnings}
 
+    @traced
+    def find_entity(self, name: str, kind: str | None = None, limit: int = 5) -> dict:
+        warnings = self.scan()
+        results, candidates = kb.find(self.conn, self.embedder, name, kind, limit, self.cfg.allow_private)
+        if self.trace:
+            self.trace.set("gen_ai.retrieval.query.text", name)
+            self.trace.set(
+                "ragnarok.entities", [{"name": name, "candidates": candidates, "selected": kb.selected(candidates)}]
+            )
+        return {"results": results, "warnings": warnings}
+
+    @traced
+    def get_entity(self, id: str, as_of: str | None = None) -> dict:
+        warnings = self.scan()
+        entity = kb.get(self.conn, id, as_of, self.cfg.allow_private)
+        if self.trace:
+            self.trace.set(
+                "ragnarok.entities",
+                [{"name": id, "candidates": [{"id": id, "matched_by": "id", "score": None}], "selected": id}],
+            )
+        return {**entity, "warnings": warnings}
+
     # --- project summary ---------------------------------------------------------------------------------------
 
     def _project_info(self, vault: str, project: str) -> dict:
