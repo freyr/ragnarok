@@ -175,14 +175,20 @@ def _note_keys(cfg: Config, p: Path) -> list[str]:
     return keys
 
 
-def is_private_path(cfg: Config, path: str) -> bool:
+def is_private_path(cfg: Config, path: str, cwd: str = "") -> bool:
     """True when the path matches private_patterns or starts with a prefix in w0.private_paths.
 
     A pattern matches a note key <vault>/<path in the vault>. A prefix is absolute, starts with ~, or is relative
-    to root. Both sides are resolved. A path that cannot be resolved counts as private.
+    to root. A relative path (a Grep or Glob path) is relative to the session cwd, not to the cwd of this process.
+    Both sides are resolved. A path that cannot be resolved counts as private.
     """
     try:
-        p = _real(path)
+        given = Path(path).expanduser()
+        if not given.is_absolute():
+            if not cwd:
+                return True  # no base to resolve it against
+            given = Path(cwd).expanduser() / given
+        p = _real(given)
         root = cfg.root.expanduser()
         if any(p.is_relative_to(_real(root / Path(prefix).expanduser())) for prefix in cfg.w0.private_paths):
             return True
@@ -205,7 +211,7 @@ def summary_text(step: Step) -> str:
 def make_row(cfg: Config, session_id: str, cwd: str, step: Step) -> dict:
     """The w0_step row of one step. A private step keeps only the hash of the summary and of the /kb-save text."""
     summary = redact(summary_text(step))[0][: cfg.w0.summary_chars]
-    private = any(is_private_path(cfg, p) for p in [cwd, *step.changed, *step.read] if p)
+    private = any(is_private_path(cfg, p, cwd) for p in [cwd, *step.changed, *step.read] if p)
     features: dict = {"tools": dict(step.tools)}
     if step.origin:
         features["origin"] = step.origin
@@ -242,17 +248,26 @@ def write_step(cfg: Config, row: dict) -> None:
         with conn:
             uuid = json.loads(row["features"]).get("prompt_uuid")
             last = conn.execute(
-                "SELECT json_extract(features, '$.prompt_uuid') FROM w0_step WHERE session_id = ?"
+                "SELECT id, json_extract(features, '$.prompt_uuid') FROM w0_step WHERE session_id = ?"
                 " ORDER BY id DESC LIMIT 1",
                 (row["session_id"],),
             ).fetchone()
-            if uuid and last and last[0] == uuid:
-                return  # a repeated Stop of the same step (a blocking Stop hook): the step has its row
+            if uuid and last and last[1] == uuid:
+                # a repeated Stop of the same step (a blocking Stop hook): the new parse holds the complete step;
+                # the row keeps its id, created and label_command
+                conn.execute(
+                    "UPDATE w0_step SET step_kind = ?, summary = ?, summary_hash = ?, features = ? WHERE id = ?",
+                    (row["step_kind"], row["summary"], row["summary_hash"], row["features"], last[0]),
+                )
+                return
             if row["step_kind"] == KB_SAVE:
+                # the step of the user before the command: not a kb-save, a teammate turn or a task notification
+                skipped = (KB_SAVE, *ORIGIN_KINDS.values())
                 conn.execute(
                     "UPDATE w0_step SET label_command = 1 WHERE id = (SELECT max(id) FROM w0_step"
-                    " WHERE session_id = ? AND step_kind != ?)",
-                    (row["session_id"], KB_SAVE),
+                    " WHERE session_id = ? AND step_kind NOT IN (?, ?, ?)"
+                    " AND coalesce(json_extract(features, '$.origin'), 'human') = 'human')",
+                    (row["session_id"], *skipped),
                 )
             columns = ", ".join(row)
             conn.execute(f"INSERT INTO w0_step ({columns}) VALUES ({', '.join('?' * len(row))})", list(row.values()))

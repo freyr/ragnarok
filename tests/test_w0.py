@@ -313,7 +313,9 @@ def test_a_repeated_stop_of_one_step_writes_one_row(home, monkeypatch, tmp_path)
     _score(home, monkeypatch, _transcript(path, lines))
     lines += [_say("Done.")]  # a blocking Stop hook made the turn continue; Stop fires again
     _score(home, monkeypatch, _transcript(path, lines))
-    assert len(_rows(home)) == 1
+    [row] = _rows(home)
+    assert "Done." in row["summary"]  # the row holds the complete step, not the part before the block
+    assert row["summary_hash"] == hashlib.sha256(row["summary"].encode()).hexdigest()
     lines += [_user("next", origin="human", uuid="u-2"), _say("Next done.")]
     _score(home, monkeypatch, _transcript(path, lines))
     first, second = _rows(home)
@@ -383,3 +385,45 @@ def test_status_prints_the_w0_block_without_a_usable_index(home, monkeypatch, tm
     assert cli.main(["status"]) == 1
     out = json.loads(capsys.readouterr().out)
     assert out["w0_steps"] == 1 and out["w0_labeled_steps"] == 0 and out["w0_last_step_age_s"] < 60
+
+
+def test_a_repeated_stop_keeps_the_label(home, monkeypatch, tmp_path):
+    path = tmp_path / "t.jsonl"
+    lines = [_user("work", origin="human", uuid="u-1"), _say("Part one.")]
+    _score(home, monkeypatch, _transcript(path, lines))
+    lines += [*_kb_save("keep it"), _say("Saved.")]
+    _score(home, monkeypatch, _transcript(path, lines))
+    assert _rows(home)[0]["label_command"] == 1
+    conn = sqlite3.connect(home / "data" / "core.db")
+    conn.execute("UPDATE w0_step SET features = json_set(features, '$.prompt_uuid', 'u-1') WHERE id = 1")
+    conn.execute("DELETE FROM w0_step WHERE id = 2")
+    conn.commit()
+    conn.close()
+    lines = [_user("work", origin="human", uuid="u-1"), _say("Part one."), _say("Part two.")]
+    _score(home, monkeypatch, _transcript(path, lines))
+    [row] = _rows(home)
+    assert row["label_command"] == 1 and "Part two." in row["summary"]
+
+
+def test_kb_save_skips_a_peer_or_notification_row(home, monkeypatch, tmp_path):
+    path = tmp_path / "t.jsonl"
+    lines = list(EDIT_STEP)
+    _score(home, monkeypatch, _transcript(path, lines))
+    lines += [_user("<teammate-message>x</teammate-message>", origin="peer", meta=True), _say("Noted.")]
+    _score(home, monkeypatch, _transcript(path, lines))
+    lines += [_user("<task-notification>y</task-notification>", origin="task-notification"), _say("Seen.")]
+    _score(home, monkeypatch, _transcript(path, lines))
+    lines += [*_kb_save("keep the parser rule"), _say("Saved.")]
+    _score(home, monkeypatch, _transcript(path, lines))
+    human, peer, notification, save = _rows(home)
+    assert human["label_command"] == 1
+    assert peer["step_kind"] == "peer" and peer["label_command"] == 0
+    assert notification["step_kind"] == "notification" and notification["label_command"] == 0
+    assert save["label_command"] is None
+
+
+def test_a_relative_search_path_resolves_against_the_session_cwd(home, monkeypatch, tmp_path):
+    lines = [_user("look", origin="human"), _tool_use("Grep", pattern="plan", path="Secret"), _say("Found.")]
+    _score(home, monkeypatch, _transcript(tmp_path / "t.jsonl", lines), cwd=home / "vaults" / "Work")
+    [row] = _rows(home)
+    assert row["summary"] is None and json.loads(row["features"])["private"] is True
