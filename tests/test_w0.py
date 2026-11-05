@@ -25,8 +25,15 @@ def home(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _user(text):
-    return {"type": "user", "message": {"role": "user", "content": text}}
+def _user(text, origin=None, uuid=None, meta=False):
+    line = {"type": "user", "message": {"role": "user", "content": text}}
+    if origin:
+        line["origin"] = {"kind": origin}
+    if uuid:
+        line["uuid"] = uuid
+    if meta:
+        line["isMeta"] = True
+    return line
 
 
 def _tool_use(name, **inputs):
@@ -44,8 +51,10 @@ def _say(text):
 
 
 def _kb_save(args=""):
+    """The real shape: the command line (origin human), then the isMeta line with the skill body."""
     text = "<command-message>kb-save</command-message>\n<command-name>/kb-save</command-name>"
-    return _user(text + (f"\n<command-args>{args}</command-args>" if args else ""))
+    command = _user(text + (f"\n<command-args>{args}</command-args>" if args else ""), origin="human")
+    return [command, _user("Base directory for this skill: /skills/kb-save\n# kb-save", meta=True)]
 
 
 def _transcript(path, lines):
@@ -70,7 +79,7 @@ def _rows(home):
 EDIT_STEP = [
     _user("an old prompt"),
     _say("an old answer"),
-    _user("fix the parser"),
+    _user("fix the parser", origin="human"),
     _tool_use("Read", file_path="/work/src/parser.py"),
     _tool_result("Read"),
     _tool_use("Edit", file_path="/work/src/parser.py", old_string="a", new_string="b"),
@@ -107,7 +116,9 @@ def test_summary_is_redacted(home, monkeypatch, tmp_path):
     assert len(row["summary"]) == 400  # w0.summary_chars, after the redaction
 
 
-@pytest.mark.parametrize("where", ["cwd", "edit", "read", "private_path", "relative_private_path"])
+@pytest.mark.parametrize(
+    "where", ["cwd", "edit", "read", "private_path", "relative_private_path", "grep", "glob", "dotdot"]
+)
 def test_private_step_keeps_only_the_hash(home, monkeypatch, tmp_path, where):
     secret_file = str(home / "vaults" / "Work" / "Secret" / "plan.md")
     outside = str(home / "private" / "notes.md")
@@ -117,10 +128,13 @@ def test_private_step_keeps_only_the_hash(home, monkeypatch, tmp_path, where):
         "read": _tool_use("Read", file_path=secret_file),
         "private_path": _tool_use("Write", file_path=outside),
         "relative_private_path": _tool_use("Edit", file_path=str(home / "vaults" / "Work" / "Diary" / "day.md")),
+        "grep": _tool_use("Grep", pattern="plan", path=str(home / "vaults" / "Work" / "Secret"), output_mode="content"),
+        "glob": _tool_use("Glob", pattern="*.md", path=str(home / "vaults" / "Work" / "Secret")),
+        "dotdot": _tool_use("Edit", file_path=str(home / "vaults" / "Work" / ".." / "Work" / "Secret" / "plan.md")),
     }.get(where, _tool_use("Bash", command="ls"))
     lines = [_user("work"), tool, _tool_result("x"), _say("done with the secret plan")]
     _score(home, monkeypatch, _transcript(tmp_path / "t.jsonl", lines), cwd=cwd)
-    lines += [_kb_save("the secret plan matters"), _say("Saved.")]
+    lines += [*_kb_save("the secret plan matters"), _say("Saved.")]
     _score(home, monkeypatch, _transcript(tmp_path / "t.jsonl", lines), cwd=cwd if where == "cwd" else home)
     step, save = _rows(home)
     assert step["summary"] is None and len(step["summary_hash"]) == 64
@@ -140,7 +154,7 @@ def test_kb_save_labels_the_previous_step(home, monkeypatch, tmp_path):
     lines = list(EDIT_STEP)
     _score(home, monkeypatch, _transcript(path, lines))
     _score(home, monkeypatch, _transcript(tmp_path / "other.jsonl", EDIT_STEP), session="s-2")
-    lines += [_kb_save("keep the parser rule"), _say("Saved.")]
+    lines += [*_kb_save("keep the parser rule"), _say("Saved.")]
     _score(home, monkeypatch, _transcript(path, lines))
     first, other, save = _rows(home)
     assert first["label_command"] == 1
@@ -250,10 +264,122 @@ def test_w0_import_copies_the_rows_one_time(home, monkeypatch, tmp_path, capsys)
     src.commit()
     src.close()
     assert cli.main(["w0", "import", "--from", str(other)]) == 0
-    assert "2" in capsys.readouterr().out
+    assert capsys.readouterr().out.strip() == "imported 2 w0 steps"
     assert cli.main(["w0", "import", "--from", str(other)]) == 0
-    assert "0" in capsys.readouterr().out
+    assert capsys.readouterr().out.strip() == "imported 0 w0 steps"
     rows = _rows(home)
     assert len(rows) == 3
     assert {r["summary_hash"] for r in rows} == {mine["summary_hash"], "h-new", "h-other"}
     assert load_config().core_path == home / "data" / "core.db"
+
+
+@pytest.mark.parametrize(("origin", "kind"), [("peer", "peer"), ("task-notification", "notification")])
+def test_a_peer_or_notification_turn_is_a_step_of_its_own(home, monkeypatch, tmp_path, origin, kind):
+    path = tmp_path / "t.jsonl"
+    lines = list(EDIT_STEP)
+    _score(home, monkeypatch, _transcript(path, lines))
+    meta = origin == "peer"  # a teammate message is an isMeta line with an origin
+    lines += [_user("<teammate-message>check it</teammate-message>", origin=origin, meta=meta)]
+    lines += [_tool_use("Bash", command="ls"), _tool_result("Bash"), _say("Checked.")]
+    _score(home, monkeypatch, _transcript(path, lines))
+    first, second = _rows(home)
+    assert second["step_kind"] == kind
+    features = json.loads(second["features"])
+    assert features["tools"] == {"Bash": 1} and features["files"] == []
+    assert features["origin"] == origin
+    assert "parser" not in second["summary"]
+
+
+def test_the_skill_body_after_a_command_is_not_a_step_boundary(home, monkeypatch, tmp_path):
+    lines = [*_kb_save("x"), _say("Saved.")]
+    _score(home, monkeypatch, _transcript(tmp_path / "t.jsonl", lines))
+    [row] = _rows(home)
+    assert row["step_kind"] == "kb-save"
+
+
+def test_the_log_holds_no_path_and_no_message(home, monkeypatch, tmp_path):
+    marker = "MarkerFolderName"
+    missing = tmp_path / f"-x-{marker}" / "a.jsonl"
+    assert _score(home, monkeypatch, missing, cwd=tmp_path / marker) == 0
+    log = (home / "logs" / "w0.log").read_text()
+    assert marker not in log and str(tmp_path) not in log
+    assert "Error: FileNotFoundError errno=2" in log
+    assert "w0.py:" in log  # the frames: file:line:function
+
+
+def test_a_repeated_stop_of_one_step_writes_one_row(home, monkeypatch, tmp_path):
+    path = tmp_path / "t.jsonl"
+    lines = [_user("work", origin="human", uuid="u-1"), _tool_use("Bash", command="ls"), _tool_result("Bash")]
+    _score(home, monkeypatch, _transcript(path, lines))
+    lines += [_say("Done.")]  # a blocking Stop hook made the turn continue; Stop fires again
+    _score(home, monkeypatch, _transcript(path, lines))
+    assert len(_rows(home)) == 1
+    lines += [_user("next", origin="human", uuid="u-2"), _say("Next done.")]
+    _score(home, monkeypatch, _transcript(path, lines))
+    first, second = _rows(home)
+    assert json.loads(first["features"])["prompt_uuid"] == "u-1"
+    assert json.loads(second["features"])["prompt_uuid"] == "u-2"
+
+
+def test_the_kb_save_text_is_cut_after_the_redaction(home, monkeypatch, tmp_path):
+    secret = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2"
+    text = f"{secret} " + "y" * 1000
+    _score(home, monkeypatch, _transcript(tmp_path / "t.jsonl", [*_kb_save(text), _say("Saved.")]))
+    saved = json.loads(_rows(home)[0]["features"])["kb_save_text"]
+    assert saved.startswith("[REDACTED] y") and len(saved) == 400
+    lines = [*_kb_save(text), _say("Saved.")]
+    _score(home, monkeypatch, _transcript(tmp_path / "t.jsonl", lines), cwd=home / "vaults" / "Work" / "Secret")
+    private = json.loads(_rows(home)[1]["features"])
+    assert private["kb_save_hash"] == hashlib.sha256(saved.encode()).hexdigest()
+
+
+def test_private_paths_are_resolved(tmp_path):
+    from ragnarok.config import Config, W0Config
+
+    real = tmp_path / "real"
+    (real / "Work" / "Secret").mkdir(parents=True)
+    (tmp_path / "ext" / "Hidden").mkdir(parents=True)
+    (tmp_path / "linkroot").symlink_to(real)
+    (tmp_path / "pp").mkdir()
+    (tmp_path / "pplink").symlink_to(tmp_path / "pp")
+    cfg = Config(
+        root=tmp_path / "linkroot",
+        vaults=["Work", "Ext"],
+        vault_paths={"Ext": tmp_path / "ext"},
+        private_patterns=["Work/Secret/**", "Ext/Hidden/**"],
+        w0=W0Config(private_paths=[str(tmp_path / "pplink")]),
+        index_path=tmp_path / "index.db",
+    )
+    assert w0.is_private_path(cfg, str(real / "Work" / "Secret" / "a.md"))  # the real path of a symlinked root
+    assert w0.is_private_path(cfg, str(tmp_path / "linkroot" / "Work" / "Secret"))
+    assert w0.is_private_path(cfg, str(tmp_path / "ext" / "Hidden" / "b.md"))  # a vault in vault_paths
+    assert w0.is_private_path(cfg, str(tmp_path / "pp" / "c.md"))  # the real path of a symlinked prefix
+    assert not w0.is_private_path(cfg, str(real / "Work" / "Open.md"))
+    assert not w0.is_private_path(cfg, str(tmp_path / "ext" / "Open.md"))
+
+
+def test_a_path_that_cannot_be_resolved_is_private(tmp_path, monkeypatch):
+    from ragnarok.config import Config
+
+    cfg = Config(root=tmp_path, index_path=tmp_path / "index.db")
+
+    def fail(path, *a, **k):
+        raise OSError("loop")
+
+    monkeypatch.setattr("os.path.realpath", fail)
+    assert w0.is_private_path(cfg, "/anything/at/all.md")
+
+
+@pytest.mark.parametrize("case", ["no-index", "mismatch"])
+def test_status_prints_the_w0_block_without_a_usable_index(home, monkeypatch, tmp_path, capsys, case):
+    _score(home, monkeypatch, _transcript(tmp_path / "t.jsonl", EDIT_STEP))
+    if case == "mismatch":
+        index = sqlite3.connect(home / "data" / "index.db")
+        index.executescript("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+        index.execute("INSERT INTO meta VALUES ('index_ddl', 'newer')")
+        index.commit()
+        index.close()
+    capsys.readouterr()
+    assert cli.main(["status"]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["w0_steps"] == 1 and out["w0_labeled_steps"] == 0 and out["w0_last_step_age_s"] < 60

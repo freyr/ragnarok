@@ -228,15 +228,25 @@ def cmd_w0(cfg, args) -> int:
     return 0
 
 
+def _print_w0_status(cfg) -> None:
+    from .index import connect_core
+    from .w0 import w0_status
+
+    if cfg.core_path.exists():
+        conn = connect_core(cfg)
+        print(json.dumps(w0_status(conn), indent=2))
+        conn.close()
+
+
 def cmd_status(cfg, args) -> int:
     from .index import IndexMismatch, connect, status
 
-    if not cfg.index_path.exists():
-        print(f"No index at {cfg.index_path}. Run `ragnarok index`.", file=sys.stderr)
-        return 1
     try:
+        if not cfg.index_path.exists():
+            raise IndexMismatch(f"No index at {cfg.index_path}. Run `ragnarok index`.")
         conn = connect(cfg)
     except IndexMismatch as e:
+        _print_w0_status(cfg)  # the health of the labels does not need a usable index
         print(e, file=sys.stderr)
         return 1
     from .backfill import coverage
