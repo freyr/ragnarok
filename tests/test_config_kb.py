@@ -153,6 +153,11 @@ def test_dump_config_round_trips_kb_tables(tmp_path):
     # the defaults round trip as well
     out.write_text(dump_config(Config(), root="vaults", data_dir="data"))
     assert load_config(out).kb == Config().kb
+    assert Config().kb.entity_first is True
+    # a false entity_first survives the round trip, so that evaluate prepare keeps it
+    off = replace(cfg, kb=replace(cfg.kb, entity_first=False))
+    out.write_text(dump_config(off, root="vaults", data_dir="data"))
+    assert load_config(out).kb.entity_first is False
 
 
 def test_default_relation_kinds_admit_the_spec_examples():

@@ -61,6 +61,9 @@ baseline_home = ""
 [kb]
 # At or below this count of eligible units the search scans all vectors exactly.
 exact_limit = 25000
+# Put the entity documents of the query subjects (the `subject` entities, then the aliases in the query text)
+# before the ranked results, at most 3.
+entity_first = true
 
 # The closed list of entity kinds, each with its standard.
 [kb.kinds]

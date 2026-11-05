@@ -162,7 +162,8 @@ class Tools:
         hits = search(self.cfg, self.conn, self.embedder, query, vault=vault, limit=PROJECT_POOL, trace=self.trace)
         groups: dict[tuple[str, str], dict] = {}
         for h in hits:
-            if h.project == "none":
+            # an entity-first hit has no score to rank a project by
+            if h.project == "none" or h.entity_first:
                 continue
             # the rank of a project is the rank of its best note; a sum favors large folders with weak matches
             g = groups.setdefault((h.vault, h.project), {"score": h.score, "notes": []})

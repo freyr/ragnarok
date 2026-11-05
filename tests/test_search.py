@@ -120,6 +120,8 @@ KB_NOTES = {
 }
 BILLING = {"Kb/howto/deploy-billing.md", "Kb/decisions/deploy-choice.md"}
 TIERS = {"Kb/howto/deploy-tiers.md", "Kb/decisions/deploy-choice.md"}
+BILLING_DOC = "Kb/entities/Billing System.md"  # the entity documents: the subject filter admits them
+TIERS_DOC = "Kb/entities/Loyalty Tiers.md"
 
 
 @pytest.fixture
@@ -152,9 +154,10 @@ def found(kb_index, query="deploy service", **filters):
 
 def test_subject_filter_keeps_only_documents_of_the_subject(kb_index):
     assert "Kb/howto/deploy-tiers.md" in found(kb_index)
-    assert found(kb_index, subject="sys-billing") == BILLING
-    assert found(kb_index, subject=["sys-billing"]) == BILLING
-    assert found(kb_index, subject=["sys-billing", "feat-tiers"]) == BILLING | TIERS  # a list is an OR
+    assert found(kb_index, subject="sys-billing") == BILLING | {BILLING_DOC}
+    assert found(kb_index, subject=["sys-billing"]) == BILLING | {BILLING_DOC}
+    # a list is an OR
+    assert found(kb_index, subject=["sys-billing", "feat-tiers"]) == BILLING | TIERS | {BILLING_DOC, TIERS_DOC}
 
 
 def test_an_empty_list_filter_is_no_filter(kb_index):
@@ -188,11 +191,11 @@ def test_subject_name_resolves_through_aliases(kb_index):
     cfg, conn, emb = kb_index
     resolved = []
     hits = search(cfg, conn, emb, "deploy service", subject="  BILLING ", limit=50, resolved=resolved)
-    assert set(paths(hits)) == BILLING
+    assert set(paths(hits)) == BILLING | {BILLING_DOC}
     assert resolved == [{"name": "  BILLING ", "id": "sys-billing", "matched_by": "alias"}]
     resolved = []
     hits = search(cfg, conn, emb, "deploy service", subject=["Loyalty Tiers"], limit=50, resolved=resolved)
-    assert set(paths(hits)) == TIERS
+    assert set(paths(hits)) == TIERS | {TIERS_DOC}
     assert resolved == [{"name": "Loyalty Tiers", "id": "feat-tiers", "matched_by": "alias"}]
 
 
@@ -238,7 +241,7 @@ def test_type_status_class_and_collection_filters(kb_index):
     assert found(kb_index, type="decision") == {"Kb/decisions/deploy-choice.md"}
     assert found(kb_index, type=["decision", "how-to"]) == howtos | {"Kb/decisions/deploy-choice.md"}
     assert found(kb_index, class_="record") == {"Kb/decisions/deploy-choice.md"}
-    assert found(kb_index, class_="state", subject="Tiers") == {"Kb/howto/deploy-tiers.md"}
+    assert found(kb_index, class_="state", subject="Tiers") == {"Kb/howto/deploy-tiers.md", TIERS_DOC}
     assert found(kb_index, collection="Kb") == found(kb_index) and found(kb_index, collection="Other") == set()
     assert found(kb_index, status="active") == found(kb_index)
     assert found(kb_index, status=["archived", "superseded"]) == set()
@@ -252,7 +255,8 @@ def test_result_has_the_scent_fields(kb_index):
     assert result["trace_id"]
     assert result["subjects"] == [{"name": "Billing", "id": "sys-billing", "matched_by": "alias"}]
     by_path = {r["path"]: r for r in result["results"]}
-    assert set(by_path) == BILLING
+    assert set(by_path) == BILLING | {BILLING_DOC}
+    assert result["results"][0]["path"] == BILLING_DOC and result["results"][0]["entity_first"] is True
     current = by_path["Kb/howto/deploy-billing.md"]
     assert current["id"] == doc_id(conn, "Kb/howto/deploy-billing.md")
     assert (current["type"], current["class"], current["status"]) == ("how-to", "state", "active")
@@ -322,8 +326,128 @@ def test_plan_reads_the_selectivity_from_stat(kb_index):
 def test_filter_checks_name_the_filter_that_drops_a_document():
     from ragnarok.search import Filters, filter_checks
 
-    doc = {"type": "how-to", "class": "state", "status": "active", "sensitivity": "normal", "subjects": ["feat-tiers"]}
+    doc = {
+        "type": "how-to",
+        "class": "state",
+        "status": "active",
+        "sensitivity": "normal",
+        "subjects": ["feat-tiers"],
+        "entity": None,
+    }
     filters = Filters(type=["how-to", "decision"], subject=("sys-billing",))
     assert filter_checks(doc, filters) == {"type": True, "subject": False, "private": True}
     redirect = {**doc, "status": "redirect"}
     assert filter_checks(redirect, Filters(class_="record")) == {"class": False, "private": True, "redirect": False}
+    # the subject filter admits the entity document of a subject entity
+    entity_doc = {**doc, "type": "entity", "subjects": [], "entity": "sys-billing"}
+    assert filter_checks(entity_doc, Filters(subject=("sys-billing",)))["subject"] is True
+    assert filter_checks(entity_doc, Filters(subject=("feat-tiers",)))["subject"] is False
+
+
+# R1: the entity documents of the query subjects go first.
+
+LEDGER_DOC = "Kb/entities/Ledger.md"
+
+
+def first(hits) -> list[str]:
+    return [h.path for h in hits if h.entity_first]
+
+
+def test_an_alias_in_the_query_puts_its_entity_document_first(kb_index):
+    cfg, conn, emb = kb_index
+    hits = search(cfg, conn, emb, "deploy the tiers service", limit=50)
+    assert hits[0].path == TIERS_DOC and hits[0].entity_first and hits[0].score is None
+    assert first(hits) == [TIERS_DOC]
+    assert paths(hits).count(TIERS_DOC) == 1
+    # the entities of the text go first in the order of their first position in the query
+    assert first(search(cfg, conn, emb, "billing then tiers", limit=50)) == [BILLING_DOC, TIERS_DOC]
+    assert first(search(cfg, conn, emb, "tiers then billing", limit=50)) == [TIERS_DOC, BILLING_DOC]
+
+
+def test_the_subject_filter_admits_the_entity_document_of_the_subject(kb_index):
+    cfg, conn, emb = kb_index
+    hits = search(cfg, conn, emb, "deploy service", subject="Tiers", limit=50)
+    assert first(hits) == [TIERS_DOC] and hits[0].path == TIERS_DOC
+    assert set(paths(hits)) == TIERS | {TIERS_DOC}
+    # the subject entities go first in their order, before the entities of the text
+    hits = search(cfg, conn, emb, "tiers and billing", subject=["sys-billing", "feat-tiers"], limit=50)
+    assert first(hits) == [BILLING_DOC, TIERS_DOC]
+    # a text entity that the subject filter does not admit gets no place
+    hits = search(cfg, conn, emb, "deploy billing service", subject="Tiers", limit=50)
+    assert first(hits) == [TIERS_DOC] and BILLING_DOC not in paths(hits)
+    # with entity-first off, the subject filter still admits the entity document in the RRF candidates
+    off = replace(cfg, kb=replace(cfg.kb, entity_first=False))
+    hits = search(off, conn, emb, "loyalty tiers ladder", subject="Tiers", mode="fts", limit=50)
+    assert TIERS_DOC in paths(hits) and first(hits) == []
+
+
+def test_a_filter_that_does_not_admit_the_entity_document_keeps_the_normal_rank(kb_index):
+    cfg, conn, emb = kb_index
+    hits = search(cfg, conn, emb, "deploy the tiers service", type="how-to", limit=50)
+    assert first(hits) == [] and TIERS_DOC not in paths(hits)
+    hits = search(cfg, conn, emb, "deploy the tiers service", type=["how-to", "entity"], limit=50)
+    assert first(hits) == [TIERS_DOC]
+
+
+def test_at_most_three_entity_documents_go_first_and_the_limit_counts_them(kb_index):
+    cfg, conn, emb = kb_index
+    for name, alias in (("Ledger", "GL"), ("Payroll", "Pay Run")):
+        (cfg.root / f"Kb/entities/{name}.md").write_text(
+            f"---\nid: sys-{name.lower()}\ntype: entity\nkind: system\naliases: [{alias}]\n---\n# {name}\nA book.\n"
+        )
+    update(cfg, conn, emb)
+    query = "pay run billing gl tiers"
+    hits = search(cfg, conn, emb, query, limit=50)
+    assert first(hits) == ["Kb/entities/Payroll.md", BILLING_DOC, LEDGER_DOC]
+    assert paths(hits)[:3] == first(hits)
+    assert TIERS_DOC in paths(hits)  # the fourth entity keeps its normal rank
+    short = search(cfg, conn, emb, query, limit=2)
+    assert paths(short) == ["Kb/entities/Payroll.md", BILLING_DOC]
+
+
+def test_entity_first_is_off_with_the_knob_or_without_authority(kb_index):
+    cfg, conn, emb = kb_index
+    off = replace(cfg, kb=replace(cfg.kb, entity_first=False))
+    for c, authority in ((off, True), (cfg, False)):
+        hits = search(c, conn, emb, "deploy the tiers service", limit=50, authority=authority)
+        assert first(hits) == []
+        assert all(h.score is not None for h in hits)
+
+
+def test_the_trace_records_the_entity_first_documents_at_their_final_rank(kb_index):
+    from ragnarok.trace import Trace
+
+    cfg, conn, emb = kb_index
+    (cfg.root / LEDGER_DOC).write_text(
+        "---\nid: sys-ledger\ntype: entity\nkind: system\naliases: [GL]\n---\n# Ledger\nA book.\n"
+    )
+    update(cfg, conn, emb)
+    # fts mode: the ledger document has no word of the query, so it is outside the RRF list
+    trace = Trace(cfg, conn, "search", {})
+    hits = search(cfg, conn, emb, "deploy tiers gl", mode="fts", limit=50, trace=trace)
+    assert first(hits) == [TIERS_DOC, LEDGER_DOC]
+    ledger = hits[1]
+    assert (ledger.dense_rank, ledger.fts_rank, ledger.score, ledger.heading) == (None, None, None, "Ledger > Ledger")
+    f = trace.fields
+    assert f["ragnarok.entity_first"] == [
+        {"id": "feat-tiers", "doc_id": doc_id(conn, TIERS_DOC), "reason": "text"},
+        {"id": "sys-ledger", "doc_id": doc_id(conn, LEDGER_DOC), "reason": "text"},
+    ]
+    documents = f["gen_ai.retrieval.documents"]
+    assert [d["path"] for d in documents] == paths(hits)
+    assert [d["score"] for d in documents[:2]] == [None, None]
+    assert all(d["score"] is not None for d in documents[2:])
+    assert [s["id"] for s in f["ragnarok.returned.status"]] == [h.id for h in hits]
+    candidates = {c["path"]: c for c in f["ragnarok.candidates"]}
+    assert (candidates[TIERS_DOC]["final_rank"], candidates[TIERS_DOC]["entity_first"]) == (1, True)
+    assert (candidates[LEDGER_DOC]["final_rank"], candidates[LEDGER_DOC]["rrf"]) == (2, None)
+    assert "entity_first" not in candidates["Kb/howto/deploy-tiers.md"]
+    # the subject flag of the trace admits the entity document of a subject entity
+    trace = Trace(cfg, conn, "search", {})
+    hits = search(cfg, conn, emb, "deploy tiers gl", subject="Tiers", mode="fts", limit=50, trace=trace)
+    assert first(hits) == [TIERS_DOC]  # the subject filter does not admit the ledger
+    checks = {c["path"]: c["filters"] for c in trace.fields["ragnarok.candidates"]}
+    assert checks[TIERS_DOC]["subject"] is True
+    assert trace.fields["ragnarok.entity_first"] == [
+        {"id": "feat-tiers", "doc_id": doc_id(conn, TIERS_DOC), "reason": "subject"}
+    ]

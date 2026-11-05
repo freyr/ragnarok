@@ -197,10 +197,19 @@ def test_server_search_takes_class_and_subject(tmp_path):
     arguments = {"query": "deploy service", "class": "state", "subject": ["Tiers"], "limit": 50}
     result = asyncio.run(server.call_tool("search", arguments))
     payload = json.loads(result.content[0].text)
-    assert [r["path"] for r in payload["results"]] == ["Kb/howto/deploy-tiers.md"]
+    assert [r["path"] for r in payload["results"]] == ["Kb/entities/Loyalty Tiers.md", "Kb/howto/deploy-tiers.md"]
+    assert [r["entity_first"] for r in payload["results"]] == [True, False]
     assert payload["subjects"][0]["id"] == "feat-tiers"
     with pytest.raises(ToolError, match="ambiguous: feat-tiers, sys-billing"):
         asyncio.run(server.call_tool("search", {"query": "deploy", "subject": "Core"}))
+
+
+def test_find_projects_ranks_no_project_by_an_entity_first_hit(tmp_path):
+    tools = Tools(*kb_setup(tmp_path))
+    # the entity document of Tiers goes first in search, with no score; find_projects ranks by the scored notes
+    assert tools.search("deploy tiers service")["results"][0]["entity_first"] is True
+    notes = [p for r in tools.find_projects("deploy tiers service")["results"] for p in r["matching_notes"]]
+    assert "Kb/entities/Loyalty Tiers.md" not in notes and "Kb/howto/deploy-tiers.md" in notes
 
 
 def test_server_errors_carry_their_reason(tools):

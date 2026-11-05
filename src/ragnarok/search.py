@@ -15,6 +15,7 @@ from .config import Config
 from .trace import TOP, Trace, gold_paths, safely
 
 RRF_K = 60
+ENTITY_FIRST = 3  # the entity documents that go before the ranked results, at most
 CANDIDATES = 200  # units from each list
 SNIPPET_WORDS = 120
 
@@ -51,7 +52,7 @@ class Hit:
     description: str | None
     heading: str
     text: str
-    score: float
+    score: float | None  # None for an entity-first hit: the score did not set its rank
     dense_rank: int | None
     fts_rank: int | None
     # the scent fields: what the agent needs to judge the document before it reads it
@@ -64,6 +65,7 @@ class Hit:
     successor: dict | None = None
     dispute: dict | None = None
     duplicate: bool = False  # the second document of one identity key: the authority factor halves its score
+    entity_first: bool = False  # the entity document of a query subject, before the ranked results
 
     def as_dict(self) -> dict:
         out = asdict(self)
@@ -113,9 +115,13 @@ def eligibility(filters: Filters) -> tuple[str, list]:
             where.append(f"d.{column} IN ({', '.join('?' * len(values))})")
             params.extend(values)
     if filters.subject is not None:
+        # a document of a subject entity, or the entity document of a subject entity
         marks = ", ".join("?" * len(filters.subject))
-        where.append(f"EXISTS (SELECT 1 FROM doc_subject s WHERE s.doc_id = d.id AND s.entity_id IN ({marks}))")
-        params.extend(filters.subject)
+        where.append(
+            f"(EXISTS (SELECT 1 FROM doc_subject s WHERE s.doc_id = d.id AND s.entity_id IN ({marks}))"
+            f" OR EXISTS (SELECT 1 FROM entity e WHERE e.doc_id = d.id AND e.id IN ({marks})))"
+        )
+        params.extend(filters.subject * 2)
     if not filters.include_archived:
         where.append("d.status = 'active'")
     if not filters.include_private:
@@ -135,7 +141,7 @@ def filter_checks(doc: dict, filters: Filters) -> dict[str, bool]:
     passes = {
         "archived": lambda: doc["status"] == "active",
         "private": lambda: doc["sensitivity"] == "normal",
-        "subject": lambda: bool(set(doc["subjects"]) & set(filters.subject or ())),
+        "subject": lambda: bool({*doc["subjects"], doc["entity"]} & set(filters.subject or ())),
     }
     checks = {n: passes[n]() if n in passes else doc[n] in _value(filters, n) for n in active_filters(filters)}
     return checks | ({"redirect": False} if doc["status"] == "redirect" else {})
@@ -328,19 +334,44 @@ def search(
         factors = _authority(cfg, conn, query, list(scores), subject_ids or ()) if authority else {}
         final = {n: scores[n] * math.prod(factors.get(n, {}).values()) for n in scores}
         order = sorted(scores, key=lambda n: -final[n])
+        on = authority and cfg.kb.entity_first
+        first = _entity_first(cfg, conn, query, subject_ids or (), filters) if on else None
+        ahead = [e["doc_id"] for e in first or []]
+        order = ahead + [n for n in order if n not in ahead]
         top = order[:limit]
         hits = []
         for nid in top:
             n = conn.execute(
                 "SELECT path, vault, title, project, area, type, status, description FROM doc WHERE id = ?", (nid,)
             ).fetchone()
-            heading, text = conn.execute("SELECT heading_path, text FROM unit WHERE id = ?", (best[nid][1],)).fetchone()
+            if nid in best:
+                unit = conn.execute("SELECT heading_path, text FROM unit WHERE id = ?", (best[nid][1],)).fetchone()
+            else:  # an entity-first document outside the RRF list: its first unit; a note with no body has none
+                sql = "SELECT heading_path, text FROM unit WHERE doc_id = ? ORDER BY ord LIMIT 1"
+                unit = conn.execute(sql, (nid,)).fetchone()
+            heading, text = unit or (n[2], "")
             words = text.split()
             snippet = " ".join(words[:SNIPPET_WORDS]) + (" …" if len(words) > SNIPPET_WORDS else "")
             duplicate = "duplicate_identity" in factors.get(nid, {})
             scent = _scent(conn, nid, include_private)
-            hits.append(Hit(*n, heading, snippet, round(final[nid], 5), *ranks[nid], **scent, duplicate=duplicate))
+            score = None if nid in ahead else round(final[nid], 5)
+            dense_rank, fts_rank = ranks.get(nid, (None, None))
+            hits.append(
+                Hit(
+                    *n,
+                    heading,
+                    snippet,
+                    score,
+                    dense_rank,
+                    fts_rank,
+                    **scent,
+                    duplicate=duplicate,
+                    entity_first=nid in ahead,
+                )
+            )
     if trace:
+        if first is not None:
+            trace.set("ragnarok.entity_first", first)
         if plan is not None:
             trace.set("ragnarok.plan", {**plan, "pools": pools, "pool_limit": CANDIDATES})
         safely(
@@ -357,6 +388,7 @@ def search(
             best,
             order,
             top,
+            ahead,
         )
     return hits
 
@@ -369,7 +401,8 @@ def _review_warning(class_: str, review_by: str | None) -> str | None:
 
 
 def _text_subjects(conn, query: str, allow_private: bool) -> list[str]:
-    """The entities whose alias occurs in the query text as a phrase of whole words."""
+    """The entities whose alias occurs in the query text as a phrase of whole words, in the order of their first
+    position in the query (equal positions sort by entity ID)."""
     from . import kb  # kb imports fts_query from this module
 
     words = lambda text: " ".join(re.findall(r"\w+", kb.normalize_alias(text)))  # noqa: E731
@@ -378,7 +411,27 @@ def _text_subjects(conn, query: str, allow_private: bool) -> list[str]:
         "SELECT DISTINCT a.entity_id, a.alias_norm FROM entity_alias a JOIN entity e ON e.id = a.entity_id"
         f" JOIN doc d ON d.id = e.doc_id WHERE 1 = 1{kb._visible(allow_private)}"
     )
-    return [entity_id for entity_id, alias in rows if (w := words(alias)) and f" {w} " in padded]
+    position: dict[str, int] = {}
+    for entity_id, alias in rows:
+        if (w := words(alias)) and (at := padded.find(f" {w} ")) >= 0:
+            position[entity_id] = min(at, position.get(entity_id, at))
+    return sorted(position, key=lambda e: (position[e], e))
+
+
+def _entity_first(cfg: Config, conn, query: str, subject_ids: tuple[str, ...], filters: Filters) -> list[dict]:
+    """The entity documents that go before the ranked results: those of the `subject` entities, then those of the
+    entities in the query text, each only when the filters admit it, at most ENTITY_FIRST."""
+    reasons = dict.fromkeys(subject_ids, "subject")
+    for entity_id in _text_subjects(conn, query, cfg.allow_private):
+        reasons.setdefault(entity_id, "text")
+    if not reasons:
+        return []
+    predicate, params = eligibility(filters)
+    marks = ",".join("?" * len(reasons))
+    sql = f"SELECT e.id, e.doc_id FROM entity e JOIN doc d ON d.id = e.doc_id WHERE e.id IN ({marks}) AND {predicate}"
+    docs = dict(conn.execute(sql, [*reasons, *params]).fetchall())
+    admitted = [{"id": e, "doc_id": docs[e], "reason": reason} for e, reason in reasons.items() if e in docs]
+    return admitted[:ENTITY_FIRST]
 
 
 def _authority(cfg: Config, conn, query: str, doc_ids: list[str], subject_ids: tuple[str, ...]) -> dict[str, dict]:
@@ -494,10 +547,13 @@ def _prefilter_ranks(conn, query: str, vector) -> dict[str, tuple[int | None, in
     return {d: (dense.get(d), fts.get(d)) for d in dense.keys() | fts.keys()}
 
 
-def _record(conn, trace: Trace, filters: Filters, probe, scores, finals, factors, ranks, best, order, top) -> None:
-    """The candidates (the top 50 of each pool, and every gold document), the returned documents and their status."""
+def _record(
+    conn, trace: Trace, filters: Filters, probe, scores, finals, factors, ranks, best, order, top, ahead
+) -> None:
+    """The candidates (the top 50 of each pool, the entity-first documents and every gold document), the returned
+    documents and their status. An entity-first document has the score None."""
     final_rank = {nid: i for i, nid in enumerate(order, start=1)}
-    in_top = {nid for nid, r in ranks.items() if any(x is not None and x <= TOP for x in r)}
+    in_top = {nid for nid, r in ranks.items() if any(x is not None and x <= TOP for x in r)} | set(ahead)
     gold_ids = {}
     for path in safely("gold paths", gold_paths) or []:
         row = conn.execute("SELECT id FROM doc WHERE path = ?", (path,)).fetchone()
@@ -506,9 +562,11 @@ def _record(conn, trace: Trace, filters: Filters, probe, scores, finals, factors
     marks = ",".join("?" * len(wanted))
     cols = ("id", "path", "vault", "project", "area", "type", "collection", "class", "status", "sensitivity")
     docs = {
-        r[0]: dict(zip(cols, r, strict=True), subjects=[])
+        r[0]: dict(zip(cols, r, strict=True), subjects=[], entity=None)
         for r in conn.execute(f"SELECT {', '.join(cols)} FROM doc WHERE id IN ({marks})", list(wanted))
     }
+    for nid, entity_id in conn.execute(f"SELECT doc_id, id FROM entity WHERE doc_id IN ({marks})", list(wanted)):
+        docs[nid]["entity"] = entity_id
     sql = f"SELECT doc_id, entity_id FROM doc_subject WHERE entity_id IS NOT NULL AND doc_id IN ({marks})"
     for nid, entity_id in conn.execute(sql, list(wanted)):
         docs[nid]["subjects"].append(entity_id)
@@ -529,6 +587,8 @@ def _record(conn, trace: Trace, filters: Filters, probe, scores, finals, factors
             "authority": factors.get(nid, {}),
             "final_rank": final_rank.get(nid),
         }
+        if nid in ahead:
+            out["entity_first"] = True
         if not gold:
             return out
         dense_before, fts_before = before.get(nid, (None, None))
@@ -540,4 +600,4 @@ def _record(conn, trace: Trace, filters: Filters, probe, scores, finals, factors
         {"doc_id": None, "path": p, "gold": True, "filters": {}} for p, nid in gold_ids.items() if nid is None
     ]
     trace.set("ragnarok.candidates", candidates)
-    trace.returned([(nid, round(finals[nid], 5)) for nid in top])
+    trace.returned([(nid, None if nid in ahead else round(finals[nid], 5)) for nid in top])

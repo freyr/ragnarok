@@ -131,6 +131,8 @@ class KbConfig:
 
     # at or below this count of eligible units the search scans exactly
     exact_limit: int = 25000
+    # put the entity documents of the query subjects before the ranked results
+    entity_first: bool = True
     kinds: dict[str, str] = field(default_factory=_kinds)  # kind -> standard
     doc_types: dict[str, DocType] = field(default_factory=_doc_types)
     relation_types: dict[str, RelationType] = field(default_factory=_relation_types)
@@ -320,7 +322,12 @@ def dump_config(cfg: Config, **paths: Path | str) -> str:
 
 
 def _dump_kb(kb: KbConfig) -> list[str]:
-    lines = ["\n[kb]", f"exact_limit = {kb.exact_limit}", "\n[kb.kinds]"]
+    lines = [
+        "\n[kb]",
+        f"exact_limit = {kb.exact_limit}",
+        f"entity_first = {json.dumps(kb.entity_first)}",
+        "\n[kb.kinds]",
+    ]
     lines += [f"{json.dumps(kind)} = {json.dumps(standard)}" for kind, standard in kb.kinds.items()]
     for name, doc_type in kb.doc_types.items():
         lines.append(f"\n[kb.doc_types.{json.dumps(name)}]")
