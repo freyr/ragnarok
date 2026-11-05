@@ -64,6 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
     ep.add_argument("--calls", type=int, default=8, help="agent: the limit of tool calls for each agent")
     ep.add_argument("--model", default="sonnet", help="agent: the Claude model of both agents")
     ep.add_argument("--limit", type=int, help="agent: only the first N questions of each set")
+    ep.add_argument("--runs", type=int, default=2, help="agent: the runs of each question and agent (default 2)")
+    ep.add_argument(
+        "--agents",
+        default="mcp-kb,mcp-base",
+        help="agent: comma list of mcp-kb, mcp-base and grep (the first is tested)",
+    )
     ep.add_argument("--sets", type=Path, help="folder with the question sets (default <data_dir>/eval/sets)")
     ep.add_argument("--out", type=Path, help="folder for the results (default <data_dir>/eval/results)")
     ep.add_argument("--min-words", type=int, help="use a separate index with this minimum chunk size")
@@ -398,12 +404,26 @@ def cmd_eval(cfg, args) -> int:
     args.sets = args.sets or cfg.data_dir / "eval" / "sets"
     args.out = args.out or cfg.data_dir / "eval" / "results"
     if args.kind == "agent":
-        from .agent_eval import evaluate
+        from .agent_eval import AGENTS, evaluate
 
         names = args.set_names or ["draft-long", "hard"]
-        print(f"# agent evaluation, sets {', '.join(names)}, model {args.model}, {args.calls} tool calls")
+        agents = [a.strip() for a in args.agents.split(",") if a.strip()]
+        if not agents or [a for a in agents if a not in AGENTS]:
+            print(f"--agents takes a comma list of {', '.join(AGENTS)}", file=sys.stderr)
+            return 1
+        print(
+            f"# agent evaluation, sets {', '.join(names)}, agents {', '.join(agents)}, model {args.model}, "
+            f"{args.calls} tool calls, {args.runs} runs"
+        )
         out = args.out / "agent" / f"{args.model}-calls{args.calls}"
-        print("\n".join(evaluate(cfg, args.sets, names, out, args.calls, args.model, args.limit, args.reuse_mirror)))
+        try:
+            lines = evaluate(
+                cfg, args.sets, names, out, args.calls, args.model, args.limit, args.reuse_mirror, agents, args.runs
+            )
+        except ValueError as e:
+            print(e, file=sys.stderr)
+            return 1
+        print("\n".join(lines))
         return 0
     conn = connect(cfg)
     if args.kind == "mechanical":

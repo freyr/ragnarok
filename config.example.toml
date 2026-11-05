@@ -30,6 +30,11 @@ jira_prefixes = []
 # Notes that the evaluation ignores, for example notes that quote the questions. Path prefixes, not globs.
 # Example: eval_exclude = ["Notes/Meta/search-eval"]
 eval_exclude = []
+# The agent evaluation compares the agent of this checkout with an agent of a baseline checkout that runs on its
+# own home. Absolute paths. With both empty, the evaluation has no baseline agent.
+# Example: baseline_checkout = "/path/to/ragnarok-baseline"
+baseline_checkout = ""
+baseline_home = ""
 
 # Put every key above this line: a key below a [vault_paths] or [vault_rules.<vault>] header belongs to that table.
 

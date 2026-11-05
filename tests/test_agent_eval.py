@@ -1,6 +1,11 @@
 import json
+from pathlib import Path
 
-from ragnarok import agent_eval
+import pytest
+from test_index import FakeEmbedder
+
+from ragnarok import agent_eval, embed
+from ragnarok.index import connect, update
 
 
 def test_parse_notes_takes_the_last_list_and_makes_paths_relative(tmp_path):
@@ -14,7 +19,7 @@ def test_parse_notes_takes_the_last_list_and_makes_paths_relative(tmp_path):
 
 def test_commands_give_each_agent_only_its_tools(tmp_path):
     grep = agent_eval.command("grep", "q", 8, "sonnet", None, ["Work"])
-    mcp = agent_eval.command("mcp", "q", 8, "sonnet", tmp_path / "mcp.json", ["Work"])
+    mcp = agent_eval.command("mcp-kb", "q", 8, "sonnet", tmp_path / "mcp.json", ["Work"])
     for cmd in (grep, mcp):
         assert {"--restricted", "--strict-mcp-config"} <= set(cmd)
         assert cmd[cmd.index("--max-turns") + 1] == "10"
@@ -45,29 +50,129 @@ def test_search_latency_counts_only_good_calls_without_changes(tmp_path):
     assert agent_eval.search_latency(log) == [120]
 
 
-def test_run_all_scores_with_a_fake_runner_and_reuses_results(vault, tmp_path, monkeypatch):
+def stream(notes, trace_id="tr-1", turns=3, cost=0.01):
+    """A synthetic stream-json output: one search call with its result, then the final result event."""
+    final = json.dumps({"notes": notes, "entities": ["e1"], "route": "kb", "answer": "ok"})
+    search = {"type": "tool_use", "id": "t1", "name": "mcp__ragnarok__search", "input": {"query": "boiler"}}
+    read = {"type": "tool_use", "id": "t2", "name": "Read", "input": {"file_path": "a.md"}}
+    found = {"type": "tool_result", "tool_use_id": "t1"}
+    found["content"] = [{"type": "text", "text": json.dumps({"trace_id": trace_id, "results": []})}]
+    events = [
+        {"type": "system", "subtype": "init"},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "I search."}]}},
+        {"type": "assistant", "message": {"content": [search]}},
+        {"type": "user", "message": {"content": [found]}},
+        {"type": "assistant", "message": {"content": [read]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t2", "content": "# n"}]}},
+        {
+            "type": "result",
+            "subtype": "success",
+            "num_turns": turns,
+            "total_cost_usd": cost,
+            "result": f"Done.\n{final}",
+        },
+    ]
+    return "\n".join(json.dumps(e) for e in events) + "\n"
+
+
+def arg(cmd, flag):
+    return cmd[cmd.index(flag) + 1]
+
+
+def test_stream_json_gives_the_tool_sequence_and_trace_ids():
+    run = agent_eval.parse_stream(stream(["Home/Heating/notes/boiler.md"], trace_id="tr-9", turns=3, cost=0.02))
+    assert [t["name"] for t in run["tools"]] == ["mcp__ragnarok__search", "Read"]
+    assert run["tools"][0]["input"] == {"query": "boiler"}
+    assert run["tools"][0]["trace_ids"] == ["tr-9"]
+    assert run["tools"][1]["trace_ids"] == []
+    assert run["trace_ids"] == ["tr-9"]
+    assert (run["turns"], run["cost"], run["error"]) == (3, 0.02, False)
+    answer = agent_eval.parse_answer(run["answer_text"], Path("/m"))
+    assert answer == {"notes": ["Home/Heating/notes/boiler.md"], "entities": ["e1"], "route": "kb", "answer": "ok"}
+    assert agent_eval.parse_stream("not json\n")["error"] is True
+
+
+def fake_run(vault, tmp_path, monkeypatch, questions, agents, runs=1, baseline=None, seen=None, out=None):
     monkeypatch.setattr(agent_eval, "prepare", lambda cfg, **kw: cfg)
-    monkeypatch.setattr(agent_eval, "mcp_config", lambda cfg: tmp_path / "mcp.json")
-    answers = {"grep": ["Home/Bike/shortlist.md"], "mcp": ["Home/Heating/notes/boiler.md"]}
-    calls = []
+    seen = [] if seen is None else seen
 
     def runner(cmd, cwd, env):
-        agent = "grep" if "Grep,Glob,Read" in cmd else "mcp"
-        calls.append(agent)
-        return {"result": json.dumps({"notes": answers[agent]}), "total_cost_usd": 0.01, "num_turns": 3}
+        seen.append(cmd)
+        return stream(["Home/Heating/notes/boiler.md"], trace_id=f"tr-{len(seen)}")
 
-    sets = {
-        "draft": [{"id": "q1", "type": "fact", "question": "boiler?", "expected": ["Home/Heating/notes/boiler.md"]}],
-        "hard": [
-            {"id": "h1", "type": "continuation", "subtype": "x", "question": "heat", "expected": ["Home/Heating"]}
-        ],
-    }
+    sets = {"s": questions}
+    results = agent_eval.run_all(
+        vault, sets, out or tmp_path / "out", 8, "sonnet", agents, runs, workers=1, runner=runner, baseline=baseline
+    )
+    return sets, results, seen
+
+
+def test_each_question_gets_its_own_gold_environment(vault, tmp_path, monkeypatch):
+    questions = [
+        {"id": "a", "class": "single-truth", "question": "boiler?", "gold": [{"path": "Home/Heating/notes/boiler.md"}]},
+        {"id": "b", "class": "single-truth", "question": "bike?", "gold": [{"path": "Home/Bike/shortlist.md"}]},
+    ]
+    _, _, seen = fake_run(vault, tmp_path, monkeypatch, questions, ["mcp-kb"])
+    envs = []
+    for cmd in seen:
+        server = json.loads(Path(arg(cmd, "--mcp-config")).read_text())["mcpServers"]["ragnarok"]
+        envs.append(json.loads(server["env"]["RAGNAROK_TRACE_GOLD"]))
+        assert server["env"]["RAGNAROK_HOME"] == str(agent_eval.eval_home(vault))
+    assert envs == [["Home/Heating/notes/boiler.md"], ["Home/Bike/shortlist.md"]]
+    assert '"route"' in arg(seen[0], "-p")  # the new sets ask for the four-key JSON object
+
+
+def test_two_runs_are_kept_and_paired(vault, tmp_path, monkeypatch):
+    questions = [{"id": "q1", "type": "fact", "question": "boiler?", "expected": ["Home/Heating/notes/boiler.md"]}]
     out = tmp_path / "out"
-    results = agent_eval.run_all(vault, sets, out, 8, "sonnet", workers=2, runner=runner)
-    assert len(calls) == 4
-    assert results["draft"]["q1"]["mcp"]["notes"] == ["Home/Heating/notes/boiler.md"]
-    lines = agent_eval.report(vault, sets, results, [100, 200])
-    assert any(line.startswith("| Retrieval, draft set (n=1)") and "+1.00" in line for line in lines)
-    assert any(line.startswith("| Project continuation (n=1)") and "MCP 1.00 (grep 0.00)" in line for line in lines)
-    agent_eval.run_all(vault, sets, out, 8, "sonnet", workers=2, runner=runner)
-    assert len(calls) == 4
+    base = (tmp_path / "base-checkout", tmp_path / "base-home")
+    agents = ["mcp-kb", "mcp-base"]
+    sets, results, seen = fake_run(vault, tmp_path, monkeypatch, questions, agents, 2, base, out=out)
+    assert len(seen) == 4
+    names = sorted(p.name for p in (out / "s").glob("*.jsonl"))
+    assert names == ["q1.mcp-base.1.jsonl", "q1.mcp-base.2.jsonl", "q1.mcp-kb.1.jsonl", "q1.mcp-kb.2.jsonl"]
+    assert (out / "s" / "q1.mcp-kb.2.jsonl").read_text().startswith('{"type": "system"')
+    runs = results["s"]["q1"]["mcp-kb"]
+    assert len(runs) == 2 and all(r["notes"] == ["Home/Heating/notes/boiler.md"] for r in runs)
+    assert all(r["trace_ids"] and r["tools"] for r in runs)
+    lines = agent_eval.report(vault, sets, results, [], agents)
+    assert any(line.startswith("| Retrieval, draft set (n=2)") for line in lines)  # one pair for each run
+    fake_run(vault, tmp_path, monkeypatch, questions, agents, 2, base, seen=seen, out=out)
+    assert len(seen) == 4  # the result files are used again
+
+
+def test_baseline_agent_uses_the_baseline_checkout(vault, tmp_path, monkeypatch):
+    questions = [{"id": "q1", "type": "fact", "question": "boiler?", "expected": ["Home/Heating/notes/boiler.md"]}]
+    base = (tmp_path / "base-checkout", tmp_path / "base-home")
+    _, _, seen = fake_run(vault, tmp_path, monkeypatch, questions, ["mcp-kb", "mcp-base"], 1, base)
+    by_agent = {}
+    for cmd in seen:
+        path = Path(arg(cmd, "--mcp-config"))
+        server = json.loads(path.read_text())["mcpServers"]["ragnarok"]
+        by_agent[path.name.split(".")[-2]] = (server, arg(cmd, "--allowedTools"))
+    server, tools = by_agent["mcp-base"]
+    assert server["args"][:2] == ["--directory", str(base[0])]
+    assert server["env"]["RAGNAROK_HOME"] == str(base[1])
+    assert "find_entity" not in tools and "mcp__ragnarok__search" in tools
+    kb_server, kb_tools = by_agent["mcp-kb"]
+    assert kb_server["args"][1] != str(base[0])
+    assert "mcp__ragnarok__find_entity" in kb_tools and "mcp__ragnarok__related" in kb_tools
+    with pytest.raises(ValueError, match="baseline"):
+        fake_run(vault, tmp_path, monkeypatch, questions, ["mcp-base"], 1, None, out=tmp_path / "other")
+
+
+def test_prepare_adds_generated_distractors(vault, monkeypatch):
+    vault.dimension = 8
+    monkeypatch.setattr(embed, "OllamaEmbedder", lambda cfg: FakeEmbedder())
+    conn = connect(vault)
+    update(vault, conn, FakeEmbedder())
+    conn.close()
+    distractor = agent_eval.eval_home(vault) / "distractors" / "Home" / "Heating" / "old-boiler.md"
+    distractor.parent.mkdir(parents=True)
+    distractor.write_text("# Old boiler\n")
+    ecfg = agent_eval.prepare(vault)
+    assert (ecfg.root / "Home/Heating/old-boiler.md").read_text() == "# Old boiler\n"
+    assert (ecfg.root / "Home/Heating/notes/boiler.md").exists()
+    (ecfg.root / "Home/Heating/old-boiler.md").unlink()
+    agent_eval.prepare(vault, reuse_mirror=True)  # an existing mirror gets nothing
+    assert not (ecfg.root / "Home/Heating/old-boiler.md").exists()

@@ -176,6 +176,10 @@ class Config:
     vault_rules: dict[str, VaultRules] = field(default_factory=dict)
     # notes the evaluation ignores, for example the notes that quote the evaluation questions
     eval_exclude: list[str] = field(default_factory=list)
+    # the agent evaluation compares with the baseline: its checkout and its home (absolute paths); both empty
+    # means no baseline agent
+    baseline_checkout: str = ""
+    baseline_home: str = ""
     kb: KbConfig = field(default_factory=KbConfig)
     trace: TraceConfig = field(default_factory=TraceConfig)
     w0: W0Config = field(default_factory=W0Config)

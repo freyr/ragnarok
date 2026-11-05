@@ -1,9 +1,12 @@
-"""Agent evaluation: the same question to a Claude Code agent with Grep, Glob and Read, and to one with the
-ragnarok MCP tools and Read, both with the same limit of tool calls.
+"""Agent evaluation: the same question to Claude Code agents with the same limit of tool calls. The agents are
+mcp-kb (the ragnarok MCP tools of this checkout, and Read), mcp-base (the MCP tools of the baseline checkout on
+the baseline home, and Read) and, as an option, grep (Grep, Glob and Read). Each question runs several times.
+Each run keeps the raw stream-json lines of `claude -p`; the tool sequence and the trace IDs come from them.
 
-Both agents work in a mirror of the vaults in <data_dir>/eval/vaults. The mirror holds only the notes that are
-not private and not in eval_exclude (for example notes that quote the questions and the expected answers).
-The MCP agent gets a server with its own home <data_dir>/eval: a config with the mirror as root, copies of
+All agents work in a mirror of the vaults in <data_dir>/eval/vaults. The mirror holds only the notes that are
+not private and not in eval_exclude (for example notes that quote the questions and the expected answers),
+and the generated notes of <data_dir>/eval/distractors.
+The mcp-kb agent gets a server with its own home <data_dir>/eval: a config with the mirror as root, copies of
 core.db and index.db (the update drops the notes that are not in the mirror) and its own logs/server.log, from
 which the report reads the search latency.
 """
@@ -24,15 +27,21 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import Config, dump_config, home_dir, load_config
+from .config import Config, dump_config, load_config
 from .evaluate import bootstrap, excluded, score_draft, score_hard
 from .metadata import is_private, iter_notes
 
-AGENTS = ["grep", "mcp"]
-MCP_TOOLS = ["search", "find_projects", "list_project", "open_note", "find_by_jira"]
+AGENTS = ["mcp-kb", "mcp-base", "grep"]
+DEFAULT_AGENTS = ["mcp-kb", "mcp-base"]
+BASE_TOOLS = ["search", "find_projects", "list_project", "open_note", "find_by_jira"]
+MCP_TOOLS = {
+    "mcp-base": BASE_TOOLS,
+    "mcp-kb": [*BASE_TOOLS, "open_projects", "kb_check", "find_entity", "get_entity", "related"],
+}
 TOOL_HINT = {
     "grep": "Use the Grep, Glob and Read tools.",
-    "mcp": "Use the ragnarok tools (search, find_projects, list_project, open_note, find_by_jira) and Read.",
+    "mcp-kb": f"Use the ragnarok tools ({', '.join(MCP_TOOLS['mcp-kb'])}) and Read.",
+    "mcp-base": f"Use the ragnarok tools ({', '.join(MCP_TOOLS['mcp-base'])}) and Read.",
 }
 PROMPT = """You search a folder of Obsidian notes: the vaults {vaults} are folders in the current directory. \
 {hint}
@@ -44,8 +53,21 @@ the earlier work that it continues or needs. You can make at most {calls} tool c
 with one JSON object and nothing after it:
 {{"notes": ["<note path relative to the current directory>", ...]}}
 List at most 10 notes, the best first."""
+# the prompt of the questions that have a `class` field: one final JSON object with four keys
+PROMPT_NEW = """You search a folder of Obsidian notes: the vaults {vaults} are folders in the current directory. \
+{hint}
 
-Runner = Callable[[list[str], Path, dict], dict]
+Request: {question}
+
+Find the notes that answer the request. You can make at most {calls} tool calls. Then end your answer with one \
+JSON object and nothing after it:
+{{"notes": ["<note path relative to the current directory>", ...], "entities": ["<entity id>", ...], \
+"route": "kb|skill|none", "answer": "<your answer>"}}
+Use the route "kb" when the notes hold the answer, "skill" when the answer needs a live value from a system \
+of record, and "none" when no note answers. List at most 10 notes, the best first."""
+
+# a runner gives the raw stdout of `claude -p ... --output-format stream-json --verbose`
+Runner = Callable[[list[str], Path, dict], str]
 
 
 def eval_home(cfg: Config) -> Path:
@@ -61,7 +83,8 @@ def prepare(cfg: Config, reuse_mirror: bool = False) -> Config:
 
     Return the evaluation config.
 
-    With reuse_mirror and a mirror that exists, keep the mirror and do not copy it again.
+    After the vault notes, copy the files of <home>/distractors into the mirror, with the same relative paths.
+    With reuse_mirror and a mirror that exists, keep the mirror and copy nothing into it.
     """
     home = eval_home(cfg)
     mirror = home / "vaults"
@@ -71,6 +94,11 @@ def prepare(cfg: Config, reuse_mirror: bool = False) -> Config:
             target = mirror / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(cfg.note_path(rel), target)
+        distractors = home / "distractors"
+        for path in sorted(p for p in distractors.rglob("*") if p.is_file()):
+            target = mirror / path.relative_to(distractors)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
     (home / "config.toml").write_text(dump_config(replace(cfg, vault_paths={}), root="vaults", data_dir="data"))
     ecfg = load_config(home / "config.toml")
     # the files of the full home: the mirror index finds its notes and the cache in them and embeds nothing
@@ -136,54 +164,144 @@ def write_baseline_home(cfg: Config, home: Path, mirror: Path) -> Path:
     return path
 
 
-def mcp_config(cfg: Config) -> Path:
-    home = eval_home(cfg)
-    path = home / "mcp.json"
+def mcp_config(
+    cfg: Config, agent: str, name: str, qid: str, gold: list[str], baseline: tuple[Path, Path] | None
+) -> Path:
+    """The MCP configuration of one question: its own server environment, with the gold paths for the trace.
+
+    mcp-base starts the server of the baseline checkout on the baseline home; mcp-kb starts this checkout on
+    the evaluation home. The baseline code ignores RAGNAROK_TRACE_GOLD.
+    """
+    if agent == "mcp-base":
+        if baseline is None:
+            raise ValueError("the agent mcp-base needs baseline_checkout and baseline_home in config.toml")
+        checkout, home = baseline
+    else:
+        checkout, home = Path(__file__).resolve().parents[2], eval_home(cfg)
+    path = eval_home(cfg) / "mcp" / f"{name}.{qid}.{agent}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     server = {
         "command": "uv",
-        "args": ["--directory", str(home_dir()), "run", "ragnarok", "serve"],
-        "env": {"RAGNAROK_HOME": str(home)},
+        "args": ["--directory", str(checkout), "run", "ragnarok", "serve"],
+        "env": {"RAGNAROK_HOME": str(home), "RAGNAROK_TRACE_GOLD": json.dumps(gold)},
     }
     path.write_text(json.dumps({"mcpServers": {"ragnarok": server}}, indent=1))
     return path
 
 
-def command(agent: str, question: str, calls: int, model: str, mcp_json: Path | None, vaults: list[str]) -> list[str]:
-    prompt = PROMPT.format(vaults=", ".join(vaults), hint=TOOL_HINT[agent], question=question, calls=calls)
-    cmd = ["claude", "-p", prompt, "--output-format", "json", "--model", model, "--max-turns", str(calls + 2)]
+def gold_paths(q: dict) -> list[str]:
+    """The gold note paths of a question: `gold` of the new sets, else the `expected` entries that are notes."""
+    if "gold" in q:
+        return [g["path"] for g in q["gold"]]
+    return [e for e in q.get("expected", []) if e.endswith(".md")]
+
+
+def command(
+    agent: str,
+    question: str,
+    calls: int,
+    model: str,
+    mcp_json: Path | None,
+    vaults: list[str],
+    new_prompt: bool = False,
+) -> list[str]:
+    template = PROMPT_NEW if new_prompt else PROMPT
+    prompt = template.format(vaults=", ".join(vaults), hint=TOOL_HINT[agent], question=question, calls=calls)
+    cmd = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose", "--model", model]
+    cmd += ["--max-turns", str(calls + 2)]
     # restricted: no settings files, no hooks, file tools only inside the working directory
     cmd += ["--restricted", "--strict-mcp-config", "--permission-mode", "dontAsk", "--no-session-persistence"]
     if agent == "grep":
         return cmd + ["--tools", "Grep,Glob,Read", "--allowedTools", "Grep,Glob,Read"]
-    tools = ",".join(f"mcp__ragnarok__{t}" for t in MCP_TOOLS)
+    tools = ",".join(f"mcp__ragnarok__{t}" for t in MCP_TOOLS[agent])
     return cmd + ["--tools", "Read", "--mcp-config", str(mcp_json), "--allowedTools", f"Read,{tools}"]
 
 
-def run_claude(cmd: list[str], cwd: Path, env: dict) -> dict:
+def run_claude(cmd: list[str], cwd: Path, env: dict) -> str:
     out = subprocess.run(cmd, cwd=cwd, env={**os.environ, **env}, capture_output=True, text=True, timeout=900)
-    try:
-        return json.loads(out.stdout)
-    except ValueError:
-        return {"is_error": True, "result": "", "stderr": out.stderr[-2000:], "stdout": out.stdout[-2000:]}
+    return out.stdout
 
 
-def parse_notes(text: str, mirror: Path) -> list[str]:
-    """The note paths of the last {"notes": [...]} object in the answer, relative to the mirror."""
-    found = None
-    for m in re.finditer(r'\{\s*"notes"\s*:\s*\[.*?\]\s*\}', text or "", re.S):
+TRACE_ID = re.compile(r'"trace_id"\s*:\s*"([^"]+)"')
+
+
+def _result_text(content) -> str:
+    if isinstance(content, list):
+        return "".join(str(c.get("text", "")) if isinstance(c, dict) else str(c) for c in content)
+    return str(content or "")
+
+
+def parse_stream(text: str) -> dict:
+    """The tool sequence and the final result of the raw stream-json lines of one run.
+
+    tools has one item for each tool_use block, in order: name, input and the trace_id values of its result.
+    """
+    tools: list[dict] = []
+    by_id: dict[str, dict] = {}
+    final: dict = {}
+    for line in (text or "").splitlines():
         try:
-            found = json.loads(m.group(0))["notes"]
+            event = json.loads(line)
         except ValueError:
             continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "result":
+            final = event
+            continue
+        content = (event.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                item = {"name": block.get("name"), "input": block.get("input"), "trace_ids": []}
+                tools.append(item)
+                by_id[block.get("id")] = item
+            elif block.get("type") == "tool_result" and block.get("tool_use_id") in by_id:
+                by_id[block["tool_use_id"]]["trace_ids"] += TRACE_ID.findall(_result_text(block.get("content")))
+    return {
+        "tools": tools,
+        "trace_ids": [t for item in tools for t in item["trace_ids"]],
+        "turns": final.get("num_turns"),
+        "cost": final.get("total_cost_usd") or 0.0,
+        "subtype": final.get("subtype"),
+        "error": bool(final.get("is_error")) or not final,
+        "answer_text": final.get("result") or "",
+    }
+
+
+def parse_answer(text: str, mirror: Path | None = None) -> dict:
+    """The last JSON object with a `notes` list in the answer: notes relative to the mirror, entities, route, answer."""
+    found: dict = {}
+    decoder = json.JSONDecoder()
+    for m in re.finditer(r"\{", text or ""):
+        try:
+            obj, _ = decoder.raw_decode(text, m.start())
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("notes"), list):
+            found = obj
     notes = []
-    for n in found or []:
+    for n in found.get("notes", []):
         n = str(n).strip()
-        if n.startswith(str(mirror)):
+        if mirror is not None and n.startswith(str(mirror)):
             n = n[len(str(mirror)) :]
         n = n.lstrip("./").lstrip("/")
         if n and n not in notes:
             notes.append(n)
-    return notes
+    return {
+        "notes": notes,
+        "entities": [str(e) for e in found.get("entities") or []],
+        "route": found.get("route"),
+        "answer": found.get("answer"),
+    }
+
+
+def parse_notes(text: str, mirror: Path) -> list[str]:
+    """The note paths of the last {"notes": [...]} object in the answer, relative to the mirror."""
+    return parse_answer(text, mirror)["notes"]
 
 
 def run_all(
@@ -192,40 +310,45 @@ def run_all(
     out_dir: Path,
     calls: int,
     model: str,
+    agents: list[str] = DEFAULT_AGENTS,
+    runs: int = 2,
     workers: int = 4,
     runner: Runner = run_claude,
     reuse_mirror: bool = False,
-) -> dict[str, dict[str, dict]]:
-    """Run each question with each agent. A result file that exists is used again, so a stopped run continues."""
+    baseline: tuple[Path, Path] | None = None,
+) -> dict[str, dict[str, dict[str, list[dict]]]]:
+    """Run each question runs times with each agent. Give results[set][question id][agent] = one dict for each run.
+
+    The raw lines of each run are in <out_dir>/<set>/<id>.<agent>.<run>.jsonl. A file that exists is used
+    again, so a stopped run continues. Run number n of one agent pairs with run number n of the other.
+    """
+    if "mcp-base" in agents and baseline is None:
+        raise ValueError("the agent mcp-base needs baseline_checkout and baseline_home in config.toml")
     ecfg = prepare(cfg, reuse_mirror=reuse_mirror)
-    mcp_json = mcp_config(cfg)
     mirror = ecfg.root
     jobs = []
     for name, questions in sets.items():
         for q in questions:
-            for agent in AGENTS:
-                jobs.append((name, q, agent, out_dir / name / f"{q['id']}.{agent}.json"))
+            for agent in agents:
+                for n in range(1, runs + 1):
+                    jobs.append((name, q, agent, n, out_dir / name / f"{q['id']}.{agent}.{n}.jsonl"))
 
     def one(job):
-        name, q, agent, path = job
+        name, q, agent, n, path = job
         if not path.exists():
-            raw = runner(command(agent, q["question"], calls, model, mcp_json, cfg.vaults), mirror, {})
+            mcp_json = None if agent == "grep" else mcp_config(cfg, agent, name, q["id"], gold_paths(q), baseline)
+            cmd = command(agent, q["question"], calls, model, mcp_json, cfg.vaults, "class" in q)
+            raw = runner(cmd, mirror, {})
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(raw, indent=1))
-        raw = json.loads(path.read_text())
-        return name, q["id"], agent, raw
+            path.write_text(raw)
+        run = parse_stream(path.read_text())
+        run.update(parse_answer(run.pop("answer_text"), mirror))
+        return name, q["id"], agent, n, run
 
-    results: dict[str, dict[str, dict]] = {}
+    results: dict[str, dict[str, dict[str, list[dict]]]] = {}
     with ThreadPoolExecutor(workers) as pool:
-        for name, qid, agent, raw in pool.map(one, jobs):
-            r = results.setdefault(name, {}).setdefault(qid, {})
-            r[agent] = {
-                "notes": parse_notes(raw.get("result", ""), mirror),
-                "cost": raw.get("total_cost_usd") or 0.0,
-                "turns": raw.get("num_turns"),
-                "subtype": raw.get("subtype"),
-                "error": bool(raw.get("is_error")),
-            }
+        for name, qid, agent, _, run in pool.map(one, jobs):  # map keeps the job order, so runs stay in order
+            results.setdefault(name, {}).setdefault(qid, {}).setdefault(agent, []).append(run)
     return results
 
 
@@ -242,14 +365,23 @@ def _interval(values: list[float]) -> str:
     return f"{mean:.2f} [{lo:.2f}, {hi:.2f}]"
 
 
-def _diff(rows: list[dict], measure: str) -> str:
-    d, lo, hi = bootstrap([r[f"mcp_{measure}"] for r in rows], [r[f"grep_{measure}"] for r in rows])
+def _diff(rows: list[dict], measure: str, test: str, ref: str) -> str:
+    d, lo, hi = bootstrap([r[f"{test}_{measure}"] for r in rows], [r[f"{ref}_{measure}"] for r in rows])
     return f"{d:+.2f} [{lo:+.2f}, {hi:+.2f}]"
 
 
 def report(
-    cfg: Config, sets: dict[str, list[dict]], results: dict[str, dict[str, dict]], latency: list[int]
+    cfg: Config,
+    sets: dict[str, list[dict]],
+    results: dict[str, dict[str, dict[str, list[dict]]]],
+    latency: list[int],
+    agents: list[str] = DEFAULT_AGENTS,
 ) -> list[str]:
+    """The quality table. The first agent is the tested one, the last is the reference.
+
+    Run n of one agent pairs with run n of the other.
+    """
+    test, ref = agents[0], agents[-1]
     known = set(mirror_notes(cfg))
     draft, hard = [], []
     for name, questions in sets.items():
@@ -257,11 +389,12 @@ def report(
             r = results.get(name, {}).get(q["id"])
             if not r:
                 continue
-            ranked = {a: r[a]["notes"] for a in AGENTS}
-            if "subtype" in q:
-                hard.append(score_hard(q, ranked, AGENTS))
-            elif s := score_draft(q, ranked, known, AGENTS):
-                draft.append(s)
+            for n in range(min(len(r[a]) for a in agents)):
+                ranked = {a: r[a][n]["notes"] for a in agents}
+                if "subtype" in q:
+                    hard.append(score_hard(q, ranked, agents))
+                elif s := score_draft(q, ranked, known, agents):
+                    draft.append(s)
     cont = [r for r in hard if r["type"] == "continuation"]
     cat = [r for r in hard if r["type"] == "category"]
     synth = [r for r in draft if str(r["type"]).startswith("synthesis")]
@@ -269,33 +402,36 @@ def report(
     def mean(rows, key):
         return f"{np.mean([r[key] for r in rows]):.2f}" if rows else "-"
 
+    def both(rows, measure):
+        return f"{ref} {mean(rows, f'{ref}_{measure}')}, {test} {mean(rows, f'{test}_{measure}')}"
+
     lines = ["| Quality attribute | Target | Measured | 95% interval |", "|---|---|---|---|"]
     if draft:
         lines.append(
-            f"| Retrieval, draft set (n={len(draft)}) | MCP - grep recall@K >= +0.10, interval above 0 | "
-            f"grep {mean(draft, 'grep_recall')}, MCP {mean(draft, 'mcp_recall')} | {_diff(draft, 'recall')} |"
+            f"| Retrieval, draft set (n={len(draft)}) | {test} - {ref} recall@K >= +0.10, interval above 0 | "
+            f"{both(draft, 'recall')} | {_diff(draft, 'recall', test, ref)} |"
         )
     if cont:
         lines.append(
-            f"| Retrieval, continuation (n={len(cont)}) | MCP - grep project hit@5 >= +0.10 | "
-            f"grep {mean(cont, 'grep_proj@5')}, MCP {mean(cont, 'mcp_proj@5')} | {_diff(cont, 'proj@5')} |"
+            f"| Retrieval, continuation (n={len(cont)}) | {test} - {ref} project hit@5 >= +0.10 | "
+            f"{both(cont, 'proj@5')} | {_diff(cont, 'proj@5', test, ref)} |"
         )
     if cat:
         lines.append(
-            f"| Retrieval, category (n={len(cat)}) | MCP - grep area precision@5 >= +0.10 | "
-            f"grep {mean(cat, 'grep_prec@5')}, MCP {mean(cat, 'mcp_prec@5')} | {_diff(cat, 'prec@5')} |"
+            f"| Retrieval, category (n={len(cat)}) | {test} - {ref} area precision@5 >= +0.10 | "
+            f"{both(cat, 'prec@5')} | {_diff(cat, 'prec@5', test, ref)} |"
         )
     if cont:
         lines.append(
-            f"| Project continuation (n={len(cont)}) | MCP primary hit@5 >= 0.80 | "
-            f"MCP {mean(cont, 'mcp_prim@5')} (grep {mean(cont, 'grep_prim@5')}) | "
-            f"{_interval([r['mcp_prim@5'] for r in cont])} |"
+            f"| Project continuation (n={len(cont)}) | {test} primary hit@5 >= 0.80 | "
+            f"{test} {mean(cont, f'{test}_prim@5')} ({ref} {mean(cont, f'{ref}_prim@5')}) | "
+            f"{_interval([r[f'{test}_prim@5'] for r in cont])} |"
         )
     if synth:
         lines.append(
-            f"| Cross-vault synthesis (n={len(synth)}) | MCP recall@10 >= 0.80 | "
-            f"MCP {mean(synth, 'mcp_recall')} (grep {mean(synth, 'grep_recall')}) | "
-            f"{_interval([r['mcp_recall'] for r in synth])} |"
+            f"| Cross-vault synthesis (n={len(synth)}) | {test} recall@10 >= 0.80 | "
+            f"{test} {mean(synth, f'{test}_recall')} ({ref} {mean(synth, f'{ref}_recall')}) | "
+            f"{_interval([r[f'{test}_recall'] for r in synth])} |"
         )
     if latency:
         p50, p95 = np.percentile(latency, [50, 95])
@@ -304,13 +440,18 @@ def report(
             f"| Query latency (n={len(latency)} search calls) | < 500 ms for each call | "
             f"p50 {p50:.0f} ms, p95 {p95:.0f} ms, max {max(latency)} ms, {under:.0%} under 500 ms | - |"
         )
-    runs = [r[a] for s in results.values() for r in s.values() for a in AGENTS if a in r]
-    cost = {a: sum(r[a]["cost"] for s in results.values() for r in s.values() if a in r) for a in AGENTS}
-    failed = sum(1 for r in runs if r["error"] or not r["notes"])
+    runs = [run for s in results.values() for r in s.values() for a in agents if a in r for run in r[a]]
+    cost = {a: sum(run["cost"] for s in results.values() for r in s.values() for run in r.get(a, [])) for a in agents}
+    turns = {
+        a: [run["turns"] for s in results.values() for r in s.values() for run in r.get(a, []) if run["turns"]]
+        for a in agents
+    }
+    failed = sum(1 for run in runs if run["error"] or not run["notes"])
     lines += [
         "",
         f"runs {len(runs)}, without a note list {failed}",
-        f"API-equivalent cost (no bill on a subscription): grep ${cost['grep']:.2f}, MCP ${cost['mcp']:.2f}",
+        "mean turns: " + ", ".join(f"{a} {np.mean(turns[a]):.1f}" for a in agents if turns[a]),
+        "API-equivalent cost (no bill on a subscription): " + ", ".join(f"{a} ${cost[a]:.2f}" for a in agents),
     ]
     return lines
 
@@ -324,11 +465,16 @@ def evaluate(
     model: str,
     limit: int | None,
     reuse_mirror: bool = False,
+    agents: list[str] = DEFAULT_AGENTS,
+    runs: int = 2,
 ):
     sets = {}
     for name in names:
         questions = json.loads((sets_dir / f"{name}.json").read_text())
         sets[name] = questions[:limit] if limit else questions
-    results = run_all(cfg, sets, out_dir, calls, model, reuse_mirror=reuse_mirror)
+    baseline = (
+        (Path(cfg.baseline_checkout), Path(cfg.baseline_home)) if cfg.baseline_checkout and cfg.baseline_home else None
+    )
+    results = run_all(cfg, sets, out_dir, calls, model, agents, runs, reuse_mirror=reuse_mirror, baseline=baseline)
     latency = search_latency(eval_home(cfg) / "logs" / "server.log")
-    return report(cfg, sets, results, latency)
+    return report(cfg, sets, results, latency, agents)
