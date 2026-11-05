@@ -91,7 +91,10 @@ def prepare(cfg: Config, reuse_mirror: bool = False) -> Config:
     try:
         update(ecfg, conn, OllamaEmbedder(ecfg))  # before the run, so no search call pays for this scan
         if copied:
-            # the copies held the private and excluded notes of the full home: free their pages
+            # the copies held the private and excluded notes of the full home: merge the FTS5 segments, so that
+            # their postings go, then free their pages
+            conn.execute("INSERT INTO unit_fts (unit_fts) VALUES ('optimize')")
+            conn.commit()
             conn.execute("VACUUM main")
             conn.execute("VACUUM idx")
     finally:

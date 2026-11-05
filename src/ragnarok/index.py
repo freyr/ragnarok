@@ -156,8 +156,8 @@ def _utc() -> str:
     return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
 
 
-def _read_only(path: Path) -> sqlite3.Connection:
-    return sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+def _read_only(path: Path, timeout: float = 5) -> sqlite3.Connection:
+    return sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=timeout)
 
 
 def _meta(conn: sqlite3.Connection, schema: str) -> dict[str, str]:
@@ -168,15 +168,23 @@ def _meta(conn: sqlite3.Connection, schema: str) -> dict[str, str]:
 
 
 def _is_v1(path: Path) -> bool:
-    """True when the file is an index of schema version 1: one file with the embedding cache in it."""
-    conn = _read_only(path)
+    """True when the file is an index of schema version 1: one file with the embedding cache in it.
+
+    A file that cannot be read (a lock, a WAL recovery, not a database) raises IndexMismatch, so that no caller
+    takes it for a file of another version and deletes it.
+    """
     try:
-        has_cache = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'embed_cache'").fetchone()
-        return has_cache is not None and _meta(conn, "main").get("schema_version") == "1"
-    except sqlite3.DatabaseError:
-        return False
-    finally:
-        conn.close()
+        conn = _read_only(path)
+        try:
+            names = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'embed_cache'")
+            return names.fetchone() is not None and _meta(conn, "main").get("schema_version") == "1"
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError as e:
+        raise IndexMismatch(
+            f"Cannot read {path} ({e}); the command does not delete it. "
+            f"Move it to {path.parent / 'backups'}/ and run the command again."
+        ) from e
 
 
 def connect_core(cfg: Config) -> sqlite3.Connection:
@@ -286,9 +294,36 @@ def migrate(cfg: Config) -> tuple[Path, int]:
     finally:
         src.close()
     copied = import_cache(cfg, cfg.index_path)
+    _check_migration(cfg, target)
     _delete_index_file(cfg)
     rebuild(cfg).close()
     return target, copied
+
+
+def _check_migration(cfg: Config, target: Path) -> None:
+    """Before the old file goes: the cache copy is on disk and complete, and the backup is sound and complete."""
+    core = connect_core(cfg)  # the kept tables exist also when the copy wrote nothing
+    try:
+        core.execute("PRAGMA synchronous = FULL")
+        busy = core.execute("PRAGMA wal_checkpoint(FULL)").fetchone()[0]
+        core.execute("ATTACH DATABASE ? AS src", (f"{cfg.index_path.resolve().as_uri()}?mode=ro",))
+        core.execute("ATTACH DATABASE ? AS bak", (f"{target.resolve().as_uri()}?mode=ro",))
+        missing = core.execute(
+            "SELECT count(*) FROM src.embed_cache WHERE text_hash NOT IN (SELECT text_hash FROM main.embed_cache)"
+        ).fetchone()[0]
+        source = core.execute("SELECT count(*) FROM src.embed_cache").fetchone()[0]
+        backed_up = core.execute("SELECT count(*) FROM bak.embed_cache").fetchone()[0]
+        check = core.execute("PRAGMA bak.quick_check").fetchone()[0]
+    finally:
+        core.close()
+    problems = [
+        *(["the checkpoint of core.db did not finish"] if busy else []),
+        *([f"{missing} cache rows are not in core.db"] if missing else []),
+        *([f"the backup has {backed_up} cache rows of {source}"] if backed_up != source else []),
+        *([f"quick_check of the backup gives {check}"] if check != "ok" else []),
+    ]
+    if problems:
+        raise IndexMismatch(f"The migration keeps {cfg.index_path}: {'; '.join(problems)}.")
 
 
 def backup(cfg: Config, to: Path | None = None) -> Path:

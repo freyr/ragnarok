@@ -7,7 +7,7 @@ import pytest
 import sqlite_vec
 from test_index import FakeEmbedder
 
-from ragnarok import agent_eval, cli, embed
+from ragnarok import agent_eval, cli, embed, index
 from ragnarok.config import Config, dump_config
 from ragnarok.embed import input_hash
 from ragnarok.index import connect, import_cache, update
@@ -362,3 +362,61 @@ def test_backup_copies_core_while_a_connection_is_open(vault, tmp_path):
         assert copy.execute("SELECT count(*) FROM embed_cache").fetchone()[0] == cached > 0
         assert copy.execute("SELECT count(*) FROM w0_step").fetchone()[0] == 1
         copy.close()
+
+
+def files_bytes(path):
+    return b"".join(p.read_bytes() for p in path.parent.glob(path.name + "*"))
+
+
+def test_prepare_drops_the_text_of_excluded_and_private_notes_from_the_copies(vault, monkeypatch):
+    vault.dimension = 8
+    vault.eval_exclude = ["Home/Quiz/"]
+    (vault.root / "Home/Quiz").mkdir(parents=True)
+    (vault.root / "Home/Quiz/answers.md").write_text("# Answers\nThe answer is qzexcludedword.\n")
+    (vault.root / "Home/Password/bank.md").write_text("# secret\nThe pin is qzprivateword.\n")
+    fake_embedders(monkeypatch)
+    conn = connect(vault)
+    update(vault, conn, FakeEmbedder())
+    source = {p: ids for p, ids in conn.execute(UNIT_IDS)}
+    conn.close()
+    ecfg = agent_eval.prepare(vault)
+    conn = connect(ecfg)
+    copy = {p: ids for p, ids in conn.execute(UNIT_IDS)}
+    conn.close()
+    assert copy and copy == {p: ids for p, ids in source.items() if p in copy}
+    assert set(copy) == set(agent_eval.mirror_notes(vault))
+    for path in (ecfg.core_path, ecfg.index_path):
+        data = files_bytes(path)
+        assert b"qzexcludedword" not in data and b"qzprivateword" not in data
+
+
+UNIT_IDS = "SELECT d.path, group_concat(u.id) FROM doc d JOIN unit u ON u.doc_id = d.id GROUP BY d.path"
+
+
+def test_rebuild_refuses_an_index_file_that_it_cannot_read(vault, tmp_path, monkeypatch, capsys):
+    config_file = write_config(vault, tmp_path)
+    fake_embedders(monkeypatch)
+    v1_index(vault)
+    before = vault.index_path.read_bytes()
+    holder = sqlite3.connect(vault.index_path)
+    holder.execute("PRAGMA locking_mode = EXCLUSIVE")
+    holder.execute("BEGIN EXCLUSIVE")
+    try:
+        assert cli.main(["--config", str(config_file), "index", "--rebuild"]) == 1
+        err = capsys.readouterr().err
+        assert "does not delete it" in err and "Move it to" in err
+        assert vault.index_path.read_bytes() == before
+    finally:
+        holder.rollback()
+        holder.close()
+
+
+def test_migrate_keeps_the_old_file_when_the_cache_copy_is_short(vault, tmp_path, monkeypatch, capsys):
+    config_file = write_config(vault, tmp_path)
+    fake_embedders(monkeypatch)
+    v1_index(vault)
+    before = vault.index_path.read_bytes()
+    monkeypatch.setattr(index, "import_cache", lambda cfg, source: 0)
+    assert cli.main(["--config", str(config_file), "migrate"]) == 1
+    assert "keeps" in capsys.readouterr().err
+    assert vault.index_path.read_bytes() == before
