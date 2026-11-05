@@ -1,0 +1,37 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.freyr/ragnarok",
+  "title": "ragnarok",
+  "description": "Local RAG search over Obsidian vaults: SQLite hybrid search with local Ollama embeddings.",
+  "repository": {
+    "url": "https://github.com/freyr/ragnarok",
+    "source": "github"
+  },
+  "version": "1.1.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "ragnarok",
+      "version": "1.1.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "serve"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "RAGNAROK_HOME",
+          "description": "The folder that holds config.toml, data/ and logs/. Default: ~/.ragnarok.",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}

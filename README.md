@@ -1,5 +1,7 @@
 # ragnarok
 
+<!-- mcp-name: io.github.freyr/ragnarok -->
+
 Local RAG search over Obsidian vaults for Claude Code.
 
 ragnarok indexes the Markdown notes of one or more Obsidian vaults on your computer. A local MCP server gives
@@ -32,23 +34,52 @@ model, and the index is one SQLite file.
   `ragnarok backfill apply` makes a backup archive of the vault and adds only the missing keys.
 - **Evaluation.** `ragnarok eval` compares grep, keyword, dense and hybrid search on your own question sets.
   `ragnarok eval agent` compares a Claude Code agent with grep and an agent with the MCP tools.
-- **One-command setup.** `./setup.sh` installs the tools, the model and the index, and registers the MCP server
-  in Claude Code. `ragnarok doctor` checks the setup.
+- **One-command setup.** `ragnarok init` installs the model and the index, and registers the MCP server in
+  Claude Code when the Claude Code plugin does not give it. `ragnarok doctor` checks the setup.
 
 ## Requirements
 
 - macOS with [Homebrew](https://brew.sh). The setup uses `brew services` for Ollama.
 - [Ollama](https://ollama.com): `brew install ollama`.
 - [Claude Code](https://claude.com/claude-code).
-- `setup.sh` installs [uv](https://docs.astral.sh/uv/) if it is missing. uv installs Python 3.12.
+- [uv](https://docs.astral.sh/uv/): `brew install uv`. uv installs Python 3.12. `setup.sh` installs uv if it
+  is missing.
 
 ## Setup
+
+ragnarok is on [PyPI](https://pypi.org/p/ragnarok) and in the
+[MCP Registry](https://registry.modelcontextprotocol.io) as `io.github.freyr/ragnarok`.
+
+### With the Claude Code plugin (no clone)
+
+In Claude Code:
+
+```text
+/plugin marketplace add freyr/ragnarok-claude-plugin
+/plugin install ragnarok@ragnarok
+```
+
+Then in a terminal:
+
+```bash
+uvx ragnarok init
+```
+
+The plugin starts the server with `uvx ragnarok serve` and adds the search guidance to each session. The home
+folder is `~/.ragnarok`. To use a different folder, set `RAGNAROK_HOME` in the `env` of
+`~/.claude/settings.json` and in your shell.
+
+### From a checkout
 
 ```bash
 git clone https://github.com/freyr/ragnarok.git
 cd ragnarok
 ./setup.sh                      # installs uv if needed, then runs `ragnarok init`
 ```
+
+The checkout is the home folder.
+
+### What init does
 
 `ragnarok init` does six steps. It skips each step that is already done:
 
@@ -59,11 +90,12 @@ cd ragnarok
    brew services, for example `ollama serve` in a terminal, init stops it and starts the service.
 4. It pulls the embedding model.
 5. It builds the index. A vault with 1,500 notes takes approximately 12 minutes on an Apple Silicon Mac.
-6. It registers the MCP server `ragnarok` in Claude Code at the user scope (it asks before it replaces another
-   registration).
+6. When the plugin `ragnarok` gives the MCP server, it removes a registration at the user scope (it asks
+   first). Else it registers the MCP server `ragnarok` in Claude Code at the user scope (it asks before it
+   replaces another registration).
 
-Restart Claude Code after step 6. `uv run ragnarok doctor` checks the same six parts and prints the fix for
-each failure.
+Restart Claude Code after step 6. `ragnarok doctor` checks the same six parts and prints the fix for each
+failure.
 
 Before step 5, examine `config.toml`: remove a folder that is not a vault, and add your private paths. A later
 change of the configuration applies at the next `ragnarok index` or MCP tool call, with no restart.
@@ -81,8 +113,9 @@ The server gives six tools:
 | `open_note` | The text of a note or of one section, with its links and backlinks. A note of more than 4,000 words gives an outline: each section with its heading path, words and first sentence. |
 | `find_by_jira` | The notes that contain a ticket key, for example `ABC-123`. |
 
-Claude Code loads MCP tools on demand. To make Claude use them before grep, add a short instruction to your
-`~/.claude/CLAUDE.md` file, for example:
+The plugin adds the guidance below to each session itself, with the plugin tool names
+`mcp__plugin_ragnarok_ragnarok__*`. Without the plugin, Claude Code loads MCP tools on demand. To make Claude
+use them before grep, add a short instruction to your `~/.claude/CLAUDE.md` file, for example:
 
 ```markdown
 ## Finding notes: ragnarok first
@@ -125,8 +158,8 @@ It changes only `config.toml` and adds frontmatter keys. It never moves, renames
 
 ## Configuration
 
-`config.toml` is in the checkout. A relative path in it is relative to the checkout. `config.example.toml`
-explains each key. The most important keys:
+`config.toml` is in the home folder. A relative path in it is relative to the home folder.
+`config.example.toml` explains each key. The most important keys:
 
 | Key | What |
 |---|---|
@@ -176,11 +209,13 @@ Without frontmatter, the path rules give the metadata. The default rules work fo
 | `ragnarok survey <vault> [--json]` | Prints the folders, frontmatter keys, marker files, name patterns and ticket prefixes of a vault folder. Run it before you write `[vault_rules.<vault>]`. It prints no note text. |
 | `ragnarok eval mechanical\|pool\|agent` | Runs an evaluation on the question sets in `data/eval/sets/`. |
 
-Run each command with `uv run` in the checkout, for example `uv run ragnarok search "boiler"`.
+Run each command with `uvx ragnarok`, for example `uvx ragnarok search "boiler"`, or with `uv run` in the
+checkout.
 
 ## Where things are
 
-Everything is in the checkout. Git ignores `config.toml`, `data/` and `logs/`.
+Everything is in the home folder: `RAGNAROK_HOME`, else the checkout, else `~/.ragnarok`. In a checkout, git
+ignores `config.toml`, `data/` and `logs/`.
 
 | Path | What |
 |---|---|
@@ -191,7 +226,7 @@ Everything is in the checkout. Git ignores `config.toml`, `data/` and `logs/`.
 | `data/eval/` | Your question sets (`sets/`), the evaluation results and the mirror of the agent evaluation. |
 | `logs/server.log` | The MCP server log, one line for each tool call with its time. |
 
-Ollama keeps the model in `~/.ollama`. Set `RAGNAROK_HOME` to use a different home folder.
+Ollama keeps the model in `~/.ollama`.
 
 ## Development
 
@@ -199,6 +234,14 @@ Ollama keeps the model in `~/.ollama`. Set `RAGNAROK_HOME` to use a different ho
 uv run pytest
 uv run ruff check . && uv run ruff format --check .
 ```
+
+### Release
+
+1. Set the version in `pyproject.toml` and in both `version` fields of `server.json`, and add the section to
+   `CHANGELOG.md`.
+2. After the merge, push the tag: `git tag v1.2.3 && git push origin v1.2.3`.
+3. The workflow `publish.yml` checks that the three versions match the tag, runs the tests, publishes the
+   package to PyPI with trusted publishing, then publishes `server.json` to the MCP Registry.
 
 ## License
 

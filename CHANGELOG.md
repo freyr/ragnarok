@@ -6,7 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-05
+
 ### Added
+
+- ragnarok is on PyPI and in the MCP Registry as `io.github.freyr/ragnarok`. `uvx ragnarok serve` runs the
+  server with no checkout. The workflow `publish.yml` publishes a tag `v<version>` to both.
+- Outside a checkout and with no `RAGNAROK_HOME`, the home folder is `~/.ragnarok`. The package holds
+  `config.example.toml`; the checkout has a link to it.
+- `ragnarok doctor` and `ragnarok init` accept the server of the Claude Code plugin `ragnarok`
+  (`plugin:ragnarok:ragnarok`). A user registration next to the plugin server is a failure, and init removes
+  it after it asks. Outside a checkout, init registers `uvx ragnarok serve`, with `RAGNAROK_HOME` when the home
+  folder is not `~/.ragnarok`.
 
 - The `[vault_paths]` table gives the folder of a vault that is not in `root`. The note keys stay
   `<vault>/<path in the vault>`, so the current index stays valid. `ragnarok doctor` names each vault folder
@@ -27,4 +38,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 First public release.
 
+[1.1.0]: https://github.com/freyr/ragnarok/releases/tag/v1.1.0
 [1.0.0]: https://github.com/freyr/ragnarok/releases/tag/v1.0.0

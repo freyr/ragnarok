@@ -256,7 +256,7 @@ def cmd_serve(cfg, args) -> int:
     from .server import build
 
     logs = home_dir() / "logs"
-    logs.mkdir(exist_ok=True)
+    logs.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(name)s %(message)s",

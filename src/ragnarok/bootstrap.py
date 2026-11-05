@@ -1,8 +1,12 @@
 """Setup and health checks of one computer: `ragnarok init` and `ragnarok doctor`.
 
 A setup has six parts: config.toml, the Ollama binary, the Ollama service, the model, the index and the MCP
-registration in Claude Code. `doctor` checks each part; `init` repairs each part in sequence and skips a part
+server in Claude Code. `doctor` checks each part; `init` repairs each part in sequence and skips a part
 that is already ok.
+
+The MCP server comes from the Claude Code plugin `ragnarok` (server `plugin:ragnarok:ragnarok`), or from a
+registration at the user scope. A checkout registers `uv --directory <checkout> run ragnarok serve`; an
+installed package registers `uvx ragnarok serve`.
 """
 
 from __future__ import annotations
@@ -20,9 +24,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import Config, load_config
+from .config import Config, default_home, is_checkout, load_config
 
 MCP_NAME = "ragnarok"
+PLUGIN_SERVER = "plugin:ragnarok:ragnarok"
 
 
 @dataclass
@@ -34,7 +39,27 @@ class Check:
 
 
 def serve_args(home: Path) -> list[str]:
-    return ["uv", "--directory", str(home), "run", "ragnarok", "serve"]
+    if is_checkout(home):
+        return ["uv", "--directory", str(home), "run", "ragnarok", "serve"]
+    return ["uvx", "ragnarok", "serve"]
+
+
+def register_args(home: Path) -> list[str]:
+    """The `claude mcp add` command that registers the server of this home folder at the user scope."""
+    env = [] if is_checkout(home) or home == default_home() else ["-e", f"RAGNAROK_HOME={home}"]
+    return ["claude", "mcp", "add", "--scope", "user", *env, MCP_NAME, "--", *serve_args(home)]
+
+
+def registered(command: str, home: Path) -> bool:
+    """True when the registered command runs the server of this home folder."""
+    if is_checkout(home):
+        return str(home) in command.split()
+    return command.split()[:3] == serve_args(home)
+
+
+def example_config() -> Path:
+    """The template of config.toml, in the package. The checkout has a link to it."""
+    return Path(__file__).with_name("config.example.toml")
 
 
 def ollama_models(cfg: Config) -> list[str] | None:
@@ -70,8 +95,16 @@ def has_model(models: list[str], name: str) -> bool:
     return name in models or f"{name}:latest" in models
 
 
+def plugin_server() -> bool:
+    """True when the Claude Code plugin ragnarok gives the MCP server."""
+    if not shutil.which("claude"):
+        return False
+    out = subprocess.run(["claude", "mcp", "get", PLUGIN_SERVER], capture_output=True, text=True, timeout=120)
+    return out.returncode == 0
+
+
 def mcp_command() -> str | None:
-    """The command line of the registered ragnarok server in Claude Code, or None."""
+    """The command line of the ragnarok server registered at a scope of Claude Code, or None."""
     if not shutil.which("claude"):
         return None
     out = subprocess.run(["claude", "mcp", "get", MCP_NAME], capture_output=True, text=True, timeout=120)
@@ -135,15 +168,22 @@ def doctor(cfg: Config, config_file: Path, home: Path) -> list[Check]:
     fix = "ragnarok index --rebuild" if cfg.index_path.exists() else "ragnarok index"
     checks.append(Check("index", bool(notes), f"{notes} notes in {detail}" if notes else detail, fix))
 
+    plugin = plugin_server()
     command = mcp_command()
-    expected = " ".join(serve_args(home))
-    if command is None:
+    expected = " ".join(register_args(home))
+    if plugin and command:
+        detail = f"two servers: the plugin ragnarok and the registration `{command}`"
+        checks.append(Check("mcp", False, detail, f"claude mcp remove --scope user {MCP_NAME}"))
+    elif plugin:
+        detail = f"the plugin ragnarok gives the server; it uses {home} when its RAGNAROK_HOME is the same"
+        checks.append(Check("mcp", True, detail))
+    elif command is None:
         detail = "claude is not installed" if not shutil.which("claude") else f"no MCP server {MCP_NAME} in Claude Code"
-        checks.append(Check("mcp", False, detail, f"claude mcp add --scope user {MCP_NAME} -- {expected}"))
+        checks.append(Check("mcp", False, detail, f"install the Claude Code plugin ragnarok, or {expected}"))
     else:
-        ok = str(home) in command.split()
+        ok = registered(command, home)
         detail = command if ok else f"{command} does not use {home}"
-        checks.append(Check("mcp", ok, detail, f"ragnarok init (it registers {expected})"))
+        checks.append(Check("mcp", ok, detail, f"ragnarok init (it registers {' '.join(serve_args(home))})"))
     return checks
 
 
@@ -159,6 +199,7 @@ def write_config(config_file: Path, example: Path, root: Path) -> list[str]:
     """Copy the template with the vault root and the vault folders that are in it."""
     vaults = sorted(p.name for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
     text = example.read_text()
+    config_file.parent.mkdir(parents=True, exist_ok=True)
     text = re.sub(r"^root = .*$", f'root = "{root}"', text, count=1, flags=re.M)
     text = re.sub(r"^vaults = .*$", f"vaults = {json.dumps(vaults)}", text, count=1, flags=re.M)
     config_file.write_text(text)
@@ -183,7 +224,7 @@ def init(
         if not root.is_dir():
             print(f"{root} is not a folder", file=sys.stderr)
             return 1
-        vaults = write_config(config_file, home / "config.example.toml", root.resolve())
+        vaults = write_config(config_file, example_config(), root.resolve())
         print(
             f"wrote {config_file} with the vaults {', '.join(vaults)}; edit it to remove a folder that is not a vault"
         )
@@ -255,14 +296,22 @@ def init(
         print("Claude Code is not installed. After you install it, run init again.", file=sys.stderr)
         return 1
     command = mcp_command()
-    if command and str(home) in command.split():
+    if plugin_server():
+        if command:
+            question = f"The plugin ragnarok gives the server, and Claude Code also runs `{command}`. Remove it?"
+            if not confirm(question):
+                return 1
+            run(["claude", "mcp", "remove", "--scope", "user", MCP_NAME], check=True)
+            print("removed; restart Claude Code")
+        print("the plugin ragnarok gives the server, no registration")
+    elif command and registered(command, home):
         print(f"registered, no change: {command}")
     else:
         if command:
             if not confirm(f"Claude Code runs {MCP_NAME} as `{command}`. Replace it with this home folder?"):
                 return 1
             run(["claude", "mcp", "remove", "--scope", "user", MCP_NAME], check=True)
-        run(["claude", "mcp", "add", "--scope", "user", MCP_NAME, "--", *serve_args(home)], check=True)
+        run(register_args(home), check=True)
         print("registered; restart Claude Code to load the server")
 
     print("\n# doctor")
