@@ -315,6 +315,31 @@ class Tools:
             )
         return {**entity, "warnings": warnings}
 
+    @traced
+    def related(
+        self,
+        entity: str,
+        relation: str | None = None,
+        direction: str = "out",
+        kind: str | None = None,
+        depth: int = 1,
+        as_of: str | None = None,
+        include_extracted: bool = False,
+    ) -> dict:
+        warnings = self.scan()
+        candidates = kb.resolve(self.conn, entity, self.cfg.allow_private)
+        selected = candidates[0]["id"] if len(candidates) == 1 else None
+        entry = {"name": entity, "candidates": candidates, "selected": selected}
+        if self.trace:
+            self.trace.set("ragnarok.entities", [entry])
+        entity_id = kb.pick(candidates, entity)
+        result, edges = kb.related(
+            self.conn, entity_id, relation, direction, kind, depth, as_of, include_extracted, self.cfg.allow_private
+        )
+        if self.trace:
+            self.trace.set("ragnarok.entities", [{**entry, **edges}])
+        return {**result, "warnings": warnings}
+
     # --- project summary ---------------------------------------------------------------------------------------
 
     def _project_info(self, vault: str, project: str) -> dict:

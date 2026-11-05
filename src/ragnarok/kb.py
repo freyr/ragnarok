@@ -98,8 +98,8 @@ CREATE TABLE IF NOT EXISTS main.relation (
     valid_until TEXT,
     source_doc TEXT
 );
-CREATE INDEX IF NOT EXISTS main.relation_src ON relation (src);
-CREATE INDEX IF NOT EXISTS main.relation_dst ON relation (dst);
+CREATE INDEX IF NOT EXISTS main.relation_src ON relation (src, rel);
+CREATE INDEX IF NOT EXISTS main.relation_dst ON relation (dst, rel);
 CREATE INDEX IF NOT EXISTS main.relation_source ON relation (source_doc);
 CREATE TABLE IF NOT EXISTS main.entity_canonical (
     entity_id TEXT,
@@ -896,3 +896,120 @@ def get(conn: sqlite3.Connection, entity_id: str, as_of: str | None, allow_priva
         "canonical": _canonical(conn, entity_id, allow_private),
         "relations": counts,
     }
+
+
+# --- the read path: related -------------------------------------------------------------------------------------
+
+MAX_DEPTH = 3
+DIRECTIONS = {"out": ("src", "dst"), "in": ("dst", "src")}  # the near end of a hop, and the end it reaches
+
+
+def resolve(conn: sqlite3.Connection, text: str, allow_private: bool) -> list[dict]:
+    """The entities that a text names: an entity ID, else the entities with this alias or name."""
+    found = conn.execute(
+        f"SELECT e.id FROM entity e JOIN doc d ON d.id = e.doc_id WHERE e.id = ?{_visible(allow_private)}", (text,)
+    ).fetchone()
+    if found:
+        return [{"id": text, "matched_by": "id", "score": None}]
+    hits = _alias_hits(conn, text, None, allow_private)
+    return [{"id": i, "matched_by": "alias", "score": score} for i, score in hits]
+
+
+def pick(candidates: list[dict], text: str) -> str:
+    """The one entity of the candidates. No candidate, or an ambiguous alias, is an error that tells the next step."""
+    if not candidates:
+        raise LookupError(f"No entity for {text!r}. Use an id or an alias from find_entity.")
+    if len(candidates) > 1:
+        names = ", ".join(c["id"] for c in candidates)
+        raise LookupError(f"The name {text!r} is ambiguous: {names}. Call again with one of these ids.")
+    return candidates[0]["id"]
+
+
+def related(
+    conn: sqlite3.Connection,
+    entity_id: str,
+    relation: str | None,
+    direction: str,
+    kind: str | None,
+    depth: int,
+    as_of: str | None,
+    include_extracted: bool,
+    allow_private: bool,
+) -> tuple[dict, dict]:
+    """The edges that leave (out) or enter (in) an entity through its relations, to `depth` hops, with no cycle.
+
+    The kind filter keeps the edges whose reached end has the kind; a hop still passes through another kind. An edge
+    that is not valid at `as_of`, and each edge behind it, is removed. Return the result and the trace record: the
+    edges before the filters, the edges kept and each removed entity with the filter that removed it.
+    """
+    if direction not in DIRECTIONS:
+        raise ValueError(f"direction must be 'out' or 'in', not {direction!r}.")
+    if not 1 <= depth <= MAX_DEPTH:
+        raise ValueError(f"depth must be from 1 to {MAX_DEPTH}, not {depth!r}.")
+    day = _iso_date(as_of) if as_of else date.today().isoformat()
+    if day is None:
+        raise ValueError(f"as_of must be an ISO date (YYYY-MM-DD), not {as_of!r}.")
+    kind = kind.strip().lower() if kind else None
+    near, reach = DIRECTIONS[direction]
+    hop = (
+        f" r.{reach} IS NOT NULL"
+        + (" AND r.rel = :rel" if relation else "")
+        + ("" if include_extracted else " AND r.origin = 'declared'")
+        + (
+            ""
+            if allow_private
+            else " AND NOT EXISTS (SELECT 1 FROM doc d WHERE d.sensitivity <> 'normal' AND (d.id = r.source_doc"
+            f" OR d.id = r.{reach} OR d.id IN (SELECT doc_id FROM entity WHERE id = r.{reach})))"
+        )
+    )
+    valid = "(r.valid_from IS NULL OR r.valid_from <= :day) AND (r.valid_until IS NULL OR r.valid_until >= :day)"
+    params = {"start": entity_id, "depth": depth, "day": day}
+    if relation:
+        params["rel"] = relation
+    rows = conn.execute(
+        f"""WITH RECURSIVE walk (id, reached, depth, path, ok) AS (
+            SELECT r.id, r.{reach}, 1, '|' || :start || '|' || r.{reach} || '|', {valid}
+            FROM relation r INDEXED BY relation_{near} WHERE r.{near} = :start AND{hop}
+            UNION ALL
+            SELECT r.id, r.{reach}, w.depth + 1, w.path || r.{reach} || '|', w.ok AND {valid}
+            FROM walk w CROSS JOIN relation r INDEXED BY relation_{near} ON r.{near} = w.reached
+            WHERE w.depth < :depth AND instr(w.path, '|' || r.{reach} || '|') = 0 AND{hop}
+        )
+        SELECT w.id, min(w.depth), max(w.ok), r.src, r.rel, r.dst, r.origin, r.confidence, r.valid_from,
+               r.valid_until, r.source_doc,
+               COALESCE(se.kind, 'doc'), COALESCE(se.name, sd.title), COALESCE(de.kind, 'doc'),
+               COALESCE(de.name, dd.title)
+        FROM walk w CROSS JOIN relation r ON r.id = w.id
+        LEFT JOIN entity se ON se.id = r.src LEFT JOIN doc sd ON sd.id = r.src
+        LEFT JOIN entity de ON de.id = r.dst LEFT JOIN doc dd ON dd.id = r.dst
+        GROUP BY w.id ORDER BY min(w.depth), r.src, r.rel, r.dst, w.id""",
+        params,
+    ).fetchall()
+    end_key = "target" if direction == "out" else "source"
+    edges, before, kept, removed = [], [], [], {}
+    for _, hops, ok, src, rel, dst, origin, confidence, valid_from, valid_until, source_doc, *names in rows:
+        edge = {
+            "source": {"id": src, "kind": names[0], "name": names[1]},
+            "relation": rel,
+            "target": {"id": dst, "kind": names[2], "name": names[3]},
+            "origin": origin,
+            "confidence": confidence,
+            "valid_from": valid_from,
+            "valid_until": valid_until,
+            "source_doc": source_doc,
+            "depth": hops,
+        }
+        end = edge[end_key]
+        removed_by = "as_of" if not ok else "kind" if kind and end["kind"] != kind else None
+        short = {"src": src, "rel": rel, "dst": dst, "depth": hops}
+        before.append(short)
+        if removed_by is None:
+            edges.append(edge)
+            kept.append(short)
+        else:
+            removed.setdefault(end["id"], removed_by)
+    reached = {e[end_key]["id"] for e in edges}
+    gone = [{"id": i, "filter": f} for i, f in removed.items() if i not in reached]
+    name, entity_kind = conn.execute("SELECT name, kind FROM entity WHERE id = ?", (entity_id,)).fetchone()
+    result = {"entity": {"id": entity_id, "kind": entity_kind, "name": name}, "valid_at": day, "edges": edges}
+    return result, {"edges_before": before, "edges": kept, "removed": gone}

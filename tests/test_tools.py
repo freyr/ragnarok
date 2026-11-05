@@ -167,7 +167,7 @@ def test_each_call_scans_first(tools):
     assert tools.last_scan["changed"] == 1
 
 
-def test_server_lists_the_nine_tools(tools):
+def test_server_lists_the_tools(tools):
     server = build(tools=tools)
     names = {t.name for t in asyncio.run(server.list_tools())}
     assert names == {
@@ -180,6 +180,7 @@ def test_server_lists_the_nine_tools(tools):
         "kb_check",
         "find_entity",
         "get_entity",
+        "related",
     }
 
 

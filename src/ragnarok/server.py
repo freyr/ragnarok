@@ -269,4 +269,34 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
         """
         return get().get_entity(id, as_of=as_of)
 
+    @server.tool()
+    @timed
+    def related(
+        entity: str,
+        relation: str | None = None,
+        direction: str = "out",
+        kind: str | None = None,
+        depth: int = 1,
+        as_of: str | None = None,
+        include_extracted: bool = False,
+        ctx: Context | None = None,
+    ) -> dict:
+        """The exact join through the declared relations of an entity, to depth 3 (no cycle).
+
+        entity is an ID or a name; an ambiguous name is an error with the candidate IDs. direction is out (the
+        entity is the source) or in (the entity is the target: the clients of a feature). relation names one
+        relation type. kind keeps the edges whose far end has the kind. as_of (default today) drops an edge that is
+        not valid then, with each edge behind it. Each edge has its source and target (id, kind, name), relation,
+        origin, confidence, validity, source_doc and depth. Only declared edges unless include_extracted is true.
+        """
+        return get().related(
+            entity,
+            relation=relation,
+            direction=direction,
+            kind=kind,
+            depth=depth,
+            as_of=as_of,
+            include_extracted=include_extracted,
+        )
+
     return server
