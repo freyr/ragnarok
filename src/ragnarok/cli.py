@@ -67,8 +67,10 @@ def build_parser() -> argparse.ArgumentParser:
     cp.add_argument("action", choices=["import"])
     cp.add_argument("--from", dest="source", type=Path, required=True, help="a version 1 index file")
     wp = parsers["w0"]
-    wp.add_argument("action", choices=["score", "import"], help="score: read the Stop hook JSON on stdin")
+    wp.add_argument("action", choices=["score", "import", "backfill"], help="score: read the Stop hook JSON on stdin")
     wp.add_argument("--from", dest="source", type=Path, help="import: another core file")
+    wp.add_argument("--projects", type=Path, default=Path("~/.claude/projects"), help="backfill: transcript folders")
+    wp.add_argument("--since", help="backfill: only steps from this date (YYYY-MM-DD)")
     parsers["backup"].add_argument("--to", type=Path, help="the copy (default <data_dir>/backups/core-<UTC time>.db)")
     parsers["index"].add_argument("--min-words", type=int, help="build a separate index with this minimum chunk size")
     parsers["index"].add_argument(
@@ -220,6 +222,10 @@ def cmd_w0(cfg, args) -> int:
             print(f"No core file at {args.source}. Give it with --from.", file=sys.stderr)
             return 1
         print(f"imported {w0.import_steps(cfg, args.source)} w0 steps")
+        return 0
+    if args.action == "backfill":
+        c = w0.backfill(cfg, args.projects, args.since)
+        print(", ".join(f"{k} {v}" for k, v in c.items()))
         return 0
     try:
         w0.score(cfg, sys.stdin.read())

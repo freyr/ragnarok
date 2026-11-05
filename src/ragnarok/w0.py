@@ -52,6 +52,8 @@ class Step:
     changed: list[str] = field(default_factory=list)
     read: list[str] = field(default_factory=list)
     final_text: str = ""
+    cwd: str = ""
+    created: str | None = None
 
     @property
     def command(self) -> str | None:
@@ -109,6 +111,31 @@ def _prompt_text(entry: dict) -> str | None:
     return text
 
 
+def _add_assistant(step: Step, entry: dict) -> None:
+    """Add the tool calls and the text of one assistant line to the step."""
+    if entry.get("type") != "assistant":
+        return
+    texts = []
+    for block in _blocks(entry):
+        if block.get("type") == "tool_use":
+            name = str(block.get("name", "?"))
+            step.tools[name] += 1
+            inputs = block.get("input") or {}
+            if name in SEARCH_TOOLS:
+                target = inputs.get("path")
+            else:
+                target = inputs.get("file_path") or inputs.get("notebook_path")
+            if isinstance(target, str) and target:
+                reads = name == "Read" or name in SEARCH_TOOLS
+                bucket = step.changed if name in CHANGE_TOOLS else step.read if reads else None
+                if bucket is not None and target not in bucket:
+                    bucket.append(target)
+        elif block.get("type") == "text" and block.get("text", "").strip():
+            texts.append(block["text"].strip())
+    if texts:
+        step.final_text = "\n".join(texts)
+
+
 def last_step(path: Path) -> Step:
     """The last step of the transcript. Only the lines after the last user prompt are parsed (from the end)."""
     entries = []
@@ -132,27 +159,7 @@ def last_step(path: Path) -> Step:
         uuid = prompt.get("uuid")
         step.prompt_uuid = str(uuid) if uuid else None
     for entry in reversed(entries):
-        if entry.get("type") != "assistant":
-            continue
-        texts = []
-        for block in _blocks(entry):
-            if block.get("type") == "tool_use":
-                name = str(block.get("name", "?"))
-                step.tools[name] += 1
-                inputs = block.get("input") or {}
-                if name in SEARCH_TOOLS:
-                    target = inputs.get("path")
-                else:
-                    target = inputs.get("file_path") or inputs.get("notebook_path")
-                if isinstance(target, str) and target:
-                    reads = name == "Read" or name in SEARCH_TOOLS
-                    bucket = step.changed if name in CHANGE_TOOLS else step.read if reads else None
-                    if bucket is not None and target not in bucket:
-                        bucket.append(target)
-            elif block.get("type") == "text" and block.get("text", "").strip():
-                texts.append(block["text"].strip())
-        if texts:
-            step.final_text = "\n".join(texts)
+        _add_assistant(step, entry)
     return step
 
 
@@ -208,7 +215,7 @@ def summary_text(step: Step) -> str:
     return f"kind: {step.kind}\ntools: {tools}\nfiles: {files}\ntext: {step.final_text}"
 
 
-def make_row(cfg: Config, session_id: str, cwd: str, step: Step) -> dict:
+def make_row(cfg: Config, session_id: str, cwd: str, step: Step, created: str | None = None) -> dict:
     """The w0_step row of one step. A private step keeps only the hash of the summary and of the /kb-save text."""
     summary = redact(summary_text(step))[0][: cfg.w0.summary_chars]
     private = any(is_private_path(cfg, p, cwd) for p in [cwd, *step.changed, *step.read] if p)
@@ -229,7 +236,7 @@ def make_row(cfg: Config, session_id: str, cwd: str, step: Step) -> dict:
         if save_text:
             features["kb_save_text"] = save_text
     return {
-        "created": utc(),
+        "created": created or utc(),
         "session_id": session_id,
         "step_kind": step.kind,
         "summary": None if private else summary,
@@ -331,3 +338,137 @@ def w0_status(conn) -> dict:
         "w0_labeled_steps": one("SELECT count(*) FROM w0_step WHERE label_command = 1"),
         "w0_last_step_age_s": age,
     }
+
+
+# ---- backfill: all steps of all transcripts ----
+
+
+def _timestamp(entry: dict) -> str | None:
+    """The ISO time of a transcript line as UTC seconds in the format of utc(), or None."""
+    raw = entry.get("timestamp")
+    if not isinstance(raw, str) or len(raw) < 19:
+        return None
+    try:
+        return utc(calendar.timegm(time.strptime(raw[:19], "%Y-%m-%dT%H:%M:%S")))
+    except ValueError:
+        return None
+
+
+def parse_steps(path: Path) -> list[Step]:
+    """All steps of the transcript, in order. The cwd of a step is the first cwd of its lines; created is the
+    time of the prompt line. Lines before the first prompt belong to no step."""
+    steps: list[Step] = []
+    current: Step | None = None
+    for raw in path.read_bytes().splitlines():
+        if not raw.strip():
+            continue
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue  # a damaged or partial line
+        if not isinstance(entry, dict):
+            continue
+        text = _prompt_text(entry)
+        if text is not None:
+            uuid = entry.get("uuid")
+            current = Step(
+                prompt=text,
+                origin=_origin(entry),
+                prompt_uuid=str(uuid) if uuid else None,
+                cwd=str(entry.get("cwd") or ""),
+                created=_timestamp(entry),
+            )
+            steps.append(current)
+        elif current is not None:
+            if not current.cwd and entry.get("cwd"):
+                current.cwd = str(entry["cwd"])
+            _add_assistant(current, entry)
+    return steps
+
+
+def skip_homes(cfg: Config) -> list[Path]:
+    """The resolved homes whose sessions the backfill skips: the current home and cfg.w0.skip_homes."""
+    from .config import home_dir
+
+    base = home_dir()
+    homes = [base]
+    for item in cfg.w0.skip_homes:
+        path = Path(item).expanduser()
+        homes.append(_real(path if path.is_absolute() else base / path))
+    return homes
+
+
+def _in_homes(cwd: str, homes: list[Path]) -> bool:
+    return bool(cwd) and any(_real(cwd).is_relative_to(h) for h in homes)
+
+
+def _label_steps(steps: list[Step]) -> list[int | None]:
+    """label_command of each step: None for /kb-save, 1 for the human step before a /kb-save, else 0."""
+    labels: list[int | None] = [None if s.kind == KB_SAVE else 0 for s in steps]
+    skipped = (KB_SAVE, *ORIGIN_KINDS.values())
+    for i, step in enumerate(steps):
+        if step.kind != KB_SAVE:
+            continue
+        for j in range(i - 1, -1, -1):
+            prev = steps[j]
+            if prev.kind not in skipped and (prev.origin or "human") == "human":
+                labels[j] = 1
+                break
+    return labels
+
+
+def backfill(cfg: Config, projects: Path, since: str | None = None) -> dict:
+    """Write the w0_step rows of all steps of the top-level transcripts in each folder of `projects`.
+
+    The key of a row is (session_id, prompt_uuid): a second run updates the row and sets label_command again from
+    the transcript. A file that fails gives one path-free log line. Return the counts. `skipped` counts the files
+    of a skipped home or with no step, and the steps with no uuid or no time.
+    """
+    from .index import connect_core
+
+    counts = {"files": 0, "steps": 0, "inserted": 0, "updated": 0, "skipped": 0}
+    homes = skip_homes(cfg)
+    folders = [f for f in Path(projects).expanduser().glob("*") if f.is_dir()]
+    files = sorted(f for folder in folders for f in folder.glob("*.jsonl"))
+    conn = connect_core(cfg)
+    try:
+        for path in files:
+            try:
+                steps = parse_steps(path)
+                if not steps or _in_homes(steps[0].cwd, homes):
+                    counts["skipped"] += 1
+                    continue
+                with conn:
+                    _write_file(cfg, conn, path.stem, steps, _label_steps(steps), since, counts)
+                counts["files"] += 1
+            except Exception as e:  # noqa: BLE001 - one bad file must not stop the run
+                log_error(e)
+    finally:
+        conn.close()
+    return counts
+
+
+def _write_file(cfg, conn, session_id, steps, labels, since, counts) -> None:
+    keys = ("created", "step_kind", "summary", "summary_hash", "features", "label_command")
+    for step, label in zip(steps, labels, strict=True):
+        if not step.prompt_uuid or not step.created:
+            counts["skipped"] += 1
+            continue
+        if since and step.created[:10] < since:
+            continue
+        row = make_row(cfg, session_id, step.cwd, step, step.created)
+        row["label_command"] = label
+        counts["steps"] += 1
+        existing = conn.execute(
+            "SELECT id, created, step_kind, summary, summary_hash, features, label_command FROM w0_step"
+            " WHERE session_id = ? AND json_extract(features, '$.prompt_uuid') = ? ORDER BY id LIMIT 1",
+            (session_id, step.prompt_uuid),
+        ).fetchone()
+        if existing is None:
+            names = ", ".join(row)
+            conn.execute(f"INSERT INTO w0_step ({names}) VALUES ({', '.join('?' * len(row))})", list(row.values()))
+            counts["inserted"] += 1
+        elif tuple(existing[1:]) != tuple(row[k] for k in keys):
+            sets = ", ".join(f"{k} = ?" for k in keys)
+            conn.execute(f"UPDATE w0_step SET {sets} WHERE id = ?", [*(row[k] for k in keys), existing[0]])
+            counts["updated"] += 1

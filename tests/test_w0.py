@@ -427,3 +427,135 @@ def test_a_relative_search_path_resolves_against_the_session_cwd(home, monkeypat
     _score(home, monkeypatch, _transcript(tmp_path / "t.jsonl", lines), cwd=home / "vaults" / "Work")
     [row] = _rows(home)
     assert row["summary"] is None and json.loads(row["features"])["private"] is True
+
+
+# ---- ragnarok w0 backfill ----
+
+
+def _stamp(lines, session="s-1", cwd="/work", start=1000):
+    """Add a uuid, a timestamp, a cwd and the session id to each line, in order."""
+    out = []
+    for i, line in enumerate(lines):
+        line = dict(line)
+        line.setdefault("uuid", f"u-{session}-{i}")
+        line["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(1_700_000_000 + start + i))
+        line.setdefault("cwd", cwd)
+        line["sessionId"] = session
+        out.append(line)
+    return out
+
+
+@pytest.fixture
+def projects(tmp_path):
+    folder = tmp_path / "claude" / "proj-a"
+    folder.mkdir(parents=True)
+    return folder.parent
+
+
+def _backfill(capsys, projects, *extra):
+    assert cli.main(["w0", "backfill", "--projects", str(projects), *extra]) == 0
+    return capsys.readouterr().out
+
+
+TWO_STEPS = [
+    _user("first prompt", origin="human"),
+    _tool_use("Edit", file_path="/work/a.py"),
+    _tool_result("Edit"),
+    _say("Edited a."),
+    _user("second prompt", origin="human"),
+    _say("Just talk."),
+]
+
+
+def test_backfill_divides_a_transcript_into_steps(home, projects, capsys):
+    _transcript(projects / "proj-a" / "s-1.jsonl", _stamp(TWO_STEPS, cwd="/work"))
+    out = _backfill(capsys, projects)
+    assert "files 1" in out and "steps 2" in out and "inserted 2" in out
+    first, second = _rows(home)
+    assert first["step_kind"] == "edit" and second["step_kind"] == "chat"
+    assert "/work/a.py" in first["summary"] and "Edited a." in first["summary"]
+    assert "Edited a." not in second["summary"] and "Just talk." in second["summary"]
+    assert first["session_id"] == "s-1"
+    assert first["created"] == time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(1_700_001_000))
+    assert json.loads(first["features"])["prompt_uuid"] == "u-s-1-0"
+
+
+def test_backfill_two_times_gives_the_same_rows(home, projects, capsys):
+    lines = [*TWO_STEPS, *_kb_save("remember"), _say("Saved.")]
+    _transcript(projects / "proj-a" / "s-1.jsonl", _stamp(lines))
+    _backfill(capsys, projects)
+    before = _rows(home)
+    out = _backfill(capsys, projects)
+    assert "inserted 0" in out and "updated 0" in out
+    assert _rows(home) == before
+
+
+def test_backfill_completes_a_partial_last_step(home, projects, capsys):
+    lines = _stamp(TWO_STEPS)
+    path = _transcript(projects / "proj-a" / "s-1.jsonl", lines[:5])  # the second prompt, no answer yet
+    _backfill(capsys, projects)
+    assert "Just talk." not in _rows(home)[1]["summary"]
+    _transcript(path, lines)
+    out = _backfill(capsys, projects)
+    assert "inserted 0" in out and "updated 1" in out
+    rows = _rows(home)
+    assert len(rows) == 2 and "Just talk." in rows[1]["summary"]
+
+
+def test_backfill_skips_subagent_transcripts(home, projects, capsys):
+    _transcript(projects / "proj-a" / "s-1.jsonl", _stamp(TWO_STEPS))
+    sub = projects / "proj-a" / "s-1" / "subagents"
+    sub.mkdir(parents=True)
+    _transcript(sub / "agent-x.jsonl", _stamp(TWO_STEPS, session="agent-x"))
+    _transcript(projects / "loose.jsonl", _stamp(TWO_STEPS, session="loose"))
+    out = _backfill(capsys, projects)
+    assert "files 1" in out
+    assert {r["session_id"] for r in _rows(home)} == {"s-1"}
+
+
+def test_backfill_labels_from_kb_save(home, projects, capsys):
+    lines = [
+        _user("a"),
+        _say("one"),
+        _user("human step", origin="human"),
+        _say("two"),
+        _user("<peer>", origin="peer"),
+        _say("three"),
+        *_kb_save(),
+        _say("Saved."),
+    ]
+    _transcript(projects / "proj-a" / "s-1.jsonl", _stamp(lines))
+    _backfill(capsys, projects)
+    assert [(r["step_kind"], r["label_command"]) for r in _rows(home)] == [
+        ("chat", 0),
+        ("chat", 1),
+        ("peer", 0),
+        ("kb-save", None),
+    ]
+
+
+def test_backfill_continues_after_a_bad_file(home, projects, capsys):
+    (projects / "proj-a" / "a-bad.jsonl").mkdir()  # reading it as a file raises
+    _transcript(projects / "proj-a" / "s-1.jsonl", _stamp(TWO_STEPS))
+    out = _backfill(capsys, projects)
+    assert "files 1" in out and "inserted 2" in out
+    log = (home / "logs" / "w0.log").read_text()
+    assert str(projects) not in log and len(log.splitlines()) >= 1
+
+
+def test_backfill_skips_sessions_in_a_listed_home(home, projects, capsys, tmp_path):
+    base = tmp_path / "baseline"
+    base.mkdir()
+    cfg = home / "config.toml"
+    cfg.write_text(cfg.read_text().replace("[w0]\n", f'[w0]\nskip_homes = ["{base}"]\n'))
+    _transcript(projects / "proj-a" / "s-1.jsonl", _stamp(TWO_STEPS, cwd=str(base / "sub")))
+    _transcript(projects / "proj-a" / "s-2.jsonl", _stamp(TWO_STEPS, session="s-2", cwd=str(home / "data")))
+    _transcript(projects / "proj-a" / "s-3.jsonl", _stamp(TWO_STEPS, session="s-3", cwd="/work"))
+    _backfill(capsys, projects)
+    assert {r["session_id"] for r in _rows(home)} == {"s-3"}
+
+
+def test_backfill_since_drops_earlier_steps(home, projects, capsys):
+    _transcript(projects / "proj-a" / "s-1.jsonl", _stamp(TWO_STEPS))
+    _backfill(capsys, projects, "--since", "2099-01-01")
+    assert _rows(home) == []

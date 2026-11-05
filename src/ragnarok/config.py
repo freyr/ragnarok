@@ -147,6 +147,9 @@ class W0Config:
 
     summary_chars: int = 2000
     private_paths: list[str] = field(default_factory=list)
+    # homes whose sessions `w0 backfill` skips (the agent evaluation writes transcripts there); the current
+    # home is always skipped. A relative path is relative to the home.
+    skip_homes: list[str] = field(default_factory=list)
     # a false reject costs this many false admits; the threshold is 1 / (1 + cost_ratio)
     cost_ratio: float = 10
     # the uncertain band of the score; the judge sees a step inside it
