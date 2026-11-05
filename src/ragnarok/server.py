@@ -9,7 +9,7 @@ import threading
 import time
 from pathlib import Path
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from .config import Config, config_path, load_config
@@ -17,6 +17,7 @@ from .embed import EmbedError, OllamaEmbedder
 from .index import IndexMismatch, connect
 from .search import PrivateNotAllowed
 from .tools import Tools
+from .trace import purge
 
 log = logging.getLogger("ragnarok.server")
 
@@ -36,6 +37,21 @@ def _stamp(path: Path) -> tuple[int, int] | None:
     except FileNotFoundError:
         return None
     return st.st_mtime_ns, st.st_size
+
+
+def _ids(ctx: Context | None) -> tuple[str | None, str | None]:
+    """The mcp.session.id (the header of an HTTP request) and the gen_ai.conversation.id (a value of the request
+    metadata) that the MCP context gives; None for a value it does not give."""
+    try:
+        request_context = ctx.request_context if ctx is not None else None
+    except ValueError:  # a call outside a request, as in a test
+        request_context = None
+    request = getattr(request_context, "request", None)
+    headers = getattr(request, "headers", None)
+    session = headers.get("mcp-session-id") if headers is not None else None
+    meta = getattr(request_context, "meta", None)
+    conversation = (getattr(meta, "model_extra", None) or {}).get("gen_ai.conversation.id")
+    return session, conversation
 
 
 def _digest(path: Path) -> str | None:
@@ -110,6 +126,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
             stamp = _stamp(watch)
             if "stopped" in state or stamp != state["stamp"]:
                 reload(stamp)
+        state["tools"].ids = state.get("ids", (None, None))
         return state["tools"]
 
     def timed(fn):
@@ -119,6 +136,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
             ok = "ok"
             try:
                 with lock:
+                    state["ids"] = _ids(kwargs.pop("ctx", None))
                     return fn(*args, **kwargs)
             except EXPECTED as e:
                 # the client sees the text of a ToolError only; other exceptions show as a bare failure
@@ -144,6 +162,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
     server = MCPServer(
         name="ragnarok", instructions=INSTRUCTIONS.format(vaults=", ".join((cfg or load_config(watch)).vaults))
     )
+    purge(tools.cfg if tools is not None else cfg or load_config(watch))
 
     @server.tool()
     @timed
@@ -156,6 +175,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
         include_archived: bool = True,
         include_private: bool = False,
         limit: int = 8,
+        ctx: Context | None = None,
     ) -> dict:
         """Hybrid search (meaning and keywords) over the vault notes. Returns notes, each with its best section.
 
@@ -175,7 +195,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
 
     @server.tool()
     @timed
-    def find_projects(query: str, vault: str | None = None, limit: int = 5) -> dict:
+    def find_projects(query: str, vault: str | None = None, limit: int = 5, ctx: Context | None = None) -> dict:
         """Find the earlier projects that a prompt continues or resembles, ranked by their matching notes.
 
         Each project has its slug, vault, folder, description, stage, state, next action and matching notes.
@@ -184,13 +204,13 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
 
     @server.tool()
     @timed
-    def list_project(project: str, vault: str | None = None) -> dict:
+    def list_project(project: str, vault: str | None = None, ctx: Context | None = None) -> dict:
         """All notes of a project in any folder, with type, status and description, with stage, state, next action."""
         return get().list_project(project, vault=vault)
 
     @server.tool()
     @timed
-    def open_projects(states: list[str] | None = None, vault: str | None = None) -> dict:
+    def open_projects(states: list[str] | None = None, vault: str | None = None, ctx: Context | None = None) -> dict:
         """The projects that are open, grouped by the state in their SUMMARY.md, newest update first.
 
         states defaults to in-progress and paused; the other values are done, superseded and abandoned. Each project has
@@ -200,7 +220,9 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
 
     @server.tool()
     @timed
-    def open_note(path: str, heading: str | None = None, outline: bool | None = None) -> dict:
+    def open_note(
+        path: str, heading: str | None = None, outline: bool | None = None, ctx: Context | None = None
+    ) -> dict:
         """The text of a note (or of one section, by heading), its frontmatter, links and backlinks.
 
         outline=true gives the sections (heading path, words, first sentence) instead of the text. A note of more
@@ -212,7 +234,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
 
     @server.tool()
     @timed
-    def find_by_jira(key: str) -> dict:
+    def find_by_jira(key: str, ctx: Context | None = None) -> dict:
         """The notes that contain a Jira key, for example ABC-123."""
         return get().find_by_jira(key)
 

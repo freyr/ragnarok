@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
+import functools
+import inspect
 import posixpath
 import re
 import sqlite3
@@ -14,6 +17,7 @@ from .metadata import read_note
 from .redact import redact
 from .search import PrivateNotAllowed, search
 from .splitter import sections
+from .trace import Trace
 
 PROJECT_POOL = 50  # notes that find_projects groups into projects
 DESCRIPTION_WORDS = 60
@@ -71,6 +75,36 @@ def _state(fm: dict, archived: bool) -> str:
     return "done" if archived or str(fm.get("stage", "")).strip().upper() == "DONE" else "in-progress"
 
 
+def traced(fn):
+    """Write a trace line for each call of a tool and put its trace_id in the result."""
+    signature = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        bound = signature.bind(self, *args, **kwargs)
+        bound.apply_defaults()
+        arguments = {}
+        for name, value in list(bound.arguments.items())[1:]:
+            if signature.parameters[name].kind is inspect.Parameter.VAR_KEYWORD:
+                arguments.update(value)
+            else:
+                arguments[name] = value
+        trace = Trace(self.cfg, self.conn, fn.__name__, arguments, arguments.get("query"), self.ids)
+        self.trace = trace
+        try:
+            result = fn(self, *args, **kwargs)
+        except Exception as e:
+            trace.finish(error=type(e).__name__)
+            raise
+        finally:
+            self.trace = None
+        result["trace_id"] = trace.id
+        trace.finish()
+        return result
+
+    return wrapper
+
+
 @dataclass
 class Tools:
     cfg: Config
@@ -78,9 +112,12 @@ class Tools:
     embedder: object
     scan_limit: int | None = SCAN_LIMIT
     last_scan: dict = field(default_factory=dict)
+    ids: tuple = (None, None)  # mcp.session.id and gen_ai.conversation.id of the call, when the MCP context gives them
+    trace: Trace | None = None  # the trace of the call in progress
 
     def scan(self) -> list[str]:
-        result = update(self.cfg, self.conn, self.embedder, limit=self.scan_limit)
+        with self.trace.stage("scan") if self.trace else contextlib.nullcontext():
+            result = update(self.cfg, self.conn, self.embedder, limit=self.scan_limit)
         self.last_scan = {
             "ms": round(result.seconds * 1000),
             "changed": result.added + result.changed + result.moved + result.removed,
@@ -102,14 +139,16 @@ class Tools:
 
     # --- tools -------------------------------------------------------------------------------------------------
 
+    @traced
     def search(self, query: str, **filters) -> dict:
         warnings = self.scan()
-        hits = search(self.cfg, self.conn, self.embedder, query, warnings=warnings, **filters)
+        hits = search(self.cfg, self.conn, self.embedder, query, warnings=warnings, trace=self.trace, **filters)
         return {"results": [h.as_dict() for h in hits], "warnings": warnings}
 
+    @traced
     def find_projects(self, query: str, vault: str | None = None, limit: int = 5) -> dict:
         warnings = self.scan()
-        hits = search(self.cfg, self.conn, self.embedder, query, vault=vault, limit=PROJECT_POOL)
+        hits = search(self.cfg, self.conn, self.embedder, query, vault=vault, limit=PROJECT_POOL, trace=self.trace)
         groups: dict[tuple[str, str], dict] = {}
         for h in hits:
             if h.project == "none":
@@ -124,6 +163,7 @@ class Tools:
             projects.append({**info, "score": round(g["score"], 5), "matching_notes": g["notes"]})
         return {"results": projects, "warnings": warnings}
 
+    @traced
     def list_project(self, project: str, vault: str | None = None) -> dict:
         warnings = self.scan()
         where, params = "n.project = ?", [project]
@@ -143,6 +183,7 @@ class Tools:
         results = [{**self._project_info(v, project), "notes": notes} for v, notes in by_vault.items()]
         return {"results": results, "warnings": warnings}
 
+    @traced
     def open_projects(self, states: list[str] | None = None, vault: str | None = None) -> dict:
         warnings = self.scan()
         wanted = {st.strip().lower() for st in (states or OPEN_STATES)}
@@ -169,6 +210,7 @@ class Tools:
             group.sort(key=lambda p: str(p["updated"] or ""), reverse=True)
         return {"results": by_state, "count": len(projects), "warnings": warnings}
 
+    @traced
     def open_note(self, path: str, heading: str | None = None, outline: bool | None = None) -> dict:
         warnings = self.scan()
         row = self._note_row(path)
@@ -220,6 +262,7 @@ class Tools:
             "warnings": warnings,
         }
 
+    @traced
     def find_by_jira(self, key: str) -> dict:
         warnings = self.scan()
         rows = self.conn.execute(

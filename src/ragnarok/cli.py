@@ -227,13 +227,27 @@ def cmd_search(cfg, args) -> int:
     from .embed import EmbedError, OllamaEmbedder
     from .index import IndexMismatch, connect
     from .search import PrivateNotAllowed, search
+    from .trace import Trace
 
     if not cfg.index_path.exists():
         print(f"No index at {cfg.index_path}. Run `ragnarok index`.", file=sys.stderr)
         return 1
+    trace = None
     try:
         conn = connect(cfg)
         start = time.monotonic()
+        arguments = {
+            "query": args.query,
+            "vault": args.vault,
+            "project": args.project,
+            "area": args.area,
+            "type": args.type,
+            "include_archived": not args.no_archived,
+            "include_private": args.include_private,
+            "limit": args.limit,
+            "mode": args.mode,
+        }
+        trace = Trace(cfg, conn, "search", arguments, args.query)
         hits = search(
             cfg,
             conn,
@@ -247,10 +261,14 @@ def cmd_search(cfg, args) -> int:
             include_private=args.include_private,
             limit=args.limit,
             mode=args.mode,
+            trace=trace,
         )
     except (IndexMismatch, EmbedError, PrivateNotAllowed) as e:
         print(f"ragnarok search: {e}", file=sys.stderr)
+        if trace:
+            trace.finish(error=type(e).__name__)
         return 1
+    trace.finish()
     ms = (time.monotonic() - start) * 1000
     for i, h in enumerate(hits, start=1):
         if args.json:
