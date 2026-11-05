@@ -1,7 +1,8 @@
 """Configuration: vault locations, exclusions, sensitive paths, path rules, model and splitter settings.
 
-The home folder holds config.toml, data/ (index, backups, proposals) and logs/. It is the repo checkout,
-or the folder in RAGNAROK_HOME. A relative path in config.toml is relative to the folder of the file.
+The home folder holds config.toml, data/ (index, backups, proposals) and logs/. It is the folder in
+RAGNAROK_HOME, else the repo checkout, else ~/.ragnarok (an installed package, for example `uvx ragnarok`).
+A relative path in config.toml is relative to the folder of the file.
 """
 
 from __future__ import annotations
@@ -16,14 +17,25 @@ from pathlib import Path
 PATH_KEYS = ("root", "data_dir", "index_path")
 
 
+def default_home() -> Path:
+    """The home folder of an installed package with no RAGNAROK_HOME."""
+    return Path("~/.ragnarok").expanduser()
+
+
+def is_checkout(folder: Path) -> bool:
+    """True when the folder is a repo checkout of ragnarok."""
+    pyproject = folder / "pyproject.toml"
+    return pyproject.is_file() and 'name = "ragnarok"' in pyproject.read_text()
+
+
 def home_dir() -> Path:
-    """RAGNAROK_HOME, else the repo checkout that holds this source file."""
+    """RAGNAROK_HOME, else the repo checkout that holds this source file, else ~/.ragnarok."""
     if env := os.environ.get("RAGNAROK_HOME"):
         return Path(env).expanduser().resolve()
     checkout = Path(__file__).resolve().parents[2]
-    if (checkout / "pyproject.toml").exists():
+    if is_checkout(checkout):
         return checkout
-    raise RuntimeError("ragnarok is not run from its repo checkout. Set RAGNAROK_HOME to the home folder.")
+    return default_home()
 
 
 @dataclass

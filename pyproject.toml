@@ -1,6 +1,6 @@
 [project]
 name = "ragnarok"
-version = "1.0.0"
+version = "1.1.0"
 description = "Local RAG search over Obsidian vaults: SQLite (sqlite-vec + FTS5), Ollama embeddings, FastMCP server"
 requires-python = ">=3.12"
 license = "MIT"
@@ -11,6 +11,18 @@ dependencies = [
     "mcp>=1.10",
     "numpy>=2.0",
 ]
+
+keywords = ["mcp", "obsidian", "rag", "claude-code", "sqlite-vec", "ollama"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: MacOS",
+    "Topic :: Text Processing :: Indexing",
+]
+
+[project.urls]
+Homepage = "https://github.com/freyr/ragnarok"
+Changelog = "https://github.com/freyr/ragnarok/blob/main/CHANGELOG.md"
+Issues = "https://github.com/freyr/ragnarok/issues"
 
 [project.scripts]
 ragnarok = "ragnarok.cli:main"

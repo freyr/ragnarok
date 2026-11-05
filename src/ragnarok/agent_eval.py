@@ -22,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .bootstrap import serve_args
 from .config import Config, dump_config, home_dir, load_config
 from .evaluate import bootstrap, excluded, score_draft, score_hard
 from .metadata import is_private, iter_notes
@@ -87,11 +88,8 @@ def prepare(cfg: Config) -> Config:
 def mcp_config(cfg: Config) -> Path:
     home = eval_home(cfg)
     path = home / "mcp.json"
-    server = {
-        "command": "uv",
-        "args": ["--directory", str(home_dir()), "run", "ragnarok", "serve"],
-        "env": {"RAGNAROK_HOME": str(home)},
-    }
+    args = serve_args(home_dir())
+    server = {"command": args[0], "args": args[1:], "env": {"RAGNAROK_HOME": str(home)}}
     path.write_text(json.dumps({"mcpServers": {"ragnarok": server}}, indent=1))
     return path
 

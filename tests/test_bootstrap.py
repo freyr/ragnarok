@@ -1,9 +1,10 @@
+import pathlib
 import subprocess
 
 import pytest
 
 from ragnarok import bootstrap
-from ragnarok.config import load_config
+from ragnarok.config import default_home, home_dir, load_config
 
 EXAMPLE = 'root = "~/Documents/Vaults"\nvaults = ["A"]\ndata_dir = "data"\nmodel = "m"\ndimension = 8\n'
 
@@ -12,7 +13,10 @@ EXAMPLE = 'root = "~/Documents/Vaults"\nvaults = ["A"]\ndata_dir = "data"\nmodel
 def home(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
+    (home / "pyproject.toml").write_text('[project]\nname = "ragnarok"\n')
     (home / "config.example.toml").write_text(EXAMPLE)
+    monkeypatch.setattr(bootstrap, "example_config", lambda: home / "config.example.toml")
+    monkeypatch.setattr(bootstrap, "plugin_server", lambda: False)
     root = tmp_path / "vaults"
     for name in ("Studio", "Home", ".obsidian"):
         (root / name).mkdir(parents=True)
@@ -168,3 +172,76 @@ def test_init_kickstarts_a_service_that_launchd_did_not_start(home, tmp_path, mo
 
     assert bootstrap.init(home, home / "config.toml", lambda q: True, lambda q, d: str(tmp_path / "vaults"), run) == 0
     assert calls == ["brew", "launchctl"]
+
+
+@pytest.fixture
+def package_home(tmp_path, monkeypatch):
+    """A home folder of an installed package: no checkout."""
+    home = tmp_path / "rhome"
+    monkeypatch.setenv("RAGNAROK_HOME", str(home))
+    monkeypatch.setattr(bootstrap, "plugin_server", lambda: False)
+    return home
+
+
+def test_home_is_the_checkout_or_the_default_folder(monkeypatch):
+    monkeypatch.delenv("RAGNAROK_HOME", raising=False)
+    assert home_dir() in (pathlib.Path(__file__).resolve().parents[1], default_home())
+
+
+def test_the_package_holds_the_config_template():
+    example = bootstrap.example_config()
+    assert example.parent.name == "ragnarok" and "vaults = " in example.read_text()
+
+
+def test_a_package_home_registers_uvx_with_its_home(package_home):
+    assert bootstrap.serve_args(package_home) == ["uvx", "ragnarok", "serve"]
+    assert bootstrap.register_args(package_home) == [
+        "claude", "mcp", "add", "--scope", "user", "-e", f"RAGNAROK_HOME={package_home}",
+        "ragnarok", "--", "uvx", "ragnarok", "serve",
+    ]  # fmt: skip
+    assert bootstrap.register_args(default_home())[5:] == ["ragnarok", "--", "uvx", "ragnarok", "serve"]
+    assert bootstrap.registered("uvx ragnarok serve", package_home)
+    assert not bootstrap.registered(f"uv --directory {package_home} run ragnarok serve", package_home)
+
+
+def test_init_writes_the_config_into_a_new_package_home(package_home, tmp_path, monkeypatch):
+    fake_setup(monkeypatch, None, None, binaries=())
+    monkeypatch.setattr(bootstrap, "example_config", lambda: _example(tmp_path))
+    vaults = tmp_path / "vaults"
+    (vaults / "Home").mkdir(parents=True)
+    assert bootstrap.init(package_home, package_home / "config.toml", lambda q: True, lambda q, d: str(vaults)) == 1
+    assert load_config(package_home / "config.toml").vaults == ["Home"]
+
+
+def _example(tmp_path):
+    example = tmp_path / "example.toml"
+    example.write_text(EXAMPLE)
+    return example
+
+
+def test_doctor_accepts_the_plugin_server(home, monkeypatch):
+    fake_setup(monkeypatch, None, None)
+    monkeypatch.setattr(bootstrap, "plugin_server", lambda: True)
+    mcp = bootstrap.doctor(load_config(home / "config.toml"), home / "config.toml", home)[-1]
+    assert mcp.ok and "plugin ragnarok" in mcp.detail
+
+
+def test_doctor_fails_for_the_plugin_and_a_registration(home, monkeypatch):
+    fake_setup(monkeypatch, None, f"uv --directory {home} run ragnarok serve")
+    monkeypatch.setattr(bootstrap, "plugin_server", lambda: True)
+    mcp = bootstrap.doctor(load_config(home / "config.toml"), home / "config.toml", home)[-1]
+    assert (mcp.ok, mcp.fix) == (False, "claude mcp remove --scope user ragnarok")
+
+
+def test_init_removes_a_registration_next_to_the_plugin(home, tmp_path, monkeypatch):
+    fake_setup(monkeypatch, ["m"], f"uv --directory {home} run ragnarok serve")
+    monkeypatch.setattr(bootstrap, "plugin_server", lambda: True)
+    monkeypatch.setattr("ragnarok.embed.OllamaEmbedder", FakeEmbedder)
+    calls = []
+
+    def run(cmd, check):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    bootstrap.init(home, home / "config.toml", lambda q: True, lambda q, d: str(tmp_path / "vaults"), run)
+    assert calls == [["claude", "mcp", "remove", "--scope", "user", "ragnarok"]]
