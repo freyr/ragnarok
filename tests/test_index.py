@@ -385,6 +385,8 @@ def test_frontmatter_id_moves_from_one_note_to_another_in_one_update(cfg):
     assert result.warnings == []
     assert count(conn, "SELECT count(*) FROM unit WHERE doc_id = 'x-1'") > 0
     assert count(conn, "SELECT count(*) FROM jira WHERE doc_id NOT IN (SELECT id FROM doc)") == 0
+    assert count(conn, "SELECT count(*) FROM unit_emb WHERE doc_id NOT IN (SELECT id FROM doc)") == 0
+    assert count(conn, "SELECT count(*) FROM unit_emb WHERE doc_id = 'x-1'") > 0
     assert count(conn, "SELECT count(*) FROM node") == count(conn, "SELECT count(*) FROM doc")
 
 

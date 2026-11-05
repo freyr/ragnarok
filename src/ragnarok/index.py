@@ -384,6 +384,7 @@ def _claim_free_ids(conn: sqlite3.Connection) -> int:
         conn.execute("UPDATE node SET id = ?, provisional = 0 WHERE id = ?", (new, old))
         conn.execute("UPDATE doc SET id = ? WHERE id = ?", (new, old))
         conn.execute("UPDATE unit SET doc_id = ? WHERE doc_id = ?", (new, old))
+        conn.execute("UPDATE unit_emb SET doc_id = ? WHERE doc_id = ?", (new, old))
         conn.execute("UPDATE link SET from_doc = ? WHERE from_doc = ?", (new, old))
         conn.execute("UPDATE link SET to_node = ? WHERE to_node = ?", (new, old))
         conn.execute("UPDATE jira SET doc_id = ? WHERE doc_id = ?", (new, old))

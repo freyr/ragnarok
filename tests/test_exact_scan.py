@@ -86,6 +86,9 @@ def test_filtered_dense_finds_a_note_outside_the_global_top_k(vault):
     vectors[-1] = -query  # the farthest unit from the query: rank 1200 of 1200
     specs = [NORMAL] * (count - 1) + [("V", "Target", "A", "T", "active", "normal")]
     cfg, conn = seed_index(vault, specs, vectors)
+    # the precondition: the target is outside the global top 1,000 that the old k for a filter kept
+    order = sorted(range(count), key=lambda i: -float(vectors[i] @ query))
+    assert order.index(count - 1) >= 1000
     hits = search(cfg, conn, FixedEmbedder(query), "q", project="Target", mode="dense")
     assert [h.path for h in hits] == [f"d{count}.md"]
 
