@@ -125,6 +125,10 @@ def report_rows(sets: dict[str, list[dict]], results: dict, agents: list[str], m
     its 95% interval. Canonical-first and stale citation are condition 1 (both intervals above 0); set F1 is
     condition 2."""
     test, ref = agents[0], agents[-1]
+    if test == ref:
+        return [
+            f"KB rows need two agents (test and baseline) in one run; got {', '.join(agents)}: no paired difference"
+        ]
     by_class: dict[str, list[dict]] = {}
     for name, questions in sets.items():
         for q in questions:
@@ -225,6 +229,8 @@ def kb_mechanical(ecfg: Config, conn, embedder, sets_dir: Path, base_call) -> li
             runs: dict[str, list[dict]] = {"base": [], "kb": [], "kb-eligibility": []}
             for form in _forms(q):
                 result = next(base)
+                if "error" in result:
+                    lines.append(f"ERROR {q['id']} baseline search: {result['error']}")
                 runs["base"].append(score_ranked(q, [h["path"] for h in result.get("results", [])]))
                 runs["kb"].append(score_ranked(q, _paths(search(ecfg, conn, embedder, form, limit=KB_LIMIT))))
                 try:
@@ -282,6 +288,10 @@ def filtered(ecfg: Config, conn, embedder, questions: list[dict], base_call, new
             "base": [h["path"] for h in result.get("results", [])],
             "new": _paths(new_search(ecfg, conn, embedder, q["question"], **f, limit=k, authority=False)),
         }
+        if "error" in result:  # a failed baseline search is no measurement: the question cannot pass
+            lines.append(f"ERROR {q['id']} baseline search: {result['error']}")
+            regressed.append(q["id"])
+            continue
         s = score_draft(q, ranked, known, ["base", "new"])
         lower = s["new_recall"] < s["base_recall"]
         if lower:

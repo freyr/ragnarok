@@ -225,6 +225,18 @@ def test_question_value_is_the_mean_of_its_runs(vault):
     assert "-0.50 [-0.50, -0.50]" in row
 
 
+def test_report_with_one_agent_warns_and_gives_no_paired_difference(vault):
+    q = {**SINGLE, "gold": [{"path": "Home/Heating/notes/boiler.md", "grade": 2}], "distractors": []}
+    good = run(["Home/Heating/notes/boiler.md"])
+    sets = {"single-truth": [q]}
+    results = {"single-truth": {"st-01": {"mcp-kb": [good, good]}}}
+    lines = agent_eval.report(vault, sets, results, [], ["mcp-kb"], match=ids)
+    text = "\n".join(lines)
+    assert "KB rows need two agents" in text
+    assert "+0.00 [+0.00, +0.00]" not in text
+    assert not any(x.startswith("| Canonical-first") for x in lines)
+
+
 def test_failed_run_gets_the_worst_value_of_each_measure(vault):
     worst = {"canonical_first": 0.0, "stale": 1.0, "f1": 0.0, "route": 0.0, "no_answer": 0.0, "run": True}
     crashed = run([GOLD], route="kb", error=True)
@@ -265,7 +277,7 @@ def indexed(vault):
     return vault, conn
 
 
-def filtered_run(indexed, questions, base_type=None, new_hits=None):
+def filtered_run(indexed, questions, base_type=None, new_hits=None, base_error=()):
     cfg, conn = indexed
     calls, searched = [], []
 
@@ -277,6 +289,8 @@ def filtered_run(indexed, questions, base_type=None, new_hits=None):
                 row = conn.execute("SELECT vault, project, area, type FROM doc WHERE path = ?", (args["path"],))
                 meta = dict(zip(("vault", "project", "area", "type"), row.fetchone(), strict=True))
                 out.append({**meta, "type": base_type or meta["type"]})
+            elif args["query"] in base_error:  # the baseline search tool fails
+                out.append({"error": "index locked"})
             else:  # the baseline finds every expected note
                 q = next(q for q in questions if q["question"] == args["query"])
                 out.append({"results": [{"path": p} for p in q["expected"]]})
@@ -327,6 +341,43 @@ def test_filtered_runner_skips_a_type_that_the_systems_map_differently(indexed):
     _, regressed, calls, searched = filtered_run(indexed, questions, base_type="other-type", new_hits=hits)
     assert "type" not in next(a for t, a in calls if t == "search") and "type" not in searched[0]
     assert regressed == []
+
+
+def test_filtered_runner_counts_a_baseline_tool_error_as_regressed(indexed):
+    questions = [
+        {"id": "d1", "type": "fact", "question": "boiler?", "expected": ["Home/Heating/notes/boiler.md"]},
+        {"id": "d2", "type": "fact", "question": "cpu?", "expected": ["Work/Devops/db-resize/research-cpu.md"]},
+    ]
+    hits = {"boiler?": ["Home/Heating/notes/boiler.md"], "cpu?": ["Work/Devops/db-resize/research-cpu.md"]}
+    lines, regressed, _, _ = filtered_run(indexed, questions, new_hits=hits, base_error={"cpu?"})
+    # a failed baseline search is not an empty result: the question is regressed, so condition 4 cannot pass
+    assert "ERROR d2 baseline search: index locked" in lines
+    assert regressed == ["d2"]
+    assert "regressed: d2" in lines
+
+
+def test_mechanical_runner_reports_a_baseline_tool_error(vault, tmp_path):
+    vault.dimension = 8
+    conn = connect(vault)
+    update(vault, conn, FakeEmbedder())
+    note = "Home/Heating/notes/boiler.md"
+    q = {**SINGLE, "gold": [{"path": note, "grade": 2}], "distractors": []}
+    sets = tmp_path / "sets"
+    sets.mkdir()
+    (sets / "single-truth.json").write_text(json.dumps([q]))
+
+    def base(batch):
+        return [
+            {"type": "note"}
+            if tool == "open_note"
+            else {"error": "index locked"}
+            if args["query"] == q["question_alt"]
+            else {"results": [{"path": note}]}
+            for tool, args in batch
+        ]
+
+    lines = kb_eval.kb_mechanical(vault, conn, FakeEmbedder(), sets, base)
+    assert "ERROR st-01 baseline search: index locked" in lines
 
 
 # --- attribution --------------------------------------------------------------------------------------------------
