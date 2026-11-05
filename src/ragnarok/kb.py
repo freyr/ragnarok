@@ -939,8 +939,10 @@ def related(
     """The edges that leave (out) or enter (in) an entity through its relations, to `depth` hops, with no cycle.
 
     The kind filter keeps the edges whose reached end has the kind; a hop still passes through another kind. An edge
-    that is not valid at `as_of`, and each edge behind it, is removed. Return the result and the trace record: the
-    edges before the filters, the edges kept and each removed entity with the filter that removed it.
+    that is not valid at `as_of`, and each edge behind it, is removed. The depth of an edge is its shortest valid
+    path. A relation that is neither a relation type nor in a relation row is an error. Return the result and the
+    trace record: the edges before the filters, the edges kept and each removed entity with the filter that
+    removed it.
     """
     if direction not in DIRECTIONS:
         raise ValueError(f"direction must be 'out' or 'in', not {direction!r}.")
@@ -949,6 +951,15 @@ def related(
     day = _iso_date(as_of) if as_of else date.today().isoformat()
     if day is None:
         raise ValueError(f"as_of must be an ISO date (YYYY-MM-DD), not {as_of!r}.")
+    if (
+        relation
+        and not conn.execute(
+            "SELECT 1 FROM relation_type WHERE name = ? UNION ALL SELECT 1 FROM relation WHERE rel = ? LIMIT 1",
+            (relation, relation),
+        ).fetchone()
+    ):
+        names = ", ".join(n for (n,) in conn.execute("SELECT name FROM relation_type ORDER BY name"))
+        raise ValueError(f"Unknown relation {relation!r}. The relation types are: {names}.")
     kind = kind.strip().lower() if kind else None
     near, reach = DIRECTIONS[direction]
     hop = (
@@ -975,14 +986,15 @@ def related(
             FROM walk w CROSS JOIN relation r INDEXED BY relation_{near} ON r.{near} = w.reached
             WHERE w.depth < :depth AND instr(w.path, '|' || r.{reach} || '|') = 0 AND{hop}
         )
-        SELECT w.id, min(w.depth), max(w.ok), r.src, r.rel, r.dst, r.origin, r.confidence, r.valid_from,
+        SELECT w.id, COALESCE(min(CASE WHEN w.ok THEN w.depth END), min(w.depth)) AS hops, max(w.ok),
+               r.src, r.rel, r.dst, r.origin, r.confidence, r.valid_from,
                r.valid_until, r.source_doc,
                COALESCE(se.kind, 'doc'), COALESCE(se.name, sd.title), COALESCE(de.kind, 'doc'),
                COALESCE(de.name, dd.title)
         FROM walk w CROSS JOIN relation r ON r.id = w.id
         LEFT JOIN entity se ON se.id = r.src LEFT JOIN doc sd ON sd.id = r.src
         LEFT JOIN entity de ON de.id = r.dst LEFT JOIN doc dd ON dd.id = r.dst
-        GROUP BY w.id ORDER BY min(w.depth), r.src, r.rel, r.dst, w.id""",
+        GROUP BY w.id ORDER BY hops, r.src, r.rel, r.dst, w.id""",
         params,
     ).fetchall()
     end_key = "target" if direction == "out" else "source"

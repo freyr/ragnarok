@@ -122,3 +122,23 @@ def test_related_trace_records_the_edges_before_the_filters_and_the_removing_fil
     kind_only = tools.related("Core System", relation="dependsOn", kind="feature", as_of="2026-01-01")
     (entry,) = find_line(tools.cfg, kind_only["trace_id"])["ragnarok.entities"]
     assert entry["removed"] == [{"id": "sys-gateway", "filter": "kind"}]
+
+
+def test_related_depth_is_the_shortest_valid_path(tools):
+    conn = tools.conn
+    add = (
+        "INSERT INTO relation (src, rel, dst, dst_text, source_doc, origin)"
+        " VALUES (?, 'dependsOn', ?, ?, ?, 'declared')"
+    )
+    # Gateway -> Bet Home is reached through Core -> Gateway (2 hops) and Core -> Tiers -> Gateway (3 hops)
+    conn.execute(add, ("feat-tiers", "sys-gateway", "Payment Gateway", "feat-tiers~doc"))
+    conn.execute(add, ("sys-gateway", "plat-bet", "Bet Home", "sys-gateway~doc"))
+    conn.execute("UPDATE relation SET valid_until = '2020-01-01' WHERE src = 'sys-core' AND dst = 'sys-gateway'")
+    result = tools.related("sys-core", relation="dependsOn", depth=3)
+    edge = next(e for e in result["edges"] if e["source"]["id"] == "sys-gateway" and e["target"]["id"] == "plat-bet")
+    assert edge["depth"] == 3
+
+
+def test_related_with_an_unknown_relation_is_an_error(tools):
+    with pytest.raises(ValueError, match="dependson.*dependsOn"):
+        tools.related("sys-core", relation="dependson")
