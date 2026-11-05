@@ -341,6 +341,7 @@ def run_all(
         name, q, agent, n, path, mcp_json = job
         if not path.exists():
             cmd = command(agent, q["question"], calls, model, mcp_json, cfg.vaults, "class" in q)
+            path.with_suffix(".stderr").unlink(missing_ok=True)
             raw, stderr, code = runner(cmd, mirror, {})
             path.parent.mkdir(parents=True, exist_ok=True)
             if stderr or code:
