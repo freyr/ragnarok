@@ -3,7 +3,6 @@ import hashlib
 import os
 
 import pytest
-import sqlite_vec
 
 from ragnarok import index
 from ragnarok.config import Config, VaultRules
@@ -76,7 +75,7 @@ def test_deleted_note_is_removed_everywhere(cfg):
     result = update(cfg, conn, emb)
     assert result.removed == 1
     assert count(conn, "SELECT count(*) FROM doc WHERE path LIKE '%Field Stop%'") == 0
-    assert count(conn, "SELECT count(*) FROM unit_vec") == count(conn, "SELECT count(*) FROM unit")
+    assert count(conn, "SELECT count(*) FROM unit_emb") == count(conn, "SELECT count(*) FROM unit")
     assert count(conn, "SELECT count(*) FROM unit_fts") == count(conn, "SELECT count(*) FROM unit")
 
 
@@ -92,8 +91,8 @@ def test_moved_note_needs_no_embedding(cfg):
 def test_sensitivity_column_for_filters(cfg):
     conn, _, _ = build(cfg)
     private = conn.execute(
-        "SELECT DISTINCT n.path FROM unit_vec v JOIN unit c ON c.id = v.unit_id JOIN doc n ON n.id = c.doc_id"
-        " WHERE v.sensitivity = 'private'"
+        "SELECT DISTINCT n.path FROM unit_emb v JOIN unit c ON c.id = v.unit_id JOIN doc n ON n.id = c.doc_id"
+        " WHERE n.sensitivity = 'private'"
     ).fetchall()
     assert {p for (p,) in private} == {
         "Work/Personal/People/Someone.md",
@@ -103,14 +102,15 @@ def test_sensitivity_column_for_filters(cfg):
     }
 
 
-def test_vector_query_with_filter(cfg):
-    conn, emb, _ = build(cfg)
-    q = sqlite_vec.serialize_float32(emb.vector("anything"))
-    rows = conn.execute(
-        "SELECT unit_id, distance FROM unit_vec WHERE embedding MATCH ? AND k = 5 AND sensitivity = 'normal'",
-        (q,),
-    ).fetchall()
-    assert len(rows) == 5
+def test_stored_vectors_have_length_one(cfg):
+    import numpy as np
+
+    conn, _, _ = build(cfg)
+    rows = conn.execute("SELECT embedding FROM unit_emb").fetchall()
+    assert rows
+    for (blob,) in rows:
+        assert len(blob) == cfg.dimension * 4
+        assert np.linalg.norm(np.frombuffer(blob, dtype=np.float32)) == pytest.approx(1.0, abs=1e-5)
 
 
 def test_links_and_jira(cfg):
@@ -155,7 +155,7 @@ def test_new_private_pattern_makes_an_indexed_note_private_without_embedding(cfg
     assert emb.calls == calls
     assert note_row(conn, FIELD_STOP)[2] == "private"
     vec = conn.execute(
-        "SELECT DISTINCT v.sensitivity FROM unit_vec v JOIN unit c ON c.id = v.unit_id"
+        "SELECT DISTINCT n.sensitivity FROM unit_emb v JOIN unit c ON c.id = v.unit_id"
         " JOIN doc n ON n.id = c.doc_id WHERE n.path = ?",
         (FIELD_STOP,),
     ).fetchall()
@@ -183,7 +183,7 @@ def test_changed_area_embeds_only_the_description_chunk(cfg):
     assert result.embedded == 1
     assert note_row(conn, "Work/Devops/db-resize/SUMMARY.md") == ("db-resize", "ops", "normal")
     assert count(conn, "SELECT count(*) FROM unit") == chunks
-    assert count(conn, "SELECT count(*) FROM unit_vec") == chunks
+    assert count(conn, "SELECT count(*) FROM unit_emb") == chunks
 
 
 def test_new_skipped_folder_removes_its_notes(cfg):
@@ -192,7 +192,7 @@ def test_new_skipped_folder_removes_its_notes(cfg):
     result = update(cfg, conn, emb)
     assert result.removed == 1
     assert count(conn, "SELECT count(*) FROM doc WHERE path LIKE 'Home/Astro/Theory/%'") == 0
-    assert count(conn, "SELECT count(*) FROM unit_vec") == count(conn, "SELECT count(*) FROM unit")
+    assert count(conn, "SELECT count(*) FROM unit_emb") == count(conn, "SELECT count(*) FROM unit")
 
 
 def test_rules_are_derived_again_only_when_they_change(cfg, monkeypatch):
@@ -301,7 +301,7 @@ def test_a_note_that_another_writer_added_during_the_update_is_replaced(cfg, mon
     result = update(cfg, conn, emb)
     assert result.added == result.notes
     assert count(conn, "SELECT COUNT(*) FROM doc") == result.notes
-    assert count(conn, "SELECT COUNT(*) FROM unit") == count(conn, "SELECT COUNT(*) FROM unit_vec") == result.chunks
+    assert count(conn, "SELECT COUNT(*) FROM unit") == count(conn, "SELECT COUNT(*) FROM unit_emb") == result.chunks
 
 
 def test_frontmatter_id_is_kept_across_a_rewrite(cfg):

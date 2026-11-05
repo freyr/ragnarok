@@ -54,7 +54,7 @@ def test_move_into_a_sensitive_folder_makes_the_note_private(built):
     row = conn.execute("SELECT sensitivity FROM doc WHERE path = 'Home/Budget/Field Stop.md'").fetchone()
     assert row == ("private",)
     vec = conn.execute(
-        "SELECT DISTINCT v.sensitivity FROM unit_vec v JOIN unit c ON c.id = v.unit_id"
+        "SELECT DISTINCT n.sensitivity FROM unit_emb v JOIN unit c ON c.id = v.unit_id"
         " JOIN doc n ON n.id = c.doc_id WHERE n.path = 'Home/Budget/Field Stop.md'"
     ).fetchall()
     assert vec == [("private",)]

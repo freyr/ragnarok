@@ -10,14 +10,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import sqlite_vec
+import numpy as np
 
 from .config import Config, rules_hash
 from .embed import input_hash
 from .metadata import iter_notes, read_note, resolve
 from .splitter import chunk_note
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 GROUP = 64  # notes per transaction during an update
 SCAN_LIMIT = 20  # changed notes for each scan before a server call
 NOT_CURRENT = "The index is not current. Run `ragnarok index`."
@@ -25,8 +25,8 @@ NOT_CURRENT = "The index is not current. Run `ragnarok index`."
 WIKI_LINK = re.compile(r"!?\[\[([^\]|#^]+)")
 
 
-def _schema(dimension: int) -> str:
-    return f"""
+def _schema() -> str:
+    return """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS node (
     id TEXT PRIMARY KEY,
@@ -65,12 +65,10 @@ CREATE INDEX IF NOT EXISTS unit_doc ON unit (doc_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS unit_fts USING fts5(
     heading_path, text, tokenize = 'porter unicode61 remove_diacritics 2'
 );
-CREATE VIRTUAL TABLE IF NOT EXISTS unit_vec USING vec0(
-    unit_id INTEGER PRIMARY KEY,
-    embedding float[{dimension}] distance_metric=cosine,
-    vault TEXT,
-    sensitivity TEXT,
-    status TEXT
+CREATE TABLE IF NOT EXISTS unit_emb (
+    unit_id INTEGER PRIMARY KEY REFERENCES unit (id) ON DELETE CASCADE,
+    doc_id TEXT NOT NULL,
+    embedding BLOB NOT NULL
 );
 CREATE TABLE IF NOT EXISTS link (
     from_doc TEXT NOT NULL REFERENCES doc (id) ON DELETE CASCADE,
@@ -129,9 +127,6 @@ def connect(cfg: Config) -> sqlite3.Connection:
     cfg.index_path.parent.mkdir(parents=True, exist_ok=True)
     # the MCP server runs each call in a worker thread; it serializes the calls with a lock
     conn = sqlite3.connect(cfg.index_path, timeout=30, check_same_thread=False)
-    conn.enable_load_extension(True)
-    sqlite_vec.load(conn)
-    conn.enable_load_extension(False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     expected = {"model": cfg.model, "dimension": str(cfg.dimension), "schema_version": str(SCHEMA_VERSION)}
@@ -144,7 +139,7 @@ def connect(cfg: Config) -> sqlite3.Connection:
             f"The index at {cfg.index_path} uses {stored}, the configuration needs {expected}. "
             "Run `ragnarok index --rebuild`."
         )
-    conn.executescript(_schema(cfg.dimension))
+    conn.executescript(_schema())
     attach_core(conn, cfg)
     if not stored:
         conn.executemany(
@@ -152,6 +147,13 @@ def connect(cfg: Config) -> sqlite3.Connection:
         )
         conn.commit()
     return conn
+
+
+def _unit_vector(blob: bytes) -> bytes:
+    """The float32 vector at length 1, so that a dot product is the cosine."""
+    v = np.frombuffer(blob, dtype=np.float32)
+    norm = float(np.linalg.norm(v))
+    return (v / norm if norm else v).astype(np.float32).tobytes()
 
 
 def _hash_file(data: bytes) -> str:
@@ -177,7 +179,7 @@ def _delete_note(conn: sqlite3.Connection, path: str) -> None:
         return
     doc_id = row[0]
     ids = [r[0] for r in conn.execute("SELECT id FROM unit WHERE doc_id = ?", (doc_id,))]
-    conn.executemany("DELETE FROM unit_vec WHERE unit_id = ?", [(i,) for i in ids])
+    conn.executemany("DELETE FROM unit_emb WHERE unit_id = ?", [(i,) for i in ids])
     conn.executemany("DELETE FROM unit_fts WHERE rowid = ?", [(i,) for i in ids])
     conn.execute("DELETE FROM unit WHERE doc_id = ?", (doc_id,))
     conn.execute("DELETE FROM link WHERE from_doc = ?", (doc_id,))
@@ -427,7 +429,7 @@ def _write(
         vectors = embedder.embed_docs([hashes[k] for k in missing])
         conn.executemany(
             "INSERT OR REPLACE INTO core.embed_cache (text_hash, model, vector) VALUES (?, ?, ?)",
-            [(k, cfg.model, sqlite_vec.serialize_float32(v)) for k, v in zip(missing, vectors, strict=True)],
+            [(k, cfg.model, np.asarray(v, dtype=np.float32).tobytes()) for k, v in zip(missing, vectors, strict=True)],
         )
         result.embedded += len(missing)
 
@@ -478,11 +480,15 @@ def _write(
                 (doc_id, c.ord, c.heading, c.text, th, len(c.text.split())),
             ).lastrowid
             conn.execute("INSERT INTO unit_fts (rowid, heading_path, text) VALUES (?, ?, ?)", (uid, c.heading, c.text))
-            conn.execute(
-                "INSERT INTO unit_vec (unit_id, embedding, vault, sensitivity, status)"
-                " SELECT ?, vector, ?, ?, ? FROM core.embed_cache WHERE text_hash = ? AND length(vector) = ?",
-                (uid, m.vault, m.sensitivity, m.status, th, cfg.dimension * 4),
-            )
+            row = conn.execute(
+                "SELECT vector FROM core.embed_cache WHERE text_hash = ? AND length(vector) = ?",
+                (th, cfg.dimension * 4),
+            ).fetchone()
+            if row is not None:
+                conn.execute(
+                    "INSERT INTO unit_emb (unit_id, doc_id, embedding) VALUES (?, ?, ?)",
+                    (uid, doc_id, _unit_vector(row[0])),
+                )
             result.chunks += 1
         conn.executemany(
             "INSERT INTO link (from_doc, ord, target_text) VALUES (?, ?, ?)",
@@ -544,7 +550,7 @@ def status(cfg: Config, conn: sqlite3.Connection) -> dict:
         "private_notes": one("SELECT count(*) FROM doc WHERE sensitivity = 'private'"),
         "archived_notes": one("SELECT count(*) FROM doc WHERE status = 'archived'"),
         "chunks": one("SELECT count(*) FROM unit"),
-        "vectors": one("SELECT count(*) FROM unit_vec"),
+        "vectors": one("SELECT count(*) FROM unit_emb"),
         "cache": one("SELECT count(*) FROM core.embed_cache"),
         "links": one("SELECT count(*) FROM link"),
         "resolved_links": one("SELECT count(*) FROM link WHERE to_node IS NOT NULL"),

@@ -1,4 +1,4 @@
-"""Hybrid search: dense (sqlite-vec) and BM25 (FTS5) chunk lists, ranked by note, joined with RRF."""
+"""Hybrid search: dense (exact numpy scan) and BM25 (FTS5) chunk lists, ranked by note, joined with RRF."""
 
 from __future__ import annotations
 
@@ -6,13 +6,12 @@ import re
 import sqlite3
 from dataclasses import asdict, dataclass
 
-import sqlite_vec
+import numpy as np
 
 from .config import Config
 
 RRF_K = 60
 CANDIDATES = 200  # units from each list
-FILTERED_CANDIDATES = 1000  # when a filter applies after the vector search
 SNIPPET_WORDS = 120
 
 STOP = set(
@@ -52,55 +51,70 @@ def fts_query(query: str) -> str:
     return " OR ".join(f'"{w}"' for w in dict.fromkeys(words))
 
 
-def _note_filters(vault, project, area, type_, include_archived, include_private) -> tuple[str, list]:
+@dataclass(frozen=True)
+class Filters:
+    vault: str | None = None
+    project: str | None = None
+    area: str | None = None
+    type: str | None = None
+    include_archived: bool = True
+    include_private: bool = False
+
+
+def eligibility(filters: Filters) -> tuple[str, list]:
+    """SQL condition on the alias d (a doc row) and its parameters."""
     where, params = [], []
-    for column, value in (("vault", vault), ("project", project), ("area", area), ("type", type_)):
+    for column in ("vault", "project", "area", "type"):
+        value = getattr(filters, column)
         if value is not None:
-            where.append(f"n.{column} = ?")
+            where.append(f"d.{column} = ?")
             params.append(value)
-    if not include_archived:
-        where.append("n.status = 'active'")
-    if not include_private:
-        where.append("n.sensitivity = 'normal'")
-    return (" AND " + " AND ".join(where)) if where else "", params
+    if not filters.include_archived:
+        where.append("d.status = 'active'")
+    if not filters.include_private:
+        where.append("d.sensitivity = 'normal'")
+    return (" AND ".join(where) or "1"), params
 
 
-def _dense(conn, vector, k, vault, include_archived, include_private) -> list[int]:
-    where, params = ["embedding MATCH ?", "k = ?"], [sqlite_vec.serialize_float32(vector), k]
-    if vault is not None:
-        where.append("vault = ?")
-        params.append(vault)
-    if not include_archived:
-        where.append("status = 'active'")
-    if not include_private:
-        where.append("sensitivity = 'normal'")
-    sql = f"SELECT unit_id FROM unit_vec WHERE {' AND '.join(where)} ORDER BY distance"
-    return [r[0] for r in conn.execute(sql, params)]
+def _dense(conn, vector, filters: Filters) -> tuple[list[int], int]:
+    """The CANDIDATES eligible units nearest to the vector (equal scores sort by unit_id), and the eligible count."""
+    predicate, params = eligibility(filters)
+    rows = conn.execute(
+        f"SELECT e.unit_id, e.embedding FROM unit_emb e JOIN doc d ON d.id = e.doc_id WHERE {predicate}", params
+    ).fetchall()
+    if not rows:
+        return [], 0
+    ids = np.fromiter((r[0] for r in rows), dtype=np.int64, count=len(rows))
+    matrix = np.frombuffer(b"".join(r[1] for r in rows), dtype=np.float32).reshape(len(rows), -1)
+    query = np.asarray(vector, dtype=np.float32)
+    scores = matrix @ (query / np.linalg.norm(query))
+    order = np.lexsort((ids, -scores))[:CANDIDATES]
+    return ids[order].tolist(), len(rows)
 
 
-def _fts(conn, query, k, note_where, note_params) -> list[int]:
+def _fts(conn, query, k, filters: Filters) -> list[int]:
     match = fts_query(query)
     if not match:
         return []
+    predicate, params = eligibility(filters)
     sql = (
-        "SELECT f.rowid FROM unit_fts f JOIN unit c ON c.id = f.rowid JOIN doc n ON n.id = c.doc_id"
-        f" WHERE unit_fts MATCH ?{note_where} ORDER BY bm25(unit_fts, 2.0, 1.0) LIMIT ?"
+        "SELECT f.rowid FROM unit_fts f JOIN unit c ON c.id = f.rowid JOIN doc d ON d.id = c.doc_id"
+        f" WHERE unit_fts MATCH ? AND {predicate} ORDER BY bm25(unit_fts, 2.0, 1.0) LIMIT ?"
     )
-    return [r[0] for r in conn.execute(sql, [match, *note_params, k])]
+    return [r[0] for r in conn.execute(sql, [match, *params, k])]
 
 
-def _by_note(conn, chunk_ids: list[int], note_where: str, note_params: list) -> list[tuple[str, int]]:
-    """Change a ranked chunk list into a ranked list of (doc_id, best unit_id), with the note filters."""
-    if not chunk_ids:
+def _by_note(conn, unit_ids: list[int]) -> list[tuple[str, int]]:
+    """Change a ranked unit list into a ranked list of (doc_id, best unit_id)."""
+    if not unit_ids:
         return []
-    marks = ",".join("?" * len(chunk_ids))
-    sql = f"SELECT c.id, c.doc_id FROM unit c JOIN doc n ON n.id = c.doc_id WHERE c.id IN ({marks}){note_where}"
-    note_of = dict(conn.execute(sql, [*chunk_ids, *note_params]).fetchall())
+    marks = ",".join("?" * len(unit_ids))
+    note_of = dict(conn.execute(f"SELECT id, doc_id FROM unit WHERE id IN ({marks})", unit_ids).fetchall())
     seen: dict[str, int] = {}
-    for cid in chunk_ids:
-        nid = note_of.get(cid)
+    for uid in unit_ids:
+        nid = note_of.get(uid)
         if nid is not None and nid not in seen:
-            seen[nid] = cid
+            seen[nid] = uid
     return list(seen.items())
 
 
@@ -118,19 +132,23 @@ def search(
     include_private: bool = False,
     limit: int = 8,
     mode: str = "hybrid",
+    warnings: list[str] | None = None,
 ) -> list[Hit]:
     if include_private and not cfg.allow_private:
         raise PrivateNotAllowed("include_private needs allow_private = true in the configuration")
-    note_where, note_params = _note_filters(vault, project, area, type, include_archived, include_private)
+    filters = Filters(vault, project, area, type, include_archived, include_private)
     lists: list[list[tuple[str, int]]] = []
     if mode in ("hybrid", "dense"):
-        k = FILTERED_CANDIDATES if (project or area or type) else CANDIDATES
-        ids = _dense(conn, embedder.embed_query(query), k, vault, include_archived, include_private)
-        lists.append(_by_note(conn, ids, note_where, note_params))
+        unit_ids, eligible = _dense(conn, embedder.embed_query(query), filters)
+        if warnings is not None and eligible > cfg.kb.exact_limit:
+            warnings.append(
+                f"The exact scan read {eligible} units, above the limit of {cfg.kb.exact_limit}; the search is slow."
+            )
+        lists.append(_by_note(conn, unit_ids))
     else:
         lists.append([])
     if mode in ("hybrid", "fts"):
-        lists.append(_by_note(conn, _fts(conn, query, CANDIDATES, note_where, note_params), note_where, note_params))
+        lists.append(_by_note(conn, _fts(conn, query, CANDIDATES, filters)))
     else:
         lists.append([])
 

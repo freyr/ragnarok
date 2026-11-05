@@ -104,7 +104,7 @@ class Tools:
 
     def search(self, query: str, **filters) -> dict:
         warnings = self.scan()
-        hits = search(self.cfg, self.conn, self.embedder, query, **filters)
+        hits = search(self.cfg, self.conn, self.embedder, query, warnings=warnings, **filters)
         return {"results": [h.as_dict() for h in hits], "warnings": warnings}
 
     def find_projects(self, query: str, vault: str | None = None, limit: int = 5) -> dict:
