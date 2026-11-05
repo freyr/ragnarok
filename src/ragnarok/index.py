@@ -101,6 +101,12 @@ CREATE TABLE IF NOT EXISTS main.doc_subject (
     target_text TEXT NOT NULL,
     PRIMARY KEY (doc_id, ord)
 );
+CREATE TABLE IF NOT EXISTS main.doc_supersedes (
+    doc_id TEXT NOT NULL REFERENCES doc (id) ON DELETE CASCADE ON UPDATE CASCADE,
+    ord INTEGER NOT NULL,
+    target_text TEXT NOT NULL,
+    PRIMARY KEY (doc_id, ord)
+);
 CREATE TABLE IF NOT EXISTS main.link (
     from_doc TEXT NOT NULL REFERENCES doc (id) ON DELETE CASCADE ON UPDATE CASCADE,
     ord INTEGER NOT NULL,
@@ -453,6 +459,9 @@ def _same(cfg: Config, conn: sqlite3.Connection, doc_id: str, m, chunks) -> bool
     subjects = conn.execute("SELECT target_text FROM doc_subject WHERE doc_id = ? ORDER BY ord", (doc_id,))
     if [t for (t,) in subjects] != m.subjects:
         return False
+    supersedes = conn.execute("SELECT target_text FROM doc_supersedes WHERE doc_id = ? ORDER BY ord", (doc_id,))
+    if [t for (t,) in supersedes] != m.supersedes:
+        return False
     jira = [k for (k,) in conn.execute("SELECT key FROM jira WHERE doc_id = ? ORDER BY key", (doc_id,))]
     stored = [h for (h,) in conn.execute("SELECT text_hash FROM unit WHERE doc_id = ? ORDER BY ord", (doc_id,))]
     return jira == m.jira and stored == [input_hash(cfg, c.heading, c.text) for c in chunks]
@@ -738,6 +747,10 @@ def _write(
         conn.executemany(
             "INSERT INTO doc_subject (doc_id, ord, entity_id, target_text) VALUES (?, ?, NULL, ?)",
             [(doc_id, i, t) for i, t in enumerate(m.subjects)],
+        )
+        conn.executemany(
+            "INSERT INTO doc_supersedes (doc_id, ord, target_text) VALUES (?, ?, ?)",
+            [(doc_id, i, t) for i, t in enumerate(m.supersedes)],
         )
         result.chunks += _write_units(cfg, conn, doc_id, p.hash, p.chunks)
         conn.executemany(

@@ -103,6 +103,7 @@ class NoteMeta:
     canonical: bool = False
     superseded_by: str | None = None
     superseded_by_text: str | None = None
+    supersedes: list[str] = field(default_factory=list)  # the target texts of `supersedes`, in file order
     as_of: str | None = None
     review_by: str | None = None
 
@@ -364,13 +365,13 @@ def resolve(
 
     jira = sorted(set(_as_list(fm.get("jira"))) | set(find_jira(cfg, vault, body)))
 
-    doc_type = doc_types[note_type]
+    doc_type = doc_types.get(note_type)  # a config with its own doc_types can lack a type
     subjects = _targets(fm.get("subject"))[:3]
     task = fm.get("task")
     task = task.strip() if isinstance(task, str) and task.strip() else None
     as_of = _iso_date(fm.get("as_of")) if fm.get("as_of") is not None else None
     review_by = _iso_date(fm.get("review_by")) if fm.get("review_by") is not None else None
-    if review_by is None and as_of is not None and doc_type.review_months:
+    if review_by is None and as_of is not None and doc_type and doc_type.review_months:
         review_by = _add_months(as_of, doc_type.review_months)
     key_parts = {
         "subject": subjects[0].lower() if subjects else None,
@@ -379,6 +380,7 @@ def resolve(
     }
     owner_text = _first_target(fm.get("owner"))
     superseded_by_text = _first_target(fm.get("superseded_by"))
+    supersedes = _targets(fm.get("supersedes"))
 
     return NoteMeta(
         vault=vault,
@@ -392,14 +394,15 @@ def resolve(
         description=description,
         jira=jira,
         sources=sources,
-        class_=doc_type.class_,
+        class_=doc_type.class_ if doc_type else "none",
         collection=vault,
         owner_text=owner_text,
         subjects=subjects,
         task=task,
-        identity_key=_identity_key(doc_type.one_per, key_parts, vault, note_type),
+        identity_key=_identity_key(doc_type.one_per if doc_type else "none", key_parts, vault, note_type),
         canonical=fm.get("canonical") is True,
         superseded_by_text=superseded_by_text,
+        supersedes=supersedes,
         as_of=as_of,
         review_by=review_by,
     )

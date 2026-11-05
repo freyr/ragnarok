@@ -5,7 +5,7 @@ import os
 import pytest
 
 from ragnarok import index
-from ragnarok.config import Config, VaultRules
+from ragnarok.config import Config, DocType, VaultRules
 from ragnarok.index import IndexMismatch, connect, status, update
 
 
@@ -488,3 +488,35 @@ def test_doc_columns_from_frontmatter(cfg):
     # a note with none of these keys gets the defaults
     sql = "SELECT class, mode, collection, canonical, identity_key FROM doc WHERE path = 'Home/Budget/2026.md'"
     assert conn.execute(sql).fetchone() == ("none", "files", "Home", 0, None)
+
+
+def test_supersedes_keeps_its_target_texts(cfg):
+    note = cfg.root / "Home/Heating/how-to-bleed.md"
+    note.write_text('---\ntype: how-to\nsupersedes: ["[[Old Note]]", "some-id"]\n---\n# Bleed\nOpen the valve.\n')
+    conn, emb, _ = build(cfg)
+    doc_id = conn.execute("SELECT id FROM doc WHERE path = 'Home/Heating/how-to-bleed.md'").fetchone()[0]
+    sql = "SELECT ord, target_text FROM doc_supersedes WHERE doc_id = ? ORDER BY ord"
+    assert conn.execute(sql, (doc_id,)).fetchall() == [(0, "Old Note"), (1, "some-id")]
+    assert count(conn, "SELECT count(*) FROM doc_supersedes") == 2
+    # a rewrite with one target changes the rows
+    note.write_text('---\ntype: how-to\nsupersedes: "[[Older Note]]"\n---\n# Bleed\nOpen the valve.\n')
+    update(cfg, conn, emb)
+    assert conn.execute(sql, (doc_id,)).fetchall() == [(0, "Older Note")]
+    # a rewrite that drops the key removes the rows
+    note.write_text("---\ntype: how-to\n---\n# Bleed\nOpen the valve.\n")
+    update(cfg, conn, emb)
+    assert count(conn, "SELECT count(*) FROM doc_supersedes") == 0
+    note.write_text('---\ntype: how-to\nsupersedes: ["[[Old Note]]"]\n---\n# Bleed\nOpen the valve.\n')
+    update(cfg, conn, emb)
+    assert count(conn, "SELECT count(*) FROM doc_supersedes") == 1
+    note.unlink()
+    update(cfg, conn, emb)
+    assert count(conn, "SELECT count(*) FROM doc_supersedes") == 0
+
+
+def test_doc_type_missing_from_the_config_gives_class_none(cfg):
+    cfg.kb = dataclasses.replace(cfg.kb, doc_types={"guide": DocType("none", "none")})
+    (cfg.root / "Home/Heating/plain.md").write_text("---\n---\n# Plain\nText.\n")
+    conn, _, _ = build(cfg)
+    sql = "SELECT class, identity_key, review_by FROM doc WHERE path = 'Home/Heating/plain.md'"
+    assert conn.execute(sql).fetchone() == ("none", None, None)
