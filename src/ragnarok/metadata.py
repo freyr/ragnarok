@@ -5,33 +5,21 @@ Sensitivity comes only from the configured path patterns, never from frontmatter
 
 from __future__ import annotations
 
+import calendar
 import re
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
+from datetime import date, datetime
 from fnmatch import fnmatchcase
 from functools import lru_cache
 from pathlib import Path
 
 import frontmatter
 
-from .config import Config, VaultRules
+from .config import Config, KbConfig, VaultRules
 
-TYPES = {
-    "drivers",
-    "summary",
-    "research",
-    "spec",
-    "plan",
-    "brainstorm",
-    "review",
-    "decision",
-    "guide",
-    "reference",
-    "meeting",
-    "log",
-    "template",
-    "note",
-}
+# the closed document types: the names of the default `kb.doc_types`; `resolve` reads the configured ones
+TYPES = frozenset(KbConfig().doc_types)
 
 # docs/<kind>/ and other folders that carry the type in the older layout
 FOLDER_TYPES = {
@@ -72,9 +60,7 @@ TYPE_MAP = {
     "adr": "decision",
     "decision": "decision",
     "guide": "guide",
-    "how-to": "guide",
     "howto": "guide",
-    "tutorial": "guide",
     "runbook": "guide",
     "facilitator-runbook": "guide",
     "knowledge-base": "reference",
@@ -104,6 +90,21 @@ class NoteMeta:
     description: str | None = None
     jira: list[str] = field(default_factory=list)
     sources: dict[str, str] = field(default_factory=dict)
+    class_: str = "none"  # the class of the type: state, record or none
+    mode: str = "files"
+    collection: str = ""
+    # a reference stays as text; owner, primary_subject and superseded_by stay empty until the references resolve
+    owner: str | None = None
+    owner_text: str | None = None
+    primary_subject: str | None = None
+    subjects: list[str] = field(default_factory=list)  # the target texts of the subject links, at most three
+    task: str | None = None
+    identity_key: str | None = None
+    canonical: bool = False
+    superseded_by: str | None = None
+    superseded_by_text: str | None = None
+    as_of: str | None = None
+    review_by: str | None = None
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -155,6 +156,59 @@ def _as_list(value) -> list[str]:
     if isinstance(value, str):
         return [v.strip() for v in value.split(",") if v.strip()]
     return [str(v) for v in value]
+
+
+def link_target(value) -> str | None:
+    """The target text of a wiki-link, or the text of an ID. Empty gives None."""
+    text = str(value).strip()
+    if text.startswith("[[") and text.endswith("]]"):
+        text = text[2:-2].split("|")[0].split("#")[0].strip()
+    return text or None
+
+
+def _first_target(value) -> str | None:
+    return next(iter(_targets(value)), None)
+
+
+def _targets(value) -> list[str]:
+    """The target texts of one link or a list of links, in order. A comma list in one string is a list."""
+    if isinstance(value, str) and not value.strip().startswith("[["):
+        value = _as_list(value)
+    elif isinstance(value, str):
+        value = [value]
+    return [t for item in value or [] if (t := link_target(item))]
+
+
+def _iso_date(value) -> str | None:
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    try:
+        return date.fromisoformat(str(value).strip()).isoformat()
+    except ValueError:
+        return None
+
+
+def _add_months(day: str, months: int) -> str:
+    start = date.fromisoformat(day)
+    index = start.year * 12 + start.month - 1 + months
+    year, month = divmod(index, 12)
+    month += 1
+    return date(year, month, min(start.day, calendar.monthrange(year, month)[1])).isoformat()
+
+
+def _identity_key(one_per: str, parts: dict[str, str | None], vault: str, note_type: str) -> str | None:
+    """`collection|type|<key of one_per>`. Null when a part is absent or one_per is none."""
+    wanted = {
+        "subject+task": ["subject", "task"],
+        "subject": ["subject"],
+        "entity": ["subject"],
+        "project": ["project"],
+    }.get(one_per)
+    if wanted is None or any(not parts[name] for name in wanted):
+        return None
+    return "|".join([vault, note_type, *(parts[name] for name in wanted)])
 
 
 def normalize_project(value: str) -> str:
@@ -284,8 +338,9 @@ def resolve(
     project = normalize_project(pick("project", project))
     area = pick("area", area).lower()
 
+    doc_types = cfg.kb.doc_types
     raw_type = str(fm.get("type", "")).strip().lower()
-    if raw_type in TYPES:
+    if raw_type in doc_types:
         note_type, sources["type"] = raw_type, "frontmatter"
     elif (path_type := _type_from_path(parts)) is not None:
         note_type, sources["type"] = path_type, "path"
@@ -294,8 +349,9 @@ def resolve(
     else:
         note_type, sources["type"] = "note", "default"
 
-    if str(fm.get("status", "")).strip().lower() == "archived":
-        status, sources["status"] = "archived", "frontmatter"
+    raw_status = str(fm.get("status", "")).strip().lower()
+    if raw_status in ("archived", "superseded", "redirect"):
+        status, sources["status"] = raw_status, "frontmatter"
     elif folder is not None and project_archived(folder):
         status, sources["status"] = "archived", "summary"
     else:
@@ -307,6 +363,22 @@ def resolve(
         sources["description"] = "frontmatter"
 
     jira = sorted(set(_as_list(fm.get("jira"))) | set(find_jira(cfg, vault, body)))
+
+    doc_type = doc_types[note_type]
+    subjects = _targets(fm.get("subject"))[:3]
+    task = fm.get("task")
+    task = task.strip() if isinstance(task, str) and task.strip() else None
+    as_of = _iso_date(fm.get("as_of")) if fm.get("as_of") is not None else None
+    review_by = _iso_date(fm.get("review_by")) if fm.get("review_by") is not None else None
+    if review_by is None and as_of is not None and doc_type.review_months:
+        review_by = _add_months(as_of, doc_type.review_months)
+    key_parts = {
+        "subject": subjects[0].lower() if subjects else None,
+        "task": " ".join(task.lower().split()) if task else None,
+        "project": project if project != "none" else None,
+    }
+    owner_text = _first_target(fm.get("owner"))
+    superseded_by_text = _first_target(fm.get("superseded_by"))
 
     return NoteMeta(
         vault=vault,
@@ -320,6 +392,16 @@ def resolve(
         description=description,
         jira=jira,
         sources=sources,
+        class_=doc_type.class_,
+        collection=vault,
+        owner_text=owner_text,
+        subjects=subjects,
+        task=task,
+        identity_key=_identity_key(doc_type.one_per, key_parts, vault, note_type),
+        canonical=fm.get("canonical") is True,
+        superseded_by_text=superseded_by_text,
+        as_of=as_of,
+        review_by=review_by,
     )
 
 

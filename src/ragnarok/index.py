@@ -78,9 +78,29 @@ CREATE TABLE IF NOT EXISTS main.doc (
     mtime_ns INTEGER NOT NULL,
     size INTEGER NOT NULL,
     hash TEXT NOT NULL,
-    declared_id TEXT
+    declared_id TEXT,
+    class TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    collection TEXT NOT NULL,
+    owner TEXT,
+    owner_text TEXT,
+    primary_subject TEXT,
+    task TEXT,
+    identity_key TEXT,
+    canonical INTEGER NOT NULL DEFAULT 0,
+    superseded_by TEXT,
+    superseded_by_text TEXT,
+    as_of TEXT,
+    review_by TEXT
 );
 CREATE INDEX IF NOT EXISTS main.doc_project ON doc (vault, project);
+CREATE TABLE IF NOT EXISTS main.doc_subject (
+    doc_id TEXT NOT NULL REFERENCES doc (id) ON DELETE CASCADE ON UPDATE CASCADE,
+    ord INTEGER NOT NULL,
+    entity_id TEXT,
+    target_text TEXT NOT NULL,
+    PRIMARY KEY (doc_id, ord)
+);
 CREATE TABLE IF NOT EXISTS main.link (
     from_doc TEXT NOT NULL REFERENCES doc (id) ON DELETE CASCADE ON UPDATE CASCADE,
     ord INTEGER NOT NULL,
@@ -413,9 +433,25 @@ class _Pending:
 def _same(cfg: Config, conn: sqlite3.Connection, doc_id: str, m, chunks) -> bool:
     """True when the index already holds this metadata and these units for the note."""
     row = conn.execute(
-        "SELECT title, project, area, type, status, sensitivity, description FROM doc WHERE id = ?", (doc_id,)
+        "SELECT title, project, area, type, status, sensitivity, description, class, task, identity_key, canonical,"
+        " owner_text, superseded_by_text, as_of, review_by FROM doc WHERE id = ?",
+        (doc_id,),
     ).fetchone()
-    if row != (m.title, m.project, m.area, m.type, m.status, m.sensitivity, m.description):
+    base = (m.title, m.project, m.area, m.type, m.status, m.sensitivity, m.description)
+    extra = (
+        m.class_,
+        m.task,
+        m.identity_key,
+        int(m.canonical),
+        m.owner_text,
+        m.superseded_by_text,
+        m.as_of,
+        m.review_by,
+    )
+    if row != (*base, *extra):
+        return False
+    subjects = conn.execute("SELECT target_text FROM doc_subject WHERE doc_id = ? ORDER BY ord", (doc_id,))
+    if [t for (t,) in subjects] != m.subjects:
         return False
     jira = [k for (k,) in conn.execute("SELECT key FROM jira WHERE doc_id = ? ORDER BY key", (doc_id,))]
     stored = [h for (h,) in conn.execute("SELECT text_hash FROM unit WHERE doc_id = ? ORDER BY ord", (doc_id,))]
@@ -661,12 +697,14 @@ def _write(
         _delete_note(conn, p.rel)
         doc_id, provisional = _claim_id(conn, p, present, contested)
         conn.execute(
-            "INSERT INTO node (id, node_type, collection, mode, provisional) VALUES (?, 'doc', ?, 'files', ?)",
-            (doc_id, m.vault, int(provisional)),
+            "INSERT INTO node (id, node_type, collection, mode, provisional) VALUES (?, 'doc', ?, ?, ?)",
+            (doc_id, m.collection, m.mode, int(provisional)),
         )
         conn.execute(
             "INSERT INTO doc (id, vault, path, title, project, area, type, status, sensitivity, description,"
-            " mtime_ns, size, hash, declared_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " mtime_ns, size, hash, declared_id, class, mode, collection, owner, owner_text, primary_subject, task,"
+            " identity_key, canonical, superseded_by, superseded_by_text, as_of, review_by)"
+            " VALUES (" + ", ".join("?" * 27) + ")",
             (
                 doc_id,
                 m.vault,
@@ -682,7 +720,24 @@ def _write(
                 p.size,
                 p.hash,
                 p.frontmatter_id,
+                m.class_,
+                m.mode,
+                m.collection,
+                m.owner,
+                m.owner_text,
+                m.primary_subject,
+                m.task,
+                m.identity_key,
+                int(m.canonical),
+                m.superseded_by,
+                m.superseded_by_text,
+                m.as_of,
+                m.review_by,
             ),
+        )
+        conn.executemany(
+            "INSERT INTO doc_subject (doc_id, ord, entity_id, target_text) VALUES (?, ?, NULL, ?)",
+            [(doc_id, i, t) for i, t in enumerate(m.subjects)],
         )
         result.chunks += _write_units(cfg, conn, doc_id, p.hash, p.chunks)
         conn.executemany(

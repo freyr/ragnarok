@@ -462,3 +462,29 @@ def test_changed_index_ddl_needs_rebuild(cfg):
     conn.close()
     with pytest.raises(IndexMismatch, match="Run `ragnarok index --rebuild`"):
         connect(cfg)
+
+
+def test_doc_columns_from_frontmatter(cfg):
+    note = cfg.root / "Home/Heating/how-to-bleed.md"
+    note.write_text(
+        "---\ntype: how-to\nsubject: ['[[Radiator R1]]', '[[Boiler]]']\ntask: Bleed a radiator\n"
+        "owner: '[[team-house]]'\ncanonical: true\nsuperseded_by: '[[how-to-bleed-v2]]'\nstatus: superseded\n"
+        "as_of: 2026-03-01\nreview_by: 2026-09-01\n---\n# Bleed\nOpen the valve.\n"
+    )
+    conn, _, _ = build(cfg)
+    columns = (
+        "class, mode, collection, owner, owner_text, primary_subject, task, identity_key, canonical, superseded_by,"
+        " superseded_by_text, as_of, review_by, status, type"
+    )
+    row = conn.execute(f"SELECT {columns} FROM doc WHERE path = 'Home/Heating/how-to-bleed.md'").fetchone()
+    assert row == (
+        "state", "files", "Home", None, "team-house", None, "Bleed a radiator",
+        "Home|how-to|radiator r1|bleed a radiator", 1, None, "how-to-bleed-v2", "2026-03-01", "2026-09-01",
+        "superseded", "how-to",
+    )  # fmt: skip
+    doc_id = conn.execute("SELECT id FROM doc WHERE path = 'Home/Heating/how-to-bleed.md'").fetchone()[0]
+    rows = conn.execute("SELECT ord, entity_id, target_text FROM doc_subject WHERE doc_id = ? ORDER BY ord", (doc_id,))
+    assert rows.fetchall() == [(0, None, "Radiator R1"), (1, None, "Boiler")]
+    # a note with none of these keys gets the defaults
+    sql = "SELECT class, mode, collection, canonical, identity_key FROM doc WHERE path = 'Home/Budget/2026.md'"
+    assert conn.execute(sql).fetchone() == ("none", "files", "Home", 0, None)

@@ -1,8 +1,9 @@
+from datetime import date
 from pathlib import Path
 
 import pytest
 
-from ragnarok.config import Config, home_dir, load_config
+from ragnarok.config import Config, DocType, home_dir, load_config
 from ragnarok.metadata import iter_notes, resolve, resolve_file
 
 
@@ -247,3 +248,71 @@ def test_done_project_under_archive_folder_is_archived_by_path(vault):
 def test_summary_stage_does_not_reach_notes_outside_the_project(vault):
     (vault.root / "Home/Heating/SUMMARY.md").write_text("---\nstage: DONE\n---\n# Heating\n")
     assert meta(vault, "Home/Astro/Theory/Field Stop.md").status == "active"
+
+
+def test_how_to_keeps_its_type_and_guide_has_class_none(vault):
+    how_to = resolve(vault, "Home/Bike/x.md", {"type": "how-to"}, "", lambda f: False)
+    assert (how_to.type, how_to.sources["type"], how_to.class_) == ("how-to", "frontmatter", "state")
+    guide = resolve(vault, "Home/Bike/x.md", {"type": "guide"}, "", lambda f: False)
+    assert (guide.type, guide.class_) == ("guide", "none")
+    # a raw value outside the closed list still goes through TYPE_MAP
+    runbook = resolve(vault, "Home/Bike/x.md", {"type": "runbook"}, "", lambda f: False)
+    assert (runbook.type, runbook.sources["type"], runbook.class_) == ("guide", "frontmatter-map", "none")
+
+
+@pytest.mark.parametrize("status", ["superseded", "redirect", "archived"])
+def test_status_accepts_superseded_and_redirect(vault, status):
+    m = resolve(vault, "Home/Bike/x.md", {"status": status}, "", lambda f: False)
+    assert (m.status, m.sources["status"]) == (status, "frontmatter")
+
+
+def test_review_by_defaults_from_the_type(vault):
+    vault.kb.doc_types["how-to"] = DocType("state", "subject+task", review_months=6)
+    fm = {"type": "how-to", "as_of": date(2026, 8, 31)}
+    assert resolve(vault, "Home/Bike/x.md", fm, "", lambda f: False).review_by == "2027-02-28"
+    # a value in the file wins
+    fm["review_by"] = "2026-10-01"
+    assert resolve(vault, "Home/Bike/x.md", fm, "", lambda f: False).review_by == "2026-10-01"
+    # a type with no review_months, or a file with no as_of, gives no default
+    decision = {"type": "decision", "as_of": "2026-08-31"}
+    assert resolve(vault, "Home/Bike/x.md", decision, "", lambda f: False).review_by is None
+    assert resolve(vault, "Home/Bike/x.md", {"type": "how-to"}, "", lambda f: False).review_by is None
+
+
+def test_identity_key_for_subject_and_task(vault):
+    fm = {"type": "how-to", "subject": ["[[Phone X|the phone]]", "[[Wifi]]"], "task": "Register a  new phone"}
+    m = resolve(vault, "Home/Bike/x.md", fm, "", lambda f: False)
+    assert m.identity_key == "Home|how-to|phone x|register a new phone"
+    assert m.task == "Register a  new phone"
+    assert m.subjects == ["Phone X", "Wifi"]
+    # a part of the key is absent: the key is null
+    no_task = resolve(vault, "Home/Bike/x.md", {"type": "how-to", "subject": "[[Phone X]]"}, "", lambda f: False)
+    no_subject = resolve(vault, "Home/Bike/x.md", {"type": "how-to", "task": "t"}, "", lambda f: False)
+    assert no_task.identity_key is None and no_subject.identity_key is None
+    # one_per none: no key
+    record = {"type": "decision", "subject": "[[A]]"}
+    assert resolve(vault, "Home/Bike/x.md", record, "", lambda f: False).identity_key is None
+
+
+def test_identity_key_for_a_project_type(vault):
+    m = resolve(vault, "Home/Heating/plan-boiler.md", {"type": "plan"}, "", lambda f: True)
+    assert (m.project, m.identity_key) == ("Heating", "Home|plan|Heating")
+    # a note with no project has no key
+    loose = resolve(vault, "Home/loose.md", {"type": "plan", "project": "none"}, "", lambda f: False)
+    assert loose.project == "none" and loose.identity_key is None
+
+
+@pytest.mark.parametrize(
+    "value, text",
+    [
+        ("[[new-doc]]", "new-doc"),
+        ("[[notes/new-doc|the new one]]", "notes/new-doc"),
+        ("new-doc", "new-doc"),
+        (["[[new-doc]]"], "new-doc"),
+    ],
+)
+def test_superseded_by_accepts_a_wiki_link(vault, value, text):
+    m = resolve(vault, "Home/Bike/x.md", {"superseded_by": value}, "", lambda f: False)
+    assert m.superseded_by_text == text
+    # the references stay as text: no doc is resolved in this task
+    assert m.superseded_by is None

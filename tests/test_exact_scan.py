@@ -36,8 +36,8 @@ def seed_index(cfg, specs, vectors, text="needle"):
             "INSERT INTO node (id, node_type, collection, mode, provisional) VALUES (?, 'doc', 'c', 'm', 0)", (doc,)
         )
         conn.execute(
-            "INSERT INTO doc (id, vault, path, title, project, area, type, status, sensitivity, mtime_ns, size, hash)"
-            " VALUES (?, ?, ?, 't', ?, ?, ?, ?, ?, 0, 0, 'h')",
+            "INSERT INTO doc (id, vault, path, title, project, area, type, status, sensitivity, mtime_ns, size, hash,"
+            " class, mode, collection) VALUES (?, ?, ?, 't', ?, ?, ?, ?, ?, 0, 0, 'h', 'none', 'files', 'c')",
             (doc, vault, f"{doc}.md", project, area, type_, status, sensitivity),
         )
         conn.execute(
