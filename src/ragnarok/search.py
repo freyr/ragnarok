@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import math
 import re
 import sqlite3
 from dataclasses import asdict, dataclass, field
@@ -62,6 +63,7 @@ class Hit:
     review_warning: str | None = None
     successor: dict | None = None
     dispute: dict | None = None
+    duplicate: bool = False  # the second document of one identity key: the authority factor halves its score
 
     def as_dict(self) -> dict:
         out = asdict(self)
@@ -266,9 +268,11 @@ def search(
     warnings: list[str] | None = None,
     resolved: list[dict] | None = None,
     trace: Trace | None = None,
+    authority: bool = True,
 ) -> list[Hit]:
     """The ranked hits. `subject` is an entity ID or a name, or a list of them (any of them matches); `resolved`
-    gets the entity of each name."""
+    gets the entity of each name. The score is the RRF score times the authority factors; `authority=False` turns
+    them off."""
     if include_private and not cfg.allow_private:
         raise PrivateNotAllowed("include_private needs allow_private = true in the configuration")
     # an empty list is no filter, not a filter that nothing passes
@@ -321,7 +325,9 @@ def search(
                 ranks.setdefault(nid, [None, None])[li] = rank
                 if nid not in best or rank < best[nid][0]:
                     best[nid] = (rank, cid)
-        order = sorted(scores, key=lambda n: -scores[n])
+        factors = _authority(cfg, conn, query, list(scores), subject_ids or ()) if authority else {}
+        final = {n: scores[n] * math.prod(factors.get(n, {}).values()) for n in scores}
+        order = sorted(scores, key=lambda n: -final[n])
         top = order[:limit]
         hits = []
         for nid in top:
@@ -331,14 +337,97 @@ def search(
             heading, text = conn.execute("SELECT heading_path, text FROM unit WHERE id = ?", (best[nid][1],)).fetchone()
             words = text.split()
             snippet = " ".join(words[:SNIPPET_WORDS]) + (" …" if len(words) > SNIPPET_WORDS else "")
-            hits.append(
-                Hit(*n, heading, snippet, round(scores[nid], 5), *ranks[nid], **_scent(conn, nid, include_private))
-            )
+            duplicate = "duplicate_identity" in factors.get(nid, {})
+            scent = _scent(conn, nid, include_private)
+            hits.append(Hit(*n, heading, snippet, round(final[nid], 5), *ranks[nid], **scent, duplicate=duplicate))
     if trace:
         if plan is not None:
             trace.set("ragnarok.plan", {**plan, "pools": pools, "pool_limit": CANDIDATES})
-        safely("candidates", _record, conn, trace, filters, (query, vector), scores, ranks, best, order, top)
+        safely(
+            "candidates",
+            _record,
+            conn,
+            trace,
+            filters,
+            (query, vector),
+            scores,
+            final,
+            factors,
+            ranks,
+            best,
+            order,
+            top,
+        )
     return hits
+
+
+def _review_warning(class_: str, review_by: str | None) -> str | None:
+    """The warning of a state document whose review date is in the past."""
+    if class_ == "state" and review_by and review_by < date.today().isoformat():
+        return f"The review date {review_by} is in the past: the content can be out of date."
+    return None
+
+
+def _text_subjects(conn, query: str, allow_private: bool) -> list[str]:
+    """The entities whose alias occurs in the query text as a phrase of whole words."""
+    from . import kb  # kb imports fts_query from this module
+
+    words = lambda text: " ".join(re.findall(r"\w+", kb.normalize_alias(text)))  # noqa: E731
+    padded = f" {words(query)} "
+    rows = conn.execute(
+        "SELECT DISTINCT a.entity_id, a.alias_norm FROM entity_alias a JOIN entity e ON e.id = a.entity_id"
+        f" JOIN doc d ON d.id = e.doc_id WHERE 1 = 1{kb._visible(allow_private)}"
+    )
+    return [entity_id for entity_id, alias in rows if (w := words(alias)) and f" {w} " in padded]
+
+
+def _authority(cfg: Config, conn, query: str, doc_ids: list[str], subject_ids: tuple[str, ...]) -> dict[str, dict]:
+    """The authority factors of each document: only the factors that apply, by their name in `kb.authority`.
+
+    The subjects of the query are the resolved `subject` values, and with `subject_from_text` also the entities
+    whose alias is in the query text. The first document of an identity key is the canonical one, else the one
+    with the latest `as_of`, else the one with the latest file time; only active documents count.
+    """
+    if not doc_ids:
+        return {}
+    a = cfg.kb.authority
+    subjects = set(subject_ids)
+    if a.subject_from_text:
+        subjects |= set(_text_subjects(conn, query, cfg.allow_private))
+    marks = ",".join("?" * len(doc_ids))
+    docs = conn.execute(
+        f"SELECT id, class, status, review_by, superseded_by, identity_key FROM doc WHERE id IN ({marks})", doc_ids
+    ).fetchall()
+    canonical: set[str] = set()
+    if subjects:
+        smarks = ",".join("?" * len(subjects))
+        sql = f"SELECT DISTINCT doc_id FROM entity_canonical WHERE doc_id IN ({marks}) AND entity_id IN ({smarks})"
+        canonical = {r[0] for r in conn.execute(sql, [*doc_ids, *subjects])}
+    keys = sorted({d[5] for d in docs if d[5] is not None and d[2] == "active"})
+    first: dict[str, tuple] = {}
+    if keys:
+        kmarks = ",".join("?" * len(keys))
+        group = conn.execute(
+            f"SELECT identity_key, id, canonical, coalesce(as_of, ''), mtime_ns FROM doc"
+            f" WHERE status = 'active' AND identity_key IN ({kmarks})",
+            keys,
+        )
+        for key, id_, flag, as_of, mtime in group:
+            if key not in first or (flag, as_of, mtime, id_) > first[key][1:]:
+                first[key] = (id_, flag, as_of, mtime, id_)
+    out: dict[str, dict] = {}
+    for id_, class_, status, review_by, successor, key in docs:
+        applied = {
+            "canonical": a.canonical if id_ in canonical else None,
+            "review_overdue": a.review_overdue if _review_warning(class_, review_by) else None,
+            "archived": a.archived if status == "archived" else None,
+            "superseded": a.superseded if successor is not None else None,
+            "duplicate_identity": a.duplicate_identity
+            if key in first and first[key][0] != id_ and status == "active"
+            else None,
+        }
+        out[id_] = {name: factor for name, factor in applied.items() if factor is not None}
+    return out
 
 
 def _scent(conn, doc_id: str, include_private: bool) -> dict:
@@ -358,9 +447,7 @@ def _scent(conn, doc_id: str, include_private: bool) -> dict:
         )
     ]
     canonical = conn.execute("SELECT 1 FROM entity_canonical WHERE doc_id = ? LIMIT 1", (doc_id,)).fetchone()
-    warning = None
-    if class_ == "state" and review_by and review_by < date.today().isoformat():
-        warning = f"The review date {review_by} is in the past: the content can be out of date."
+    warning = _review_warning(class_, review_by)
     if successor is not None:
         row = conn.execute(f"SELECT d.path FROM doc d WHERE d.id = ?{visible}", (successor,)).fetchone()
         successor = {"id": successor, "path": row[0] if row else None}
@@ -407,9 +494,9 @@ def _prefilter_ranks(conn, query: str, vector) -> dict[str, tuple[int | None, in
     return {d: (dense.get(d), fts.get(d)) for d in dense.keys() | fts.keys()}
 
 
-def _record(conn, trace: Trace, filters: Filters, probe, scores, ranks, best, order, top) -> None:
+def _record(conn, trace: Trace, filters: Filters, probe, scores, finals, factors, ranks, best, order, top) -> None:
     """The candidates (the top 50 of each pool, and every gold document), the returned documents and their status."""
-    final = {nid: i for i, nid in enumerate(order, start=1)}
+    final_rank = {nid: i for i, nid in enumerate(order, start=1)}
     in_top = {nid for nid, r in ranks.items() if any(x is not None and x <= TOP for x in r)}
     gold_ids = {}
     for path in safely("gold paths", gold_paths) or []:
@@ -439,18 +526,18 @@ def _record(conn, trace: Trace, filters: Filters, probe, scores, ranks, best, or
             "fts_rank": fts_rank,
             "filters": filter_checks(d, filters),
             "rrf": scores.get(nid),
-            "authority": {},  # the factors that apply; a later stage fills it
-            "final_rank": final.get(nid),
+            "authority": factors.get(nid, {}),
+            "final_rank": final_rank.get(nid),
         }
         if not gold:
             return out
         dense_before, fts_before = before.get(nid, (None, None))
         return {**out, "gold": True, "prefilter_dense_rank": dense_before, "prefilter_fts_rank": fts_before}
 
-    candidates = [record(nid, nid in gold_set) for nid in sorted(in_top, key=lambda n: final[n])]
+    candidates = [record(nid, nid in gold_set) for nid in sorted(in_top, key=lambda n: final_rank[n])]
     candidates += [record(nid, True) for nid in gold_ids.values() if nid and nid not in in_top]
     candidates += [
         {"doc_id": None, "path": p, "gold": True, "filters": {}} for p, nid in gold_ids.items() if nid is None
     ]
     trace.set("ragnarok.candidates", candidates)
-    trace.returned([(nid, round(scores[nid], 5)) for nid in top])
+    trace.returned([(nid, round(finals[nid], 5)) for nid in top])

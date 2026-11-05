@@ -121,6 +121,8 @@ class AuthorityConfig:
     archived: float = 0.5
     superseded: float = 0.5  # a record with superseded_by
     duplicate_identity: float = 0.5  # the second document of one identity key
+    # also take the entities whose alias occurs as a phrase in the query text as subjects (ablation of P2)
+    subject_from_text: bool = False
 
 
 @dataclass

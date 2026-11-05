@@ -127,6 +127,7 @@ review_overdue = 0.8      # a state document with review_by in the past
 archived = 0.5
 superseded = 0.5          # a record with superseded_by
 duplicate_identity = 0.5  # the second document of one identity key
+subject_from_text = false # also take the entities whose alias is a phrase of the query text as subjects
 
 # Each call appends a trace line; files older than retention_days are removed.
 [trace]
