@@ -74,6 +74,14 @@ def eval_home(cfg: Config) -> Path:
     return cfg.data_dir / "eval"
 
 
+def eval_config(cfg: Config) -> Config:
+    """The config of the evaluation home, which prepare() writes: the mirror is its root."""
+    path = eval_home(cfg) / "config.toml"
+    if not path.exists():
+        raise FileNotFoundError(f"no evaluation home config at {path}; run `ragnarok eval prepare`")
+    return load_config(path)
+
+
 def mirror_notes(cfg: Config) -> list[str]:
     return [rel for rel in iter_notes(cfg) if not is_private(cfg, rel) and not excluded(cfg, rel)]
 
@@ -218,7 +226,13 @@ def command(
 
 
 def run_claude(cmd: list[str], cwd: Path, env: dict) -> tuple[str, str, int]:
-    out = subprocess.run(cmd, cwd=cwd, env={**os.environ, **env}, capture_output=True, text=True, timeout=900)
+    """The stdout, stderr and exit code of one run. A timeout gives the partial stdout and the exit code 124."""
+    try:
+        out = subprocess.run(cmd, cwd=cwd, env={**os.environ, **env}, capture_output=True, text=True, timeout=900)
+    except subprocess.TimeoutExpired as e:
+        # the partial output of a timeout is bytes, even with text=True
+        raw = e.stdout.decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        return raw, f"timeout after {e.timeout} s\n", 124
     return out.stdout, out.stderr, out.returncode
 
 
@@ -234,7 +248,8 @@ def _result_text(content) -> str:
 def parse_stream(text: str) -> dict:
     """The tool sequence and the final result of the raw stream-json lines of one run.
 
-    tools has one item for each tool_use block, in order: name, input and the trace_id values of its result.
+    tools has one item for each tool_use block, in order: name, input, the text of its result and the trace_id
+    values in it.
     """
     tools: list[dict] = []
     by_id: dict[str, dict] = {}
@@ -256,11 +271,13 @@ def parse_stream(text: str) -> dict:
             if not isinstance(block, dict):
                 continue
             if block.get("type") == "tool_use":
-                item = {"name": block.get("name"), "input": block.get("input"), "trace_ids": []}
+                item = {"name": block.get("name"), "input": block.get("input"), "trace_ids": [], "result": ""}
                 tools.append(item)
                 by_id[block.get("id")] = item
             elif block.get("type") == "tool_result" and block.get("tool_use_id") in by_id:
-                by_id[block["tool_use_id"]]["trace_ids"] += TRACE_ID.findall(_result_text(block.get("content")))
+                item, text = by_id[block["tool_use_id"]], _result_text(block.get("content"))
+                item["trace_ids"] += TRACE_ID.findall(text)
+                item["result"] += text
     return {
         "tools": tools,
         "trace_ids": [t for item in tools for t in item["trace_ids"]],
@@ -273,7 +290,9 @@ def parse_stream(text: str) -> dict:
 
 
 def parse_answer(text: str, mirror: Path | None = None) -> dict:
-    """The last JSON object with a `notes` list in the answer: notes relative to the mirror, entities, route, answer."""
+    """The last JSON object with a `notes` list in the answer: notes relative to the mirror, entities, route, answer.
+
+    answered is False when the answer has no such object."""
     found: dict = {}
     decoder = json.JSONDecoder()
     for m in re.finditer(r"\{", text or ""):
@@ -296,12 +315,25 @@ def parse_answer(text: str, mirror: Path | None = None) -> dict:
         "entities": [str(e) for e in found.get("entities") or []],
         "route": found.get("route"),
         "answer": found.get("answer"),
+        "answered": bool(found),
     }
 
 
 def parse_notes(text: str, mirror: Path) -> list[str]:
     """The note paths of the last {"notes": [...]} object in the answer, relative to the mirror."""
     return parse_answer(text, mirror)["notes"]
+
+
+def read_run(path: Path, mirror: Path | None) -> dict:
+    """One run from its raw stream-json file: the tool sequence, the final result and the final JSON object."""
+    run = parse_stream(path.read_text())
+    run.update(parse_answer(run.pop("answer_text"), mirror))
+    return run
+
+
+def is_run_failure(run: dict) -> bool:
+    """The harness label RUN: the run crashed, timed out (is_error) or gave no final JSON object."""
+    return run["error"] or not run["answered"]
 
 
 def run_all(
@@ -322,7 +354,8 @@ def run_all(
     The raw lines of each run are in <out_dir>/<set>/<id>.<agent>.<run>.jsonl. A run with a stderr or a
     non-zero exit code also has <id>.<agent>.<run>.stderr: the exit code on the first line, then the stderr. A
     file that exists is used again, so a stopped run continues. Run number n of one agent pairs with run
-    number n of the other.
+    number n of the other. A RUN run (is_run_failure) is deleted and run again one time; the file
+    <id>.<agent>.<run>.retried records that it was run again.
     """
     if "mcp-base" in agents and baseline is None:
         raise ValueError("the agent mcp-base needs baseline_checkout and baseline_home in config.toml")
@@ -339,17 +372,21 @@ def run_all(
 
     def one(job):
         name, q, agent, n, path, mcp_json = job
-        if not path.exists():
-            cmd = command(agent, q["question"], calls, model, mcp_json, cfg.vaults, "class" in q)
-            path.with_suffix(".stderr").unlink(missing_ok=True)
-            raw, stderr, code = runner(cmd, mirror, {})
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if stderr or code:
-                path.with_suffix(".stderr").write_text(f"{code}\n{stderr}")
-            path.write_text(raw)
-        run = parse_stream(path.read_text())
-        run.update(parse_answer(run.pop("answer_text"), mirror))
-        return name, q["id"], agent, n, run
+        retried = path.with_suffix(".retried")
+        while True:
+            if not path.exists():
+                cmd = command(agent, q["question"], calls, model, mcp_json, cfg.vaults, "class" in q)
+                path.with_suffix(".stderr").unlink(missing_ok=True)
+                raw, stderr, code = runner(cmd, mirror, {})
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if stderr or code:
+                    path.with_suffix(".stderr").write_text(f"{code}\n{stderr}")
+                path.write_text(raw)
+            run = read_run(path, mirror)
+            if not is_run_failure(run) or retried.exists():
+                return name, q["id"], agent, n, run
+            retried.write_text("")
+            path.unlink()
 
     results: dict[str, dict[str, dict[str, list[dict]]]] = {}
     with ThreadPoolExecutor(workers) as pool:
@@ -391,11 +428,15 @@ def report(
     results: dict[str, dict[str, dict[str, list[dict]]]],
     latency: list[int],
     agents: list[str] = DEFAULT_AGENTS,
+    match=None,
 ) -> list[str]:
     """The quality table. The first agent is the tested one, the last is the reference.
 
-    Run n of one agent pairs with run n of the other.
+    Run n of one agent pairs with run n of the other. The questions with a `class` get the KB measures of kb_eval;
+    match is their entity name matcher (default: kb_eval.Matcher on the evaluation home).
     """
+    from . import kb_eval
+
     test, ref = agents[0], agents[-1]
     known = set(mirror_notes(cfg))
     draft, hard = [], []
@@ -425,6 +466,10 @@ def report(
         return f"{ref} {mean(rows, f'{ref}_{measure}')}, {test} {mean(rows, f'{test}_{measure}')}"
 
     lines = ["| Quality attribute | Target | Measured | 95% interval |", "|---|---|---|---|"]
+    classed = {name: [q for q in questions if "class" in q] for name, questions in sets.items()}
+    if any(classed.values()):
+        match = match or kb_eval.Matcher(eval_config(cfg))
+        lines += kb_eval.report_rows(classed, results, agents, match)
     if draft:
         lines.append(
             f"| Retrieval, draft set (n={len(draft)}) | {test} - {ref} recall@K >= +0.10, interval above 0 | "
@@ -465,10 +510,14 @@ def report(
         a: [run["turns"] for s in results.values() for r in s.values() for run in r.get(a, []) if run["turns"]]
         for a in agents
     }
-    failed = sum(1 for run in runs if run["error"] or not run["notes"])
+    failed = {
+        a: sum(is_run_failure(run) for s in results.values() for r in s.values() for run in r.get(a, []))
+        for a in agents
+    }
     lines += [
         "",
-        f"runs {len(runs)}, without a note list {failed}",
+        f"runs {len(runs)}",
+        "failed runs (RUN): " + ", ".join(f"{a} {failed[a]}" for a in agents),
         "mean turns: " + ", ".join(f"{a} {np.mean(turns[a]):.1f}" for a in agents if turns[a]),
         "API-equivalent cost (no bill on a subscription): " + ", ".join(f"{a} ${cost[a]:.2f}" for a in agents),
     ]

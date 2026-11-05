@@ -88,7 +88,15 @@ def test_stream_json_gives_the_tool_sequence_and_trace_ids():
     assert run["trace_ids"] == ["tr-9"]
     assert (run["turns"], run["cost"], run["error"]) == (3, 0.02, False)
     answer = agent_eval.parse_answer(run["answer_text"], Path("/m"))
-    assert answer == {"notes": ["Home/Heating/notes/boiler.md"], "entities": ["e1"], "route": "kb", "answer": "ok"}
+    assert answer == {
+        "notes": ["Home/Heating/notes/boiler.md"],
+        "entities": ["e1"],
+        "route": "kb",
+        "answer": "ok",
+        "answered": True,
+    }
+    assert run["tools"][1]["result"] == "# n"  # the text of each tool result, for the attribution
+    assert agent_eval.parse_answer("Done, no object.")["answered"] is False
     assert agent_eval.parse_stream("not json\n")["error"] is True
 
 

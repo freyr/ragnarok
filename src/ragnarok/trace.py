@@ -157,17 +157,30 @@ class Trace:
             f.write(json.dumps(self.fields, ensure_ascii=False) + "\n")
 
 
-def find_line(cfg: Config, trace_id: str) -> dict | None:
-    """The record with this trace_id. The files are read newest first."""
-    for path in sorted(trace_dir(cfg).glob("*.jsonl"), reverse=True):
+def _records(folder: Path):
+    """The records of the trace files of a folder, newest file and newest line first."""
+    for path in sorted(folder.glob("*.jsonl"), reverse=True):
         for text in reversed(path.read_text(encoding="utf-8", errors="replace").splitlines()):
             try:
                 record = json.loads(text)
             except ValueError:
                 continue
-            if isinstance(record, dict) and record.get("trace_id") == trace_id:
-                return record
-    return None
+            if isinstance(record, dict):
+                yield record
+
+
+def find_line(cfg: Config, trace_id: str) -> dict | None:
+    """The record with this trace_id. The files are read newest first."""
+    return next((r for r in _records(trace_dir(cfg)) if r.get("trace_id") == trace_id), None)
+
+
+def find_lines(folder: Path, trace_ids) -> dict[str, dict]:
+    """The records with these trace_ids in a trace folder, by trace_id, in one pass over the files."""
+    wanted, found = set(trace_ids), {}
+    for record in _records(folder):
+        if record.get("trace_id") in wanted:
+            found.setdefault(record["trace_id"], record)
+    return found
 
 
 def _cell(value) -> str:

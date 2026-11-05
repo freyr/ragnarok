@@ -17,7 +17,8 @@ COMMANDS = {
     "backfill": "Propose, describe and apply frontmatter for existing notes",
     "survey": "Print the facts that the path rules of a vault need",
     "explain": "Print one traced call as a stage table",
-    "eval": "Run the evaluation sets, make the mirror (prepare) or print its hash (mirror-hash)",
+    "eval": "Run the evaluation sets, make the mirror (prepare), print its hash (mirror-hash), run the KB sets"
+    " (kb), the filtered no-regression check (filtered) or label the failed runs (attribute)",
     "cache": "Work with the embedding cache in core.db",
     "kb": "Knowledge base: check (print the count of each integrity check from the stored violations)",
     "migrate": "Move a version 1 index into core.db and a new index.db, with no new embedding",
@@ -59,7 +60,14 @@ def build_parser() -> argparse.ArgumentParser:
     xp.add_argument("--gold", action="append", default=[], help="mark this note path as gold (repeatable)")
     xp.add_argument("--json", action="store_true", help="print the raw record (--gold applies to the table only)")
     ep = parsers["eval"]
-    ep.add_argument("kind", choices=["mechanical", "pool", "agent", "prepare", "mirror-hash"])
+    ep.add_argument(
+        "kind", choices=["mechanical", "pool", "agent", "prepare", "mirror-hash", "kb", "filtered", "attribute"]
+    )
+    ep.add_argument("run_dir", nargs="?", type=Path, help="attribute: the folder of the agent runs")
+    ep.add_argument("--trace-dir", type=Path, help="attribute: the trace folder (default the evaluation home's)")
+    ep.add_argument(
+        "--confirm-measure", action="append", default=[], help="attribute: a question id that is MEASURE (repeatable)"
+    )
     ep.add_argument("--set", action="append", dest="set_names", help="agent: a set name (default draft-long and hard)")
     ep.add_argument("--calls", type=int, default=8, help="agent: the limit of tool calls for each agent")
     ep.add_argument("--model", default="sonnet", help="agent: the Claude model of both agents")
@@ -70,7 +78,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="mcp-kb,mcp-base",
         help="agent: comma list of mcp-kb, mcp-base and grep (the first is tested)",
     )
-    ep.add_argument("--sets", type=Path, help="folder with the question sets (default <data_dir>/eval/sets)")
+    ep.add_argument(
+        "--sets",
+        type=Path,
+        help="folder with the question sets (default <data_dir>/eval/sets; kb and attribute: <data_dir>/eval/sets-kb;"
+        " filtered: <data_dir>/eval/sets-regression, its draft-long.json)",
+    )
     ep.add_argument("--out", type=Path, help="folder for the results (default <data_dir>/eval/results)")
     ep.add_argument("--min-words", type=int, help="use a separate index with this minimum chunk size")
     ep.add_argument("--reuse-mirror", action="store_true", help="agent, prepare: keep the mirror that exists")
@@ -389,6 +402,8 @@ def cmd_eval(cfg, args) -> int:
 
         print(f"mirror {prepare(cfg, reuse_mirror=args.reuse_mirror).root}")
         return 0
+    if args.kind in ("kb", "filtered", "attribute"):
+        return _kb_eval(cfg, args)
     if args.kind == "mirror-hash":
         from .agent_eval import eval_home, mirror_hash
 
@@ -432,6 +447,59 @@ def cmd_eval(cfg, args) -> int:
     else:
         out = args.out / "pool.json"
         print(f"{pool(cfg, conn, OllamaEmbedder(cfg), args.sets, out)} questions written to {out}")
+    return 0
+
+
+def _kb_eval(cfg, args) -> int:
+    """eval kb, filtered and attribute: on the evaluation home, which `ragnarok eval prepare` makes."""
+    from . import kb_eval
+    from .agent_eval import eval_config, eval_home
+
+    try:
+        ecfg = eval_config(cfg)
+    except FileNotFoundError as e:
+        print(e, file=sys.stderr)
+        return 1
+    if args.kind == "attribute":
+        from .trace import trace_dir
+
+        if args.run_dir is None:
+            print("eval attribute needs the folder of the agent runs", file=sys.stderr)
+            return 1
+        agent = args.agents.split(",")[0].strip()
+        result = kb_eval.attribute(
+            args.sets or eval_home(cfg) / "sets-kb",
+            args.run_dir,
+            args.trace_dir or trace_dir(ecfg),
+            ecfg.root,
+            kb_eval.Matcher(ecfg),
+            agent,
+            args.confirm_measure,
+        )
+        print("\n".join(result["lines"]))
+        return 0
+    if not (cfg.baseline_checkout and cfg.baseline_home):
+        print("eval kb and filtered need baseline_checkout and baseline_home in config.toml", file=sys.stderr)
+        return 1
+    if not ecfg.index_path.exists():
+        print(f"No index at {ecfg.index_path}. Run `ragnarok eval prepare`.", file=sys.stderr)
+        return 1
+    from .embed import OllamaEmbedder
+    from .index import connect
+
+    base = kb_eval.mcp_caller(Path(cfg.baseline_checkout), Path(cfg.baseline_home))
+    conn = connect(ecfg)
+    try:
+        if args.kind == "kb":
+            lines = kb_eval.kb_mechanical(
+                ecfg, conn, OllamaEmbedder(ecfg), args.sets or eval_home(cfg) / "sets-kb", base
+            )
+        else:
+            path = (args.sets or eval_home(cfg) / "sets-regression") / "draft-long.json"
+            lines, _ = kb_eval.filtered(ecfg, conn, OllamaEmbedder(ecfg), json.loads(path.read_text()), base)
+    finally:
+        conn.close()
+    print("\n".join(lines))
     return 0
 
 
