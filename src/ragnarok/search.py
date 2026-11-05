@@ -421,7 +421,7 @@ def _authority(cfg: Config, conn, query: str, doc_ids: list[str], subject_ids: t
             "canonical": a.canonical if id_ in canonical else None,
             "review_overdue": a.review_overdue if _review_warning(class_, review_by) else None,
             "archived": a.archived if status == "archived" else None,
-            "superseded": a.superseded if successor is not None else None,
+            "superseded": a.superseded if class_ == "record" and successor is not None else None,
             "duplicate_identity": a.duplicate_identity
             if key in first and first[key][0] != id_ and status == "active"
             else None,

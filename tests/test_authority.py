@@ -113,6 +113,29 @@ def test_superseded_record_gives_its_successor(kb):
     assert on[old].score == pytest.approx(off[old].score * 0.5, abs=1e-5)
 
 
+def test_superseded_factor_applies_only_to_a_record(kb):
+    cfg, conn, emb = kb
+    (cfg.root / "Kb/howto/old-state.md").write_text(
+        howto("Billing", "retire", "superseded_by: '[[deploy-billing]]'\n", "Retire the billing service.")
+    )
+    (cfg.root / "Kb/notes").mkdir()
+    (cfg.root / "Kb/notes/old-note.md").write_text(
+        "---\ntype: note\nsuperseded_by: '[[deploy-billing]]'\n---\n# Old note\nRetire the billing service.\n"
+    )
+    update(cfg, conn, emb)
+    classes = dict(conn.execute("SELECT path, class FROM doc WHERE path LIKE '%old-%'").fetchall())
+    assert sorted(classes.values()) == ["none", "record", "state"]
+    query = "retire billing service"
+    on, off = hits(kb, query), hits(kb, query, authority=False)
+    for path in ("Kb/howto/old-state.md", "Kb/notes/old-note.md"):
+        assert on[path].score == pytest.approx(off[path].score, abs=1e-5)
+        assert on[path].successor["path"] == DEPLOY
+    record = "Kb/decisions/old-choice.md"
+    assert hits(kb, "restart billing service")[record].score == pytest.approx(
+        hits(kb, "restart billing service", authority=False)[record].score * 0.5, abs=1e-5
+    )
+
+
 def test_an_archived_document_is_halved(kb):
     archived = "Kb/howto/archive-billing.md"
     on, off = hits(kb), hits(kb, authority=False)
