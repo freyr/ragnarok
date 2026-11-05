@@ -286,7 +286,8 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
     @server.tool()
     @timed
     def get_entity(id: str, as_of: str | None = None, ctx: Context | None = None) -> dict:
-        """An entity by its ID: the facts valid at as_of (default today), canonical documents and relation counts.
+        """An entity by its ID: its path (the entity document), the facts valid at as_of (default today),
+        canonical documents and relation counts.
 
         A live attribute is a pointer {attribute, system, skill, key}, never a value: call the skill for the value.
         """
