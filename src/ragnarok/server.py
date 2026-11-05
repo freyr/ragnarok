@@ -238,4 +238,15 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
         """The notes that contain a Jira key, for example ABC-123."""
         return get().find_by_jira(key)
 
+    @server.tool()
+    @timed
+    def kb_check(collection: str | None = None, subject: str | None = None, ctx: Context | None = None) -> dict:
+        """The count of each integrity check of the knowledge base, with the violations of M1 and M3.
+
+        M1 is a broken link outside code. M3 is two active state documents with one identity key. The other checks
+        are ref, vocab, relation_kinds, live_value, canonical_twice and subjects. Filters: collection, and subject
+        (an entity ID, name or alias).
+        """
+        return get().kb_check(collection=collection, subject=subject)
+
     return server

@@ -28,6 +28,30 @@ REBUILD = "Run `ragnarok index --rebuild`."
 MIGRATE = "Run `ragnarok migrate`."
 
 WIKI_LINK = re.compile(r"!?\[\[([^\]|#^]+)")
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`).+?(?<!`)\1(?!`)")
+
+
+def wiki_links(body: str) -> list[tuple[str, int]]:
+    """The wiki-link targets of a body, sorted, each with in_code: 1 when no occurrence is in prose.
+
+    An occurrence is in code when it is inside a fenced code block or an inline code span.
+    """
+    prose: dict[str, bool] = {}
+    fence = None
+    for line in body.splitlines():
+        marker = FENCE.match(line)
+        if fence is None and marker:
+            fence = marker.group(1)
+        elif fence is not None and marker and marker.group(1)[0] == fence[0] and len(marker.group(1)) >= len(fence):
+            fence = None
+        spans = [m.span() for m in CODE_SPAN.finditer(line)] if fence is None else []
+        for m in WIKI_LINK.finditer(line):
+            in_code = fence is not None or any(a <= m.start() < b for a, b in spans)
+            target = m.group(1).strip()
+            prose[target] = prose.get(target, False) or not in_code
+    return [(target, int(not in_prose)) for target, in_prose in sorted(prose.items())]
+
 
 # the tables of core.db that a rebuild keeps: they cannot be derived from the files, or only at a high cost
 KEPT_TABLES = ("embed_cache", "w0_step")
@@ -460,7 +484,7 @@ class _Pending:
     hash: str
     meta: object
     chunks: list
-    links: list[str]
+    links: list[tuple[str, int]]  # (target text, in_code)
     kbdoc: kb.KbDoc
     moved: bool = False
     rederived: bool = False
@@ -571,7 +595,7 @@ def update(
             kbdoc = kb.parse(cfg, meta, fm)
             if _same(cfg, conn, old[0], meta, chunks, kbdoc):
                 continue
-            links = sorted({m.group(1).strip() for m in WIKI_LINK.finditer(body)})
+            links = wiki_links(body)
             fid = _declared_id(fm, kbdoc)
             pending.append(_Pending(rel, rel, fid, mtime_ns, size, h, meta, chunks, links, kbdoc, rederived=True))
         else:
@@ -590,7 +614,7 @@ def update(
             meta = resolve(cfg, rel, fm, body)
             chunks, redactions = chunk_note(cfg, meta, body)
             result.redactions += redactions
-            links = sorted({m.group(1).strip() for m in WIKI_LINK.finditer(body)})
+            links = wiki_links(body)
             kbdoc = kb.parse(cfg, meta, fm)
             fid = _declared_id(fm, kbdoc)
             pending.append(
@@ -612,6 +636,7 @@ def update(
     if result.added or result.changed or result.moved or result.removed or result.rederived or claimed or rederive:
         resolve_links(conn)
         kb.resolve_refs(conn)
+        kb.check_violations(conn)
     if rederive:
         conn.execute("INSERT OR REPLACE INTO main.meta (key, value) VALUES ('rules_hash', ?)", (rules,))
     conn.commit()
@@ -800,8 +825,8 @@ def _write(
         )
         result.chunks += _write_units(cfg, conn, doc_id, p.hash, p.chunks)
         conn.executemany(
-            "INSERT INTO link (from_doc, ord, target_text) VALUES (?, ?, ?)",
-            [(doc_id, i, t) for i, t in enumerate(p.links)],
+            "INSERT INTO link (from_doc, ord, target_text, in_code) VALUES (?, ?, ?, ?)",
+            [(doc_id, i, t, c) for i, (t, c) in enumerate(p.links)],
         )
         conn.executemany("INSERT INTO jira (key, doc_id) VALUES (?, ?)", [(k, doc_id) for k in m.jira])
         kb.write(conn, doc_id, p.kbdoc)

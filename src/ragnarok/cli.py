@@ -19,6 +19,7 @@ COMMANDS = {
     "explain": "Print one traced call as a stage table",
     "eval": "Run the evaluation sets, make the mirror (prepare) or print its hash (mirror-hash)",
     "cache": "Work with the embedding cache in core.db",
+    "kb": "Knowledge base: check (print the count of each integrity check from the stored violations)",
     "migrate": "Move a version 1 index into core.db and a new index.db, with no new embedding",
     "backup": "Copy core.db with the SQLite backup API",
     "w0": "Write the W0 record of the last step of a Claude Code transcript (score), or copy records (import)",
@@ -66,6 +67,11 @@ def build_parser() -> argparse.ArgumentParser:
     cp = parsers["cache"]
     cp.add_argument("action", choices=["import"])
     cp.add_argument("--from", dest="source", type=Path, required=True, help="a version 1 index file")
+    kp = parsers["kb"]
+    kp.add_argument("action", choices=["check"])
+    kp.add_argument("--collection")
+    kp.add_argument("--subject", help="an entity ID, name or alias")
+    kp.add_argument("--ids", action="store_true", help="also list each M1 and M3 violation")
     wp = parsers["w0"]
     wp.add_argument("action", choices=["score", "import", "backfill"], help="score: read the Stop hook JSON on stdin")
     wp.add_argument("--from", dest="source", type=Path, help="import: another core file")
@@ -251,6 +257,29 @@ def _print_w0_status(cfg) -> None:
         conn = connect_core(cfg)
         print(json.dumps(w0_status(conn), indent=2))
         conn.close()
+
+
+def cmd_kb(cfg, args) -> int:
+    from . import kb
+    from .index import IndexMismatch, connect
+
+    try:
+        if not cfg.index_path.exists():
+            raise IndexMismatch(f"No index at {cfg.index_path}. Run `ragnarok index`.")
+        conn = connect(cfg)
+        try:
+            result = kb.report(conn, args.collection, args.subject, cfg.allow_private)
+        except LookupError as e:
+            print(e, file=sys.stderr)
+            return 1
+        finally:
+            conn.close()
+    except IndexMismatch as e:
+        print(e, file=sys.stderr)
+        return 1
+    # the stored rows come from the last import: this command does not scan the vaults
+    print(json.dumps({c: r if args.ids and "violations" in r else r["count"] for c, r in result.items()}, indent=2))
+    return 0
 
 
 def cmd_status(cfg, args) -> int:
@@ -531,6 +560,7 @@ HANDLERS = {
     "migrate": cmd_migrate,
     "backup": cmd_backup,
     "status": cmd_status,
+    "kb": cmd_kb,
     "w0": cmd_w0,
     "search": cmd_search,
 }

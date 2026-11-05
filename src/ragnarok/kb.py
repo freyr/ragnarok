@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import date
@@ -544,3 +545,142 @@ def resolve_refs(conn: sqlite3.Connection) -> None:
         if new != (entity_id, doc_id):
             rows.append((*new, rowid))
     _update(conn, "UPDATE entity_canonical SET entity_id = ?, doc_id = ? WHERE rowid = ?", rows)
+
+
+# --- the violations ---------------------------------------------------------------------------------------------
+
+CHECKS = ("M1", "M3", "ref", "vocab", "relation_kinds", "live_value", "canonical_twice", "subjects")
+LISTED = ("M1", "M3")  # the checks that kb_check reports with each violation
+MAX_SUBJECTS = 3
+
+
+def _violations(conn: sqlite3.Connection) -> list[tuple[str, list[str], str | None]]:
+    """The broken rules of the index: (check, node IDs, detail)."""
+    found: list[tuple[str, list[str], str | None]] = []
+    rows = lambda sql: conn.execute(sql).fetchall()  # noqa: E731
+
+    for from_doc, text in rows("SELECT from_doc, target_text FROM link WHERE to_node IS NULL AND in_code = 0"):
+        found.append(("M1", [from_doc], text))
+    for key, ids in rows(
+        "SELECT identity_key, group_concat(id, char(31)) FROM doc"
+        " WHERE class = 'state' AND status = 'active' AND identity_key IS NOT NULL"
+        " GROUP BY identity_key HAVING count(*) > 1"
+    ):
+        found.append(("M3", sorted(ids.split("\x1f")), key))
+
+    for doc_id, text in rows("SELECT doc_id, target_text FROM doc_subject WHERE entity_id IS NULL"):
+        found.append(("ref", [doc_id], f"subject: {text}"))
+    for id_, text in rows("SELECT id, owner_text FROM doc WHERE owner_text IS NOT NULL AND owner IS NULL"):
+        found.append(("ref", [id_], f"owner: {text}"))
+    for id_, text in rows("SELECT id, owner_text FROM entity WHERE owner_text IS NOT NULL AND owner IS NULL"):
+        found.append(("ref", [id_], f"owner: {text}"))
+    for src, text in rows("SELECT src, dst_text FROM relation WHERE dst IS NULL"):
+        found.append(("ref", [src], f"relation end: {text}"))
+    for id_, text in rows(
+        "SELECT id, superseded_by_text FROM doc WHERE superseded_by_text IS NOT NULL AND superseded_by IS NULL"
+    ):
+        found.append(("ref", [id_], f"successor: {text}"))
+
+    for id_, kind in rows("SELECT id, kind FROM entity WHERE kind IS NOT NULL AND kind NOT IN (SELECT name FROM kind)"):
+        found.append(("vocab", [id_], f"kind: {kind}"))
+    for id_, type_ in rows("SELECT id, type FROM doc WHERE type NOT IN (SELECT name FROM doc_type)"):
+        found.append(("vocab", [id_], f"type: {type_}"))
+    for src, rel in rows("SELECT src, rel FROM relation WHERE rel NOT IN (SELECT name FROM relation_type)"):
+        found.append(("vocab", [src], f"relation type: {rel}"))
+    for id_, kind, attribute in rows(
+        "SELECT e.id, e.kind, f.attribute FROM fact f JOIN entity e ON e.id = f.entity_id"
+        " WHERE NOT EXISTS (SELECT 1 FROM attribute_def a WHERE a.kind = e.kind AND a.name = f.attribute)"
+    ):
+        found.append(("vocab", [id_], f"attribute: {kind}.{attribute}"))
+
+    kinds = dict(rows("SELECT id, kind FROM entity"))
+    lists = {
+        n: (json.loads(s), json.loads(d)) for n, s, d in rows("SELECT name, src_kinds, dst_kinds FROM relation_type")
+    }
+    for src, rel, dst in rows("SELECT src, rel, dst FROM relation WHERE dst IS NOT NULL"):
+        if rel not in lists:
+            continue
+        src_kinds, dst_kinds = lists[rel]
+        src_kind = kinds[src] if src in kinds else "doc"  # a document node passes when the list holds `doc`
+        if (src_kinds and src_kind not in src_kinds) or (dst_kinds and kinds.get(dst) not in dst_kinds):
+            found.append(("relation_kinds", [src, dst], f"{rel}: {src_kind} to {kinds.get(dst)}"))
+
+    for id_, attribute in rows(
+        "SELECT e.id, f.attribute FROM fact f JOIN entity e ON e.id = f.entity_id"
+        " JOIN attribute_def a ON a.kind = e.kind AND a.name = f.attribute WHERE a.live = 1 AND f.value IS NOT NULL"
+    ):
+        found.append(("live_value", [id_], f"attribute: {attribute}"))
+
+    for entity_id, aspect, ids in rows(
+        "SELECT entity_id, aspect, group_concat(DISTINCT doc_id) FROM entity_canonical"
+        " WHERE entity_id IS NOT NULL AND doc_id IS NOT NULL GROUP BY entity_id, aspect"
+        " HAVING count(DISTINCT doc_id) > 1"
+    ):
+        found.append(("canonical_twice", sorted(ids.split(",")), f"{entity_id}: {aspect}"))
+
+    # an entity document is its own subject
+    for id_, n in rows(
+        "SELECT d.id, count(s.ord) FROM doc d LEFT JOIN doc_subject s ON s.doc_id = d.id"
+        " WHERE d.class IN ('state', 'record') AND d.id NOT IN (SELECT doc_id FROM entity)"
+        f" GROUP BY d.id HAVING count(s.ord) = 0 OR count(s.ord) > {MAX_SUBJECTS}"
+    ):
+        found.append(("subjects", [id_], f"{n} subjects"))
+    return found
+
+
+def check_violations(conn: sqlite3.Connection) -> None:
+    """Delete the derived violation rows and compute them again."""
+    now = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    conn.execute("DELETE FROM violation")
+    conn.executemany(
+        "INSERT INTO violation (rule, node_ids, detail, found_at) VALUES (?, ?, ?, ?)",
+        [(rule, json.dumps(ids), detail, now) for rule, ids, detail in _violations(conn)],
+    )
+
+
+def _subject_entities(conn: sqlite3.Connection, subject: str) -> set[str]:
+    """The entity IDs that a subject text names: an entity ID, or a name or alias."""
+    if conn.execute("SELECT 1 FROM entity WHERE id = ?", (subject,)).fetchone():
+        return {subject}
+    found = conn.execute("SELECT entity_id FROM entity_alias WHERE alias_norm = ?", (normalize_alias(subject),))
+    ids = {e for (e,) in found}
+    if not ids:
+        raise LookupError(f"No entity for the subject {subject!r}.")
+    return ids
+
+
+def report(
+    conn: sqlite3.Connection, collection: str | None = None, subject: str | None = None, allow_private: bool = True
+) -> dict:
+    """The stored violations as a count for each check. M1 and M3 list each violation with its node IDs and detail.
+
+    A violation is in scope when one of its documents is in the collection and has the subject, as a subject or as
+    the entity document. Without allow_private, a violation of a private document is left out.
+    """
+    entities = _subject_entities(conn, subject) if subject else None
+    doc_of = {i: i for (i,) in conn.execute("SELECT id FROM doc")}
+    doc_of.update(conn.execute("SELECT id, doc_id FROM entity").fetchall())
+    info = {i: (c, s) for i, c, s in conn.execute("SELECT id, collection, sensitivity FROM doc")}
+    subjects: dict[str, set[str]] = {}
+    for doc_id, entity_id in conn.execute("SELECT doc_id, entity_id FROM doc_subject WHERE entity_id IS NOT NULL"):
+        subjects.setdefault(doc_id, set()).add(entity_id)
+
+    def in_scope(node_id: str) -> bool:
+        doc = doc_of.get(node_id)
+        if doc not in info or (collection is not None and info[doc][0] != collection):
+            return False
+        return entities is None or node_id in entities or bool(subjects.get(doc, set()) & entities)
+
+    result: dict = {check: {"count": 0} for check in CHECKS}
+    for check in LISTED:
+        result[check]["violations"] = []
+    for rule, node_ids, detail in conn.execute("SELECT rule, node_ids, detail FROM violation ORDER BY id"):
+        nodes = json.loads(node_ids)
+        if not any(in_scope(n) for n in nodes):
+            continue
+        if not allow_private and any(info[doc_of[n]][1] == "private" for n in nodes if doc_of.get(n) in info):
+            continue
+        result[rule]["count"] += 1
+        if rule in LISTED:
+            result[rule]["violations"].append({"nodes": nodes, "detail": detail})
+    return result

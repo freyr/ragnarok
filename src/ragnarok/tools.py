@@ -11,6 +11,7 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 
+from . import kb
 from .config import Config
 from .index import SCAN_LIMIT, update
 from .metadata import read_note
@@ -285,6 +286,12 @@ class Tools:
         keys = ("path", "title", "project", "type", "status")
         self._returned([r[0] for r in rows])
         return {"results": [dict(zip(keys, r, strict=True)) for r in rows], "warnings": warnings}
+
+    @traced
+    def kb_check(self, collection: str | None = None, subject: str | None = None) -> dict:
+        warnings = self.scan()
+        result = kb.report(self.conn, collection, subject, self.cfg.allow_private)
+        return {**result, "warnings": warnings}
 
     # --- project summary ---------------------------------------------------------------------------------------
 

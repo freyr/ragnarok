@@ -167,10 +167,18 @@ def test_each_call_scans_first(tools):
     assert tools.last_scan["changed"] == 1
 
 
-def test_server_lists_the_six_tools(tools):
+def test_server_lists_the_seven_tools(tools):
     server = build(tools=tools)
     names = {t.name for t in asyncio.run(server.list_tools())}
-    assert names == {"search", "find_projects", "list_project", "open_projects", "open_note", "find_by_jira"}
+    assert names == {
+        "search",
+        "find_projects",
+        "list_project",
+        "open_projects",
+        "open_note",
+        "find_by_jira",
+        "kb_check",
+    }
 
 
 def test_server_errors_carry_their_reason(tools):

@@ -9,6 +9,7 @@ REQUIRED = {
     "backfill": ["propose", "Studio"],
     "survey": ["Studio"],
     "cache": ["import", "--from", "v1.db"],
+    "kb": ["check"],
     "w0": ["score"],
 }
 
