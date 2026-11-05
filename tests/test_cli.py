@@ -5,6 +5,7 @@ from ragnarok.cli import COMMANDS, build_parser
 REQUIRED = {
     "search": ["a query"],
     "eval": ["mechanical"],
+    "explain": ["abc123"],
     "backfill": ["propose", "Studio"],
     "survey": ["Studio"],
     "cache": ["import", "--from", "v1.db"],

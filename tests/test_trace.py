@@ -260,3 +260,40 @@ def test_prefilter_rank_tells_inside_the_pool_from_outside(tools, monkeypatch, m
         assert records[path][f"{method}_rank"] is None
     assert 1 <= records[inside][f"prefilter_{method}_rank"] <= 10
     assert records[outside][f"prefilter_{method}_rank"] > 10
+
+
+def test_explain_prints_one_row_for_each_candidate_and_marks_gold(tools, monkeypatch, capsys):
+    from ragnarok import cli
+
+    monkeypatch.setattr(cli, "load_config", lambda *a, **k: tools.cfg)
+    hits = tools.search("boiler", limit=100)["results"]
+    gold = hits[0]["path"]
+    monkeypatch.setenv(GOLD_ENV, json.dumps([gold]))
+    result = tools.search("boiler")
+    line = line_of(tools.cfg, result["trace_id"])
+    monkeypatch.delenv(GOLD_ENV)
+    other = next(c["path"] for c in line["ragnarok.candidates"] if not c.get("gold"))
+
+    assert cli.main(["explain", result["trace_id"], "--gold", other]) == 0
+    out = capsys.readouterr().out
+    assert "pool_limit" in out
+    rows = {
+        ln[2:].split()[0]: ln for ln in out.splitlines() if ln[2:].split()[:1] and ln[2:].split()[0].endswith(".md")
+    }
+    assert set(rows) == {c["path"] for c in line["ragnarok.candidates"]}
+    assert rows[gold].startswith("* ") and "prefilter" in out
+    assert rows[other].startswith("* ")
+    plain = [p for p in rows if p not in (gold, other)]
+    assert plain and all(rows[p].startswith("  ") for p in plain)
+
+    assert cli.main(["explain", result["trace_id"], "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["trace_id"] == result["trace_id"]
+
+
+def test_explain_of_an_unknown_id_exits_non_zero(tools, monkeypatch, capsys):
+    from ragnarok import cli
+
+    monkeypatch.setattr(cli, "load_config", lambda *a, **k: tools.cfg)
+    tools.search("boiler")
+    assert cli.main(["explain", "nope"]) == 1
+    assert "nope" in capsys.readouterr().err

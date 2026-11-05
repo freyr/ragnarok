@@ -155,3 +155,50 @@ class Trace:
         day = dt.datetime.now(dt.UTC).date().isoformat()
         with (folder / f"{day}.jsonl").open("a", encoding="utf-8") as f:
             f.write(json.dumps(self.fields, ensure_ascii=False) + "\n")
+
+
+def find_line(cfg: Config, trace_id: str) -> dict | None:
+    """The record with this trace_id. The files are read newest first."""
+    for path in sorted(trace_dir(cfg).glob("*.jsonl"), reverse=True):
+        for text in reversed(path.read_text(encoding="utf-8").splitlines()):
+            try:
+                record = json.loads(text)
+            except ValueError:
+                continue
+            if record.get("trace_id") == trace_id:
+                return record
+    return None
+
+
+def _cell(value) -> str:
+    return "-" if value is None else f"{value:.4f}" if isinstance(value, float) else str(value)
+
+
+def render_explain(record: dict, extra_gold=()) -> str:
+    """The call as a stage table: arguments, plan, entities, then one row for each candidate."""
+    extra = set(extra_gold)
+    plan = record.get("ragnarok.plan") or {}
+    out = [
+        f"trace_id  {record['trace_id']}",
+        f"tool      {record.get('gen_ai.tool.name')}",
+        f"arguments {json.dumps(record.get('gen_ai.tool.call.arguments'), ensure_ascii=False, sort_keys=True)}",
+        f"plan      {json.dumps(plan, ensure_ascii=False, sort_keys=True)}",
+        f"pool_limit {plan.get('pool_limit', '-')}",
+        f"entities  {json.dumps(record.get('ragnarok.entities') or [], ensure_ascii=False)}",
+        f"ms        {json.dumps(record.get('ragnarok.ms') or {})}",
+        "",
+        "  path | dense | fts | filters | rrf | factors | final",
+    ]
+    for c in record.get("ragnarok.candidates") or []:
+        gold = bool(c.get("gold")) or c["path"] in extra
+        filters = " ".join(f"{k}={'pass' if v else 'fail'}" for k, v in (c.get("filters") or {}).items())
+        row = (
+            f"{'* ' if gold else '  '}{c['path']} | {_cell(c.get('dense_rank'))} | {_cell(c.get('fts_rank'))}"
+            f" | {filters or '-'} | {_cell(c.get('rrf'))} | {json.dumps(c.get('authority') or {}, sort_keys=True)}"
+            f" | {_cell(c.get('final_rank'))}"
+        )
+        if "prefilter_dense_rank" in c:
+            row += f" | prefilter dense={_cell(c['prefilter_dense_rank'])} fts={_cell(c['prefilter_fts_rank'])}"
+        out.append(row)
+    out += ["", "* = gold"]
+    return "\n".join(out)

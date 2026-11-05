@@ -16,6 +16,7 @@ COMMANDS = {
     "serve": "Run the MCP server on stdio",
     "backfill": "Propose, describe and apply frontmatter for existing notes",
     "survey": "Print the facts that the path rules of a vault need",
+    "explain": "Print one traced call as a stage table",
     "eval": "Run the evaluation sets, make the mirror (prepare) or print its hash (mirror-hash)",
     "cache": "Work with the embedding cache in core.db",
     "migrate": "Move a version 1 index into core.db and a new index.db, with no new embedding",
@@ -47,6 +48,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--limit", type=int, default=8)
     sp.add_argument("--mode", choices=["hybrid", "dense", "fts"], default="hybrid")
     sp.add_argument("--json", action="store_true", help="print one JSON object for each note")
+    xp = parsers["explain"]
+    xp.add_argument("trace_id")
+    xp.add_argument("--gold", action="append", default=[], help="mark this note path as gold (repeatable)")
+    xp.add_argument("--json", action="store_true", help="print the raw record")
     ep = parsers["eval"]
     ep.add_argument("kind", choices=["mechanical", "pool", "agent", "prepare", "mirror-hash"])
     ep.add_argument("--set", action="append", dest="set_names", help="agent: a set name (default draft-long and hard)")
@@ -277,7 +282,7 @@ def cmd_search(cfg, args) -> int:
         print(f"{i}. {h.path}")
         print(f"   {h.project} | {h.type} | {h.status} | dense {h.dense_rank} fts {h.fts_rank}")
         print(f"   {h.heading}: {' '.join(h.text.split()[:30])}")
-    print(f"{len(hits)} notes in {ms:.0f} ms", file=sys.stderr)
+    print(f"{len(hits)} notes in {ms:.0f} ms, trace_id {trace.id}", file=sys.stderr)
     return 0
 
 
@@ -321,6 +326,17 @@ def cmd_eval(cfg, args) -> int:
     else:
         out = args.out / "pool.json"
         print(f"{pool(cfg, conn, OllamaEmbedder(cfg), args.sets, out)} questions written to {out}")
+    return 0
+
+
+def cmd_explain(cfg, args) -> int:
+    from .trace import find_line, render_explain
+
+    record = find_line(cfg, args.trace_id)
+    if record is None:
+        print(f"ragnarok explain: no trace with id {args.trace_id} in {cfg.data_dir / 'trace'}", file=sys.stderr)
+        return 1
+    print(json.dumps(record, ensure_ascii=False) if args.json else render_explain(record, args.gold))
     return 0
 
 
@@ -461,6 +477,7 @@ HANDLERS = {
     "backfill": cmd_backfill,
     "survey": cmd_survey,
     "eval": cmd_eval,
+    "explain": cmd_explain,
     "serve": cmd_serve,
     "inspect": cmd_inspect,
     "chunks": cmd_chunks,
