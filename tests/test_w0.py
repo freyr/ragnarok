@@ -559,3 +559,141 @@ def test_backfill_since_drops_earlier_steps(home, projects, capsys):
     _transcript(projects / "proj-a" / "s-1.jsonl", _stamp(TWO_STEPS))
     _backfill(capsys, projects, "--since", "2099-01-01")
     assert _rows(home) == []
+
+
+@pytest.mark.parametrize(("old", "new"), [("a-old", "b-new"), ("b-old", "a-new")])
+def test_backfill_merges_a_step_that_a_continued_session_copies(home, projects, capsys, old, new):
+    original = _stamp([_user("shared prompt", origin="human"), _say("answer"), _say("more answer")], session=old)
+    copied = [{**line, "sessionId": new} for line in original[:2]]  # the tail of the old file, same uuids and times
+    _transcript(projects / "proj-a" / f"{old}.jsonl", original)
+    _transcript(projects / "proj-a" / f"{new}.jsonl", copied + _stamp([*_kb_save(), _say("Saved.")], new, start=2000))
+    _backfill(capsys, projects)
+    rows = _rows(home)
+    uuids = [json.loads(r["features"])["prompt_uuid"] for r in rows]
+    assert len(uuids) == len(set(uuids)) == 2
+    [shared] = [r for r in rows if json.loads(r["features"])["prompt_uuid"] == original[0]["uuid"]]
+    assert shared["label_command"] == 1
+    assert "more answer" in shared["summary"]  # the longest version of the step
+    out = _backfill(capsys, projects)
+    assert "inserted 0" in out and "updated 0" in out
+
+
+@pytest.mark.parametrize("case", ["later-cwd", "relative-search"])
+def test_backfill_a_step_is_private_when_any_cwd_is_private(home, projects, capsys, monkeypatch, case):
+    # the vaults must be outside the current home: the backfill skips a session in the current home
+    (home / "h").mkdir()
+    config = (home / "config.toml").read_text().replace('"vaults"', f'"{home / "vaults"}"')
+    (home / "h" / "config.toml").write_text(config.replace('"data"', f'"{home / "data"}"'))
+    monkeypatch.setenv("RAGNAROK_HOME", str(home / "h"))
+    secret, work = home / "vaults" / "Work" / "Secret", home / "vaults" / "Work"
+    if case == "later-cwd":
+        later = [{**_tool_use("Bash", command="cat plan.md"), "cwd": str(secret)}, {**_say("Read it."), "cwd": "/work"}]
+    else:  # a relative path resolves against the cwd of its own line, not against the cwd of the prompt
+        later = [{**_tool_use("Grep", pattern="plan", path="Secret"), "cwd": str(work)}, _say("Found it.")]
+    lines = [_user("look", origin="human"), _tool_use("Edit", file_path="/work/a.py"), _tool_result("Edit"), *later]
+    _transcript(projects / "proj-a" / "s-1.jsonl", _stamp(lines, cwd="/work"))
+    _backfill(capsys, projects)
+    [row] = _rows(home)
+    assert row["summary"] is None and len(row["summary_hash"]) == 64
+    features = json.loads(row["features"])
+    assert features["private"] is True and "files" not in features
+    assert "Secret" not in row["features"] and str(home) not in row["features"]
+
+
+def test_backfill_an_interruption_does_not_start_a_step(home, projects, capsys):
+    lines = [
+        _user("long work", origin="human"),
+        _tool_use("Bash", command="make"),
+        _tool_result("Bash"),
+        _user("[Request interrupted by user]"),
+        *_kb_save(),
+        _say("Saved."),
+    ]
+    _transcript(projects / "proj-a" / "s-1.jsonl", _stamp(lines))
+    _backfill(capsys, projects)
+    assert [(r["step_kind"], r["label_command"]) for r in _rows(home)] == [("tool", 1), ("kb-save", None)]
+
+
+def test_backfill_the_label_skips_a_local_command_with_no_reply(home, projects, capsys):
+    lines = [
+        _user("real work", origin="human"),
+        _say("Done."),
+        _user("<command-name>/mcp</command-name>", origin="human"),
+        _user("<local-command-stdout>ok</local-command-stdout>"),
+        *_kb_save(),
+        _say("Saved."),
+    ]
+    _transcript(projects / "proj-a" / "s-1.jsonl", _stamp(lines))
+    _backfill(capsys, projects)
+    rows = [(r["step_kind"], r["label_command"]) for r in _rows(home)]
+    assert rows == [("chat", 1), ("command", 0), ("kb-save", None)]
+
+
+def test_backfill_since_applies_to_the_file(home, projects, capsys):
+    # 2023-11-14T23:59:58Z: the prompt is before the date, the /kb-save after it
+    lines = [_user("late work", origin="human"), _say("Done."), *_kb_save(), _say("Saved.")]
+    _transcript(projects / "proj-a" / "s-1.jsonl", _stamp(lines, start=6398))
+    _transcript(projects / "proj-a" / "s-2.jsonl", _stamp(TWO_STEPS, session="s-2"))  # all before the date
+    out = _backfill(capsys, projects, "--since", "2023-11-15")
+    assert "files 1" in out
+    rows = _rows(home)
+    assert {r["session_id"] for r in rows} == {"s-1"}
+    assert [(r["step_kind"], r["label_command"]) for r in rows] == [("chat", 1), ("kb-save", None)]
+
+
+def test_backfill_refuses_a_bad_date(home, projects, capsys):
+    assert cli.main(["w0", "backfill", "--projects", str(projects), "--since", "2026-11-5"]) != 0
+    assert "2026-11-5" in capsys.readouterr().err
+    assert not (home / "data" / "core.db").exists() or _rows(home) == []
+
+
+def test_backfill_replaces_the_rows_that_w0_score_wrote(home, monkeypatch, projects, capsys, tmp_path):
+    lines = _stamp([_user("work", origin="human"), _say("Done."), *_kb_save(), _say("Saved.")])
+    partial = _transcript(tmp_path / "partial.jsonl", lines[:2])
+    _score(home, monkeypatch, partial, session="s-1")
+    _score(home, monkeypatch, partial, session="s-other")  # a second row of the same prompt uuid
+    assert len(_rows(home)) == 2
+    _transcript(projects / "proj-a" / "s-1.jsonl", lines)
+    _backfill(capsys, projects)
+    rows = _rows(home)
+    work = [r for r in rows if json.loads(r["features"])["prompt_uuid"] == lines[0]["uuid"]]
+    assert len(work) == 1 and len(rows) == 2
+    assert work[0]["created"] == time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(1_700_001_000))
+    assert work[0]["label_command"] == 1
+
+
+def test_backfill_skips_a_session_that_moves_into_a_listed_home(home, projects, capsys, tmp_path):
+    base = tmp_path / "baseline"
+    base.mkdir()
+    cfg = home / "config.toml"
+    cfg.write_text(cfg.read_text().replace("[w0]\n", f'[w0]\nskip_homes = ["{base}"]\n'))
+    lines = _stamp(TWO_STEPS, cwd="/work")
+    lines[4]["cwd"] = lines[5]["cwd"] = str(base)  # the second step works in the listed home
+    _transcript(projects / "proj-a" / "s-1.jsonl", lines)
+    out = _backfill(capsys, projects)
+    assert "skipped 1" in out and _rows(home) == []
+
+
+def test_the_current_home_is_skipped_only_with_ragnarok_home(tmp_path, monkeypatch):
+    from ragnarok.config import Config, W0Config, home_dir
+
+    cfg = Config(root=tmp_path, index_path=tmp_path / "i.db", w0=W0Config(skip_homes=[str(tmp_path / "b")]))
+    monkeypatch.delenv("RAGNAROK_HOME", raising=False)
+    assert w0.skip_homes(cfg) == [tmp_path.resolve() / "b"]
+    monkeypatch.setenv("RAGNAROK_HOME", str(tmp_path / "h"))
+    assert w0.skip_homes(cfg) == [home_dir(), tmp_path.resolve() / "b"]
+
+
+def test_backfill_counts_only_a_committed_file(home, projects, capsys, monkeypatch):
+    _transcript(projects / "proj-a" / "s-1.jsonl", _stamp(TWO_STEPS))
+    real, calls = w0.make_row, []
+
+    def fail_second(*a, **k):
+        calls.append(1)
+        if len(calls) == 2:
+            raise ValueError("boom")
+        return real(*a, **k)
+
+    monkeypatch.setattr(w0, "make_row", fail_second)
+    out = _backfill(capsys, projects)
+    assert "steps 0" in out and "inserted 0" in out and _rows(home) == []

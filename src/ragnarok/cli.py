@@ -70,7 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     wp.add_argument("action", choices=["score", "import", "backfill"], help="score: read the Stop hook JSON on stdin")
     wp.add_argument("--from", dest="source", type=Path, help="import: another core file")
     wp.add_argument("--projects", type=Path, default=Path("~/.claude/projects"), help="backfill: transcript folders")
-    wp.add_argument("--since", help="backfill: only steps from this date (YYYY-MM-DD)")
+    wp.add_argument("--since", help="backfill: only files with a line from this date (YYYY-MM-DD)")
     parsers["backup"].add_argument("--to", type=Path, help="the copy (default <data_dir>/backups/core-<UTC time>.db)")
     parsers["index"].add_argument("--min-words", type=int, help="build a separate index with this minimum chunk size")
     parsers["index"].add_argument(
@@ -224,7 +224,16 @@ def cmd_w0(cfg, args) -> int:
         print(f"imported {w0.import_steps(cfg, args.source)} w0 steps")
         return 0
     if args.action == "backfill":
-        c = w0.backfill(cfg, args.projects, args.since)
+        since = None
+        if args.since:
+            from datetime import date
+
+            try:
+                since = date.fromisoformat(args.since).isoformat()
+            except ValueError:
+                print(f"--since {args.since} is not a date. Give it as YYYY-MM-DD.", file=sys.stderr)
+                return 1
+        c = w0.backfill(cfg, args.projects, since)
         print(", ".join(f"{k} {v}" for k, v in c.items()))
         return 0
     try:
