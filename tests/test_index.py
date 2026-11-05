@@ -477,9 +477,10 @@ def test_doc_columns_from_frontmatter(cfg):
         " superseded_by_text, as_of, review_by, status, type"
     )
     row = conn.execute(f"SELECT {columns} FROM doc WHERE path = 'Home/Heating/how-to-bleed.md'").fetchone()
+    # no entity document exists, so the subject, the owner and the successor stay null, and so does the key
     assert row == (
         "state", "files", "Home", None, "team-house", None, "Bleed a radiator",
-        "Home|how-to|radiator r1|bleed a radiator", 1, None, "how-to-bleed-v2", "2026-03-01", "2026-09-01",
+        None, 1, None, "how-to-bleed-v2", "2026-03-01", "2026-09-01",
         "superseded", "how-to",
     )  # fmt: skip
     doc_id = conn.execute("SELECT id FROM doc WHERE path = 'Home/Heating/how-to-bleed.md'").fetchone()[0]

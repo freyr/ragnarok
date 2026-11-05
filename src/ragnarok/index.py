@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import kb
 from .config import Config, rules_hash
 from .embed import input_hash
 from .metadata import iter_notes, read_note, resolve
@@ -130,6 +131,7 @@ CREATE TABLE IF NOT EXISTS main.violation (
     found_at TEXT NOT NULL
 );
 """
+DERIVED_SCHEMA += kb.KB_SCHEMA
 
 # index.db: no foreign key or trigger crosses the two files, so unit.doc_id is a plain value
 INDEX_SCHEMA = """
@@ -272,6 +274,7 @@ def connect(cfg: Config) -> sqlite3.Connection:
         conn.executemany("INSERT INTO main.meta (key, value) VALUES (?, ?)", rows)
     if not stored_index:
         conn.executemany("INSERT INTO idx.meta (key, value) VALUES (?, ?)", list(index.items()))
+    kb.write_vocabulary(conn, cfg)
     conn.commit()
     return conn
 
@@ -390,8 +393,33 @@ def _frontmatter_id(fm: dict) -> str | None:
     return str(value).strip() or None
 
 
+def _declared_id(fm: dict, kbdoc: kb.KbDoc) -> str | None:
+    """The doc ID that the frontmatter declares: its `id`, and `<id>~doc` for an entity document."""
+    fid = _frontmatter_id(fm)
+    return fid + kb.DOC_SUFFIX if fid is not None and kbdoc.entity else fid
+
+
+def _note_id(p: _Pending) -> str:
+    """The provisional doc ID of the note."""
+    return provisional_id(p.rel) + (kb.DOC_SUFFIX if p.kbdoc.entity else "")
+
+
+def _holder(conn: sqlite3.Connection, doc_id: str, entity: bool) -> str | None:
+    """The path of the doc that holds the doc ID, or the entity ID of an entity document, as a node."""
+    ids = [doc_id, kb.entity_id_of(doc_id)] if entity else [doc_id]
+    for node_id in ids:
+        row = conn.execute(
+            "SELECT path FROM doc WHERE id = ?"
+            " UNION ALL SELECT d.path FROM entity e JOIN doc d ON d.id = e.doc_id WHERE e.id = ?",
+            (node_id, node_id),
+        ).fetchone()
+        if row is not None:
+            return row[0]
+    return None
+
+
 def _delete_note(conn: sqlite3.Connection, path: str) -> None:
-    """Delete the doc at the path, with its node, units, links and Jira keys."""
+    """Delete the doc at the path, with its node, units, links and Jira keys, and its entity rows."""
     row = conn.execute("SELECT id FROM doc WHERE path = ?", (path,)).fetchone()
     if row is None:
         return
@@ -399,6 +427,7 @@ def _delete_note(conn: sqlite3.Connection, path: str) -> None:
     # the foreign key and the trigger of idx.unit delete the vectors and the FTS rows
     conn.execute("DELETE FROM unit WHERE doc_id = ?", (doc_id,))
     conn.execute("UPDATE link SET to_node = NULL WHERE to_node = ?", (doc_id,))
+    kb.delete(conn, doc_id)
     # the foreign keys delete the doc, its links and its Jira keys
     conn.execute("DELETE FROM node WHERE id = ?", (doc_id,))
 
@@ -432,14 +461,18 @@ class _Pending:
     meta: object
     chunks: list
     links: list[str]
+    kbdoc: kb.KbDoc
     moved: bool = False
     rederived: bool = False
 
 
-def _same(cfg: Config, conn: sqlite3.Connection, doc_id: str, m, chunks) -> bool:
-    """True when the index already holds this metadata and these units for the note."""
+def _same(cfg: Config, conn: sqlite3.Connection, doc_id: str, m, chunks, kbdoc: kb.KbDoc) -> bool:
+    """True when the index already holds this metadata, these units and these entity rows for the note.
+
+    It compares only the values from the file: `resolve_refs()` writes the resolved values and the identity key.
+    """
     row = conn.execute(
-        "SELECT title, project, area, type, status, sensitivity, description, class, task, identity_key, canonical,"
+        "SELECT title, project, area, type, status, sensitivity, description, class, task, canonical,"
         " owner_text, superseded_by_text, as_of, review_by FROM doc WHERE id = ?",
         (doc_id,),
     ).fetchone()
@@ -447,7 +480,6 @@ def _same(cfg: Config, conn: sqlite3.Connection, doc_id: str, m, chunks) -> bool
     extra = (
         m.class_,
         m.task,
-        m.identity_key,
         int(m.canonical),
         m.owner_text,
         m.superseded_by_text,
@@ -464,7 +496,9 @@ def _same(cfg: Config, conn: sqlite3.Connection, doc_id: str, m, chunks) -> bool
         return False
     jira = [k for (k,) in conn.execute("SELECT key FROM jira WHERE doc_id = ? ORDER BY key", (doc_id,))]
     stored = [h for (h,) in conn.execute("SELECT text_hash FROM unit WHERE doc_id = ? ORDER BY ord", (doc_id,))]
-    return jira == m.jira and stored == [input_hash(cfg, c.heading, c.text) for c in chunks]
+    if jira != m.jira or stored != [input_hash(cfg, c.heading, c.text) for c in chunks]:
+        return False
+    return kb.same(conn, doc_id, kbdoc)
 
 
 def update(
@@ -534,11 +568,12 @@ def update(
             fm, body = read_note(cfg.note_path(rel))
             meta = resolve(cfg, rel, fm, body)
             chunks, _ = chunk_note(cfg, meta, body)
-            if _same(cfg, conn, old[0], meta, chunks):
+            kbdoc = kb.parse(cfg, meta, fm)
+            if _same(cfg, conn, old[0], meta, chunks, kbdoc):
                 continue
             links = sorted({m.group(1).strip() for m in WIKI_LINK.finditer(body)})
-            fid = _frontmatter_id(fm)
-            pending.append(_Pending(rel, rel, fid, mtime_ns, size, h, meta, chunks, links, rederived=True))
+            fid = _declared_id(fm, kbdoc)
+            pending.append(_Pending(rel, rel, fid, mtime_ns, size, h, meta, chunks, links, kbdoc, rederived=True))
         else:
             # a re-derived note does not count toward the limit, also while it waits in pending
             written = result.added + result.changed + result.moved + sum(not p.rederived for p in pending)
@@ -556,8 +591,11 @@ def update(
             chunks, redactions = chunk_note(cfg, meta, body)
             result.redactions += redactions
             links = sorted({m.group(1).strip() for m in WIKI_LINK.finditer(body)})
-            fid = _frontmatter_id(fm)
-            pending.append(_Pending(rel, old_path, fid, mtime_ns, size, h, meta, chunks, links, moved=bool(moved_from)))
+            kbdoc = kb.parse(cfg, meta, fm)
+            fid = _declared_id(fm, kbdoc)
+            pending.append(
+                _Pending(rel, old_path, fid, mtime_ns, size, h, meta, chunks, links, kbdoc, moved=bool(moved_from))
+            )
         if len(pending) >= GROUP:
             _write(cfg, conn, embedder, pending, result, on_disk.keys(), contested)
             conn.commit()
@@ -571,8 +609,9 @@ def update(
         result.removed += 1
     claimed = _claim_free_ids(conn)
     _warn_duplicate_ids(conn, contested, result)
-    if result.added or result.changed or result.moved or result.removed or result.rederived or claimed:
+    if result.added or result.changed or result.moved or result.removed or result.rederived or claimed or rederive:
         resolve_links(conn)
+        kb.resolve_refs(conn)
     if rederive:
         conn.execute("INSERT OR REPLACE INTO main.meta (key, value) VALUES ('rules_hash', ?)", (rules,))
     conn.commit()
@@ -591,13 +630,12 @@ def _claim_id(conn: sqlite3.Connection, p: _Pending, present, contested: list[st
     in the update: this note gets its provisional ID for now, and `_claim_free_ids()` tries again at the end.
     """
     if p.frontmatter_id is None:
-        return provisional_id(p.rel), True
-    row = conn.execute("SELECT path FROM doc WHERE id = ?", (p.frontmatter_id,)).fetchone()
-    if row is not None:
-        if row[0] in present:
+        return _note_id(p), True
+    while (path := _holder(conn, p.frontmatter_id, p.kbdoc.entity)) is not None:
+        if path in present:
             contested.append(p.rel)
-            return provisional_id(p.rel), True
-        _delete_note(conn, row[0])
+            return _note_id(p), True
+        _delete_note(conn, path)
     return p.frontmatter_id, False
 
 
@@ -607,20 +645,27 @@ def _claim_free_ids(conn: sqlite3.Connection) -> int:
     When two docs declare the same free ID, the first path gets it.
     """
     rows = conn.execute(
-        "SELECT d.id, d.declared_id FROM doc d JOIN node n ON n.id = d.id"
-        " WHERE n.provisional = 1 AND d.declared_id IS NOT NULL"
-        " AND d.declared_id NOT IN (SELECT id FROM doc) ORDER BY d.path"
+        "SELECT d.id, d.declared_id, e.id IS NOT NULL FROM doc d JOIN node n ON n.id = d.id"
+        " LEFT JOIN entity e ON e.doc_id = d.id"
+        " WHERE n.provisional = 1 AND d.declared_id IS NOT NULL ORDER BY d.path"
     ).fetchall()
     taken: set[str] = set()
-    for old, new in rows:
-        if new in taken:
+    for old, new, entity in rows:
+        if new in taken or _holder(conn, new, bool(entity)) is not None:
             continue
         taken.add(new)
-        # ON UPDATE CASCADE moves doc.id, link.from_doc and jira.doc_id; no foreign key reaches index.db
+        # ON UPDATE CASCADE moves doc.id, link.from_doc, jira.doc_id and entity.doc_id; no foreign key reaches
+        # index.db or the rows that refer to a node by value
         conn.execute("UPDATE node SET id = ?, provisional = 0 WHERE id = ?", (new, old))
         conn.execute("UPDATE unit SET doc_id = ? WHERE doc_id = ?", (new, old))
         conn.execute("UPDATE unit_emb SET doc_id = ? WHERE doc_id = ?", (new, old))
         conn.execute("UPDATE link SET to_node = ? WHERE to_node = ?", (new, old))
+        kb.rename(conn, old, new)
+        if entity:
+            # the entity node moves its entity row and, by the cascade, its aliases
+            old_entity, new_entity = kb.entity_id_of(old), kb.entity_id_of(new)
+            conn.execute("UPDATE node SET id = ?, provisional = 0 WHERE id = ?", (new_entity, old_entity))
+            kb.rename(conn, old_entity, new_entity)
     return len(taken)
 
 
@@ -758,6 +803,7 @@ def _write(
             [(doc_id, i, t) for i, t in enumerate(p.links)],
         )
         conn.executemany("INSERT INTO jira (key, doc_id) VALUES (?, ?)", [(k, doc_id) for k in m.jira])
+        kb.write(conn, doc_id, p.kbdoc)
 
 
 def reconcile(cfg: Config, conn: sqlite3.Connection, embedder, result: UpdateResult | None = None) -> int:
@@ -804,44 +850,11 @@ def reconcile(cfg: Config, conn: sqlite3.Connection, embedder, result: UpdateRes
     return len(todo)
 
 
-def _link_key(path: str) -> str:
-    path = path.lower()
-    return path[:-3] if path.endswith(".md") else path
-
-
-def _common_folders(folders: list[str], path: str) -> int:
-    """The number of leading folders that the list and the path share."""
-    count = 0
-    for a, b in zip(folders, path.split("/")[:-1], strict=False):
-        if a != b:
-            break
-        count += 1
-    return count
-
-
 def resolve_links(conn: sqlite3.Connection) -> None:
-    """Resolve each wiki-link target to a doc node.
-
-    Rank the candidates by the same vault as the note with the link, then the most folders in common with that
-    note, then the shortest path.
-    """
-    docs = [(doc_id, vault, _link_key(path)) for doc_id, vault, path in conn.execute("SELECT id, vault, path FROM doc")]
-    by_name: dict[str, list[tuple[str, str, str]]] = {}
-    for n in docs:
-        by_name.setdefault(n[2].rsplit("/", 1)[-1], []).append(n)
-    vault_of = {doc_id: vault for doc_id, vault, _ in docs}
-    path_of = {doc_id: path for doc_id, _, path in docs}
-    updates = []
-    for from_doc, ord_, target in conn.execute("SELECT from_doc, ord, target_text FROM link").fetchall():
-        key = _link_key(target).strip("/")
-        candidates = [n for n in by_name.get(key.rsplit("/", 1)[-1], []) if n[2].endswith(key)]
-        if not candidates:
-            to_node = None
-        else:
-            home = vault_of.get(from_doc)
-            folders = path_of.get(from_doc, "").split("/")[:-1]
-            to_node = min(candidates, key=lambda n: (n[1] != home, -_common_folders(folders, n[2]), len(n[2])))[0]
-        updates.append((to_node, from_doc, ord_))
+    """Resolve each wiki-link target to a doc node by its path (see `kb.PathIndex` for the ranking)."""
+    paths = kb.PathIndex(conn)
+    links = conn.execute("SELECT from_doc, ord, target_text FROM link").fetchall()
+    updates = [(paths.find(target, from_doc), from_doc, ord_) for from_doc, ord_, target in links]
     conn.executemany("UPDATE link SET to_node = ? WHERE from_doc = ? AND ord = ?", updates)
 
 
