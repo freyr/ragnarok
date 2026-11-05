@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     xp = parsers["explain"]
     xp.add_argument("trace_id")
     xp.add_argument("--gold", action="append", default=[], help="mark this note path as gold (repeatable)")
-    xp.add_argument("--json", action="store_true", help="print the raw record")
+    xp.add_argument("--json", action="store_true", help="print the raw record (--gold applies to the table only)")
     ep = parsers["eval"]
     ep.add_argument("kind", choices=["mechanical", "pool", "agent", "prepare", "mirror-hash"])
     ep.add_argument("--set", action="append", dest="set_names", help="agent: a set name (default draft-long and hard)")

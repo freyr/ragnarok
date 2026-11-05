@@ -281,8 +281,8 @@ def test_explain_prints_one_row_for_each_candidate_and_marks_gold(tools, monkeyp
         ln[2:].split()[0]: ln for ln in out.splitlines() if ln[2:].split()[:1] and ln[2:].split()[0].endswith(".md")
     }
     assert set(rows) == {c["path"] for c in line["ragnarok.candidates"]}
-    assert rows[gold].startswith("* ") and "prefilter" in out
-    assert rows[other].startswith("* ")
+    assert rows[gold].startswith("* ") and "prefilter" in rows[gold]
+    assert rows[other].startswith("* ") and "prefilter" not in rows[other]
     plain = [p for p in rows if p not in (gold, other)]
     assert plain and all(rows[p].startswith("  ") for p in plain)
 
@@ -297,3 +297,43 @@ def test_explain_of_an_unknown_id_exits_non_zero(tools, monkeypatch, capsys):
     tools.search("boiler")
     assert cli.main(["explain", "nope"]) == 1
     assert "nope" in capsys.readouterr().err
+
+
+def test_explain_reports_a_gold_path_that_has_no_row(tools, monkeypatch, capsys):
+    from ragnarok import cli
+
+    monkeypatch.setattr(cli, "load_config", lambda *a, **k: tools.cfg)
+    result = tools.search("boiler")
+    assert cli.main(["explain", result["trace_id"], "--gold", "Nowhere/missing.md"]) == 0
+    assert "Nowhere/missing.md | not in the trace" in capsys.readouterr().out
+
+
+def _write(folder, name, *lines):
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / name).write_bytes(b"\n".join(lines) + b"\n")
+
+
+def test_find_line_reads_the_newest_file_first(tools):
+    from ragnarok.trace import find_line
+
+    folder = trace_dir(tools.cfg)
+    _write(folder, "2000-01-01.jsonl", b'{"trace_id": "dup", "from": "old"}')
+    _write(folder, "2000-01-02.jsonl", b'{"trace_id": "dup", "from": "new"}')
+    assert find_line(tools.cfg, "dup")["from"] == "new"
+
+
+def test_find_line_skips_a_damaged_line_and_a_torn_multibyte_line(tools):
+    from ragnarok.trace import find_line
+
+    folder = trace_dir(tools.cfg)
+    _write(folder, "2000-01-01.jsonl", b'{"trace_id": "old"}')
+    _write(
+        folder,
+        "2000-01-02.jsonl",
+        b"null",
+        b"42",
+        b'{"trace_id": "x", "q": "broken',
+        b'{"trace_id": "c", "q": "\xc5',
+    )
+    assert find_line(tools.cfg, "old") == {"trace_id": "old"}
+    assert find_line(tools.cfg, "missing") is None

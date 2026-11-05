@@ -160,12 +160,12 @@ class Trace:
 def find_line(cfg: Config, trace_id: str) -> dict | None:
     """The record with this trace_id. The files are read newest first."""
     for path in sorted(trace_dir(cfg).glob("*.jsonl"), reverse=True):
-        for text in reversed(path.read_text(encoding="utf-8").splitlines()):
+        for text in reversed(path.read_text(encoding="utf-8", errors="replace").splitlines()):
             try:
                 record = json.loads(text)
             except ValueError:
                 continue
-            if record.get("trace_id") == trace_id:
+            if isinstance(record, dict) and record.get("trace_id") == trace_id:
                 return record
     return None
 
@@ -200,5 +200,7 @@ def render_explain(record: dict, extra_gold=()) -> str:
         if "prefilter_dense_rank" in c:
             row += f" | prefilter dense={_cell(c['prefilter_dense_rank'])} fts={_cell(c['prefilter_fts_rank'])}"
         out.append(row)
+    known = {c["path"] for c in record.get("ragnarok.candidates") or []}
+    out += [f"* {p} | not in the trace (outside the top {TOP} of each pool)" for p in extra_gold if p not in known]
     out += ["", "* = gold"]
     return "\n".join(out)
