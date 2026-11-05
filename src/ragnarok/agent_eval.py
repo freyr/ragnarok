@@ -66,8 +66,8 @@ JSON object and nothing after it:
 Use the route "kb" when the notes hold the answer, "skill" when the answer needs a live value from a system \
 of record, and "none" when no note answers. List at most 10 notes, the best first."""
 
-# a runner gives the raw stdout of `claude -p ... --output-format stream-json --verbose`
-Runner = Callable[[list[str], Path, dict], str]
+# a runner gives the raw stdout of `claude -p ... --output-format stream-json --verbose`, its stderr and its exit code
+Runner = Callable[[list[str], Path, dict], tuple[str, str, int]]
 
 
 def eval_home(cfg: Config) -> Path:
@@ -217,9 +217,9 @@ def command(
     return cmd + ["--tools", "Read", "--mcp-config", str(mcp_json), "--allowedTools", f"Read,{tools}"]
 
 
-def run_claude(cmd: list[str], cwd: Path, env: dict) -> str:
+def run_claude(cmd: list[str], cwd: Path, env: dict) -> tuple[str, str, int]:
     out = subprocess.run(cmd, cwd=cwd, env={**os.environ, **env}, capture_output=True, text=True, timeout=900)
-    return out.stdout
+    return out.stdout, out.stderr, out.returncode
 
 
 TRACE_ID = re.compile(r'"trace_id"\s*:\s*"([^"]+)"')
@@ -319,8 +319,10 @@ def run_all(
 ) -> dict[str, dict[str, dict[str, list[dict]]]]:
     """Run each question runs times with each agent. Give results[set][question id][agent] = one dict for each run.
 
-    The raw lines of each run are in <out_dir>/<set>/<id>.<agent>.<run>.jsonl. A file that exists is used
-    again, so a stopped run continues. Run number n of one agent pairs with run number n of the other.
+    The raw lines of each run are in <out_dir>/<set>/<id>.<agent>.<run>.jsonl. A run with a stderr or a
+    non-zero exit code also has <id>.<agent>.<run>.stderr: the exit code on the first line, then the stderr. A
+    file that exists is used again, so a stopped run continues. Run number n of one agent pairs with run
+    number n of the other.
     """
     if "mcp-base" in agents and baseline is None:
         raise ValueError("the agent mcp-base needs baseline_checkout and baseline_home in config.toml")
@@ -330,16 +332,19 @@ def run_all(
     for name, questions in sets.items():
         for q in questions:
             for agent in agents:
+                # one file for each question and agent, written before the pool starts: the runs only read it
+                mcp_json = None if agent == "grep" else mcp_config(cfg, agent, name, q["id"], gold_paths(q), baseline)
                 for n in range(1, runs + 1):
-                    jobs.append((name, q, agent, n, out_dir / name / f"{q['id']}.{agent}.{n}.jsonl"))
+                    jobs.append((name, q, agent, n, out_dir / name / f"{q['id']}.{agent}.{n}.jsonl", mcp_json))
 
     def one(job):
-        name, q, agent, n, path = job
+        name, q, agent, n, path, mcp_json = job
         if not path.exists():
-            mcp_json = None if agent == "grep" else mcp_config(cfg, agent, name, q["id"], gold_paths(q), baseline)
             cmd = command(agent, q["question"], calls, model, mcp_json, cfg.vaults, "class" in q)
-            raw = runner(cmd, mirror, {})
+            raw, stderr, code = runner(cmd, mirror, {})
             path.parent.mkdir(parents=True, exist_ok=True)
+            if stderr or code:
+                path.with_suffix(".stderr").write_text(f"{code}\n{stderr}")
             path.write_text(raw)
         run = parse_stream(path.read_text())
         run.update(parse_answer(run.pop("answer_text"), mirror))
@@ -363,6 +368,15 @@ def search_latency(log: Path) -> list[int]:
 def _interval(values: list[float]) -> str:
     mean, lo, hi = bootstrap(values, [0.0] * len(values))
     return f"{mean:.2f} [{lo:.2f}, {hi:.2f}]"
+
+
+def _mean_rows(rows: list[dict]) -> dict:
+    """One row from the rows of the runs of a question: the mean of each number, the first row for the rest."""
+    out = dict(rows[0])
+    for key, value in rows[0].items():
+        if isinstance(value, float):
+            out[key] = float(np.mean([row[key] for row in rows]))
+    return out
 
 
 def _diff(rows: list[dict], measure: str, test: str, ref: str) -> str:
@@ -389,12 +403,16 @@ def report(
             r = results.get(name, {}).get(q["id"])
             if not r:
                 continue
+            # the unit is the question: score each paired run, then take the mean of each measure over the runs
+            scores = []
             for n in range(min(len(r[a]) for a in agents)):
                 ranked = {a: r[a][n]["notes"] for a in agents}
                 if "subtype" in q:
-                    hard.append(score_hard(q, ranked, agents))
+                    scores.append(score_hard(q, ranked, agents))
                 elif s := score_draft(q, ranked, known, agents):
-                    draft.append(s)
+                    scores.append(s)
+            if scores:
+                (hard if "subtype" in q else draft).append(_mean_rows(scores))
     cont = [r for r in hard if r["type"] == "continuation"]
     cat = [r for r in hard if r["type"] == "category"]
     synth = [r for r in draft if str(r["type"]).startswith("synthesis")]

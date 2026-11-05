@@ -92,13 +92,28 @@ def test_stream_json_gives_the_tool_sequence_and_trace_ids():
     assert agent_eval.parse_stream("not json\n")["error"] is True
 
 
-def fake_run(vault, tmp_path, monkeypatch, questions, agents, runs=1, baseline=None, seen=None, out=None):
+def fake_run(
+    vault,
+    tmp_path,
+    monkeypatch,
+    questions,
+    agents,
+    runs=1,
+    baseline=None,
+    seen=None,
+    out=None,
+    answers=None,
+    failure=None,
+):
     monkeypatch.setattr(agent_eval, "prepare", lambda cfg, **kw: cfg)
     seen = [] if seen is None else seen
 
     def runner(cmd, cwd, env):
         seen.append(cmd)
-        return stream(["Home/Heating/notes/boiler.md"], trace_id=f"tr-{len(seen)}")
+        if failure:
+            return failure
+        notes = answers[len(seen) - 1] if answers else ["Home/Heating/notes/boiler.md"]
+        return stream(notes, trace_id=f"tr-{len(seen)}"), "", 0
 
     sets = {"s": questions}
     results = agent_eval.run_all(
@@ -127,16 +142,20 @@ def test_two_runs_are_kept_and_paired(vault, tmp_path, monkeypatch):
     out = tmp_path / "out"
     base = (tmp_path / "base-checkout", tmp_path / "base-home")
     agents = ["mcp-kb", "mcp-base"]
-    sets, results, seen = fake_run(vault, tmp_path, monkeypatch, questions, agents, 2, base, out=out)
+    other = ["Home/Bike/shortlist.md"]  # the second run of mcp-kb misses the gold note
+    answers = [["Home/Heating/notes/boiler.md"], other, ["Home/Heating/notes/boiler.md"]] * 2
+    sets, results, seen = fake_run(vault, tmp_path, monkeypatch, questions, agents, 2, base, out=out, answers=answers)
     assert len(seen) == 4
     names = sorted(p.name for p in (out / "s").glob("*.jsonl"))
     assert names == ["q1.mcp-base.1.jsonl", "q1.mcp-base.2.jsonl", "q1.mcp-kb.1.jsonl", "q1.mcp-kb.2.jsonl"]
     assert (out / "s" / "q1.mcp-kb.2.jsonl").read_text().startswith('{"type": "system"')
     runs = results["s"]["q1"]["mcp-kb"]
-    assert len(runs) == 2 and all(r["notes"] == ["Home/Heating/notes/boiler.md"] for r in runs)
+    assert [r["notes"] for r in runs] == [["Home/Heating/notes/boiler.md"], other]
     assert all(r["trace_ids"] and r["tools"] for r in runs)
     lines = agent_eval.report(vault, sets, results, [], agents)
-    assert any(line.startswith("| Retrieval, draft set (n=2)") for line in lines)  # one pair for each run
+    # the unit is the question: one row, the mean of its two runs (recall 1 and 0 for mcp-kb, 1 and 1 for mcp-base)
+    row = next(line for line in lines if line.startswith("| Retrieval, draft set"))
+    assert row.startswith("| Retrieval, draft set (n=1)") and "mcp-base 1.00, mcp-kb 0.50" in row
     fake_run(vault, tmp_path, monkeypatch, questions, agents, 2, base, seen=seen, out=out)
     assert len(seen) == 4  # the result files are used again
 
@@ -176,3 +195,23 @@ def test_prepare_adds_generated_distractors(vault, monkeypatch):
     (ecfg.root / "Home/Heating/old-boiler.md").unlink()
     agent_eval.prepare(vault, reuse_mirror=True)  # an existing mirror gets nothing
     assert not (ecfg.root / "Home/Heating/old-boiler.md").exists()
+
+
+def test_a_failed_run_keeps_its_stderr_and_exit_code(vault, tmp_path, monkeypatch):
+    questions = [{"id": "q1", "type": "fact", "question": "boiler?", "expected": []}]
+    out = tmp_path / "out"
+    fake_run(vault, tmp_path, monkeypatch, questions, ["mcp-kb"], 1, out=out, failure=("", "login expired\n", 3))
+    assert (out / "s" / "q1.mcp-kb.1.stderr").read_text() == "3\nlogin expired\n"
+
+
+def test_each_mcp_config_is_written_once_before_the_runs(vault, tmp_path, monkeypatch):
+    questions = [{"id": "q1", "type": "fact", "question": "boiler?", "expected": []}]
+    written, seen, real = [], [], agent_eval.mcp_config
+
+    def spy(cfg, agent, name, qid, gold, baseline):
+        written.append((agent, qid, len(seen)))
+        return real(cfg, agent, name, qid, gold, baseline)
+
+    monkeypatch.setattr(agent_eval, "mcp_config", spy)
+    fake_run(vault, tmp_path, monkeypatch, questions, ["mcp-kb"], 2, seen=seen)
+    assert written == [("mcp-kb", "q1", 0)]  # once, and before the first run started
