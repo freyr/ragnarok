@@ -97,6 +97,7 @@ def test_find_entity_by_alias_first(tools):
     assert hit["aliases"] == ["Billing System", "Billing", "Core"]
     assert {c["aspect"]: c["path"] for c in hit["canonical"]}["deploy"] == "Kb/howto/how-to-deploy-billing.md"
     assert hit["score"] > 0
+    assert hit["path"] == "Kb/entities/Billing System.md"
     # no alias: the words of the name
     by_name = tools.find_entity("billing invoice")
     assert by_name["results"][0]["matched_by"] == "name"
@@ -127,6 +128,7 @@ def test_get_entity_gives_a_live_pointer_and_no_value(tools):
     assert "LEAKED-VALUE" not in json.dumps(result)
     assert [f["attribute"] for f in result["facts"]] == ["aws_account"]
     assert (result["id"], result["kind"], result["name"]) == ("env-stage", "environment", "Stage")
+    assert result["path"] == "Kb/entities/Stage.md"
     assert result["relations"] == {"out": {"partOf": 1}, "in": {}}
     billing = tools.get_entity("sys-billing")
     assert billing["relations"] == {"out": {}, "in": {"partOf": 1}}
@@ -181,6 +183,18 @@ def test_private_entity_is_left_out(tools):
     assert "ent-secret" not in ids(tools.find_entity("hush"))
     with pytest.raises(LookupError):
         tools.get_entity("ent-secret")
+
+
+def test_a_private_entity_path_is_not_in_the_entity_results(tools):
+    tools.cfg.private_patterns.append("Kb/private/*")
+    put(tools.cfg, "Kb/private/Secret.md", "---\nid: ent-secret\ntype: entity\nkind: system\nsensitivity: private\n"
+        "aliases: [Hush, Core]\n---\n# Secret\nA private system.\n")  # fmt: skip
+    for result in (tools.find_entity("hush"), tools.find_entity("core"), tools.find_entity("secret system")):
+        assert "Kb/private" not in json.dumps(result)
+    assert "Kb/private" not in json.dumps(tools.get_entity("sys-billing"))
+    tools.cfg.allow_private = True
+    assert tools.find_entity("hush")["results"][0]["path"] == "Kb/private/Secret.md"
+    assert tools.get_entity("ent-secret")["path"] == "Kb/private/Secret.md"
 
 
 def fts_rows(conn):

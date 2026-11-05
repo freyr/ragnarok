@@ -808,7 +808,10 @@ def find(
     candidates = [{"id": i, "matched_by": matched_by, "score": round(score, 5)} for i, score in hits]
     results = []
     for hit in candidates:
-        kind_, name_, owner = conn.execute("SELECT kind, name, owner FROM entity WHERE id = ?", (hit["id"],)).fetchone()
+        kind_, name_, owner, path = conn.execute(
+            "SELECT e.kind, e.name, e.owner, d.path FROM entity e JOIN doc d ON d.id = e.doc_id WHERE e.id = ?",
+            (hit["id"],),
+        ).fetchone()
         aliases = conn.execute("SELECT alias FROM entity_alias WHERE entity_id = ? ORDER BY rowid", (hit["id"],))
         results.append(
             {
@@ -817,6 +820,7 @@ def find(
                 "name": name_,
                 "aliases": [a for (a,) in aliases],
                 "owner": owner,
+                "path": path,
                 "canonical": _canonical(conn, hit["id"], allow_private),
                 "matched_by": matched_by,
                 "score": hit["score"],
@@ -835,13 +839,14 @@ def selected(candidates: list[dict]) -> str | None:
 def get(conn: sqlite3.Connection, entity_id: str, as_of: str | None, allow_private: bool) -> dict:
     """The entity with its facts valid at `as_of`, its live pointers, canonical documents and relation counts."""
     row = conn.execute(
-        "SELECT e.kind, e.name, e.owner, e.status, e.as_of, e.review_by FROM entity e JOIN doc d ON d.id = e.doc_id"
+        "SELECT e.kind, e.name, e.owner, e.status, e.as_of, e.review_by, d.path FROM entity e"
+        " JOIN doc d ON d.id = e.doc_id"
         f" WHERE e.id = ?{_visible(allow_private)}",
         (entity_id,),
     ).fetchone()
     if row is None:
         raise LookupError(f"No entity with the id {entity_id!r}. Use an id from find_entity.")
-    kind, name, owner, status, entity_as_of, review_by = row
+    kind, name, owner, status, entity_as_of, review_by, path = row
     day = _iso_date(as_of) if as_of else date.today().isoformat()
     if day is None:
         raise ValueError(f"as_of must be an ISO date (YYYY-MM-DD), not {as_of!r}.")
@@ -886,6 +891,7 @@ def get(conn: sqlite3.Connection, entity_id: str, as_of: str | None, allow_priva
         "id": entity_id,
         "kind": kind,
         "name": name,
+        "path": path,
         "owner": owner,
         "status": status,
         "as_of": entity_as_of,
@@ -963,7 +969,7 @@ def related(
         raise ValueError(f"Unknown relation {relation!r}. The relation types are: {names}.")
     kind = kind.strip().lower() if kind else None
     valid = "(r.valid_from IS NULL OR r.valid_from <= :day) AND (r.valid_until IS NULL OR r.valid_until >= :day)"
-    params = {"start": entity_id, "depth": depth, "day": day}
+    params = {"start": entity_id, "depth": depth, "day": day, "all": int(allow_private)}
     if relation:
         params["rel"] = relation
 
@@ -1006,10 +1012,14 @@ def related(
                r.src, r.rel, r.dst, r.origin, r.confidence, r.valid_from,
                r.valid_until, r.source_doc,
                COALESCE(se.kind, 'doc'), COALESCE(se.name, sd.title), COALESCE(de.kind, 'doc'),
-               COALESCE(de.name, dd.title), b.reached
+               COALESCE(de.name, dd.title), b.reached,
+               CASE WHEN :all OR sp.sensitivity = 'normal' THEN sp.path END,
+               CASE WHEN :all OR dp.sensitivity = 'normal' THEN dp.path END
         FROM best b CROSS JOIN relation r ON r.id = b.id
         LEFT JOIN entity se ON se.id = r.src LEFT JOIN doc sd ON sd.id = r.src
         LEFT JOIN entity de ON de.id = r.dst LEFT JOIN doc dd ON dd.id = r.dst
+        LEFT JOIN doc sp ON sp.id = COALESCE(se.doc_id, sd.id)
+        LEFT JOIN doc dp ON dp.id = COALESCE(de.doc_id, dd.id)
         WHERE b.pos = 1 GROUP BY b.id, b.reached ORDER BY hops, r.src, r.rel, r.dst, b.id, b.reached""",
         params,
     ).fetchall()
@@ -1019,11 +1029,27 @@ def related(
         grouped.setdefault(row[0], []).append(row)
     edges, before, kept, removed, far_ends = [], [], [], {}, set()
     for group in grouped.values():
-        _, hops, ok, src, rel, dst, origin, confidence, valid_from, valid_until, source_doc, *names, _ = group[0]
+        (
+            _,
+            hops,
+            ok,
+            src,
+            rel,
+            dst,
+            origin,
+            confidence,
+            valid_from,
+            valid_until,
+            source_doc,
+            *names,
+            _,
+            src_path,
+            dst_path,
+        ) = group[0]
         edge = {
-            "source": {"id": src, "kind": names[0], "name": names[1]},
+            "source": {"id": src, "kind": names[0], "name": names[1], "path": src_path},
             "relation": rel,
-            "target": {"id": dst, "kind": names[2], "name": names[3]},
+            "target": {"id": dst, "kind": names[2], "name": names[3], "path": dst_path},
             "origin": origin,
             "confidence": confidence,
             "valid_from": valid_from,
@@ -1031,7 +1057,7 @@ def related(
             "source_doc": source_doc,
             "depth": hops,
         }
-        ends = [edge["target" if row[-1] == dst else "source"] for row in group]
+        ends = [edge["target" if row[-3] == dst else "source"] for row in group]
         match = [e for e in ends if not kind or e["kind"] == kind]
         removed_by = "as_of" if not ok else "kind" if not match else None
         short = {"src": src, "rel": rel, "dst": dst, "depth": hops}

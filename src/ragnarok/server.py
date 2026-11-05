@@ -276,7 +276,8 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
     def find_entity(name: str, kind: str | None = None, limit: int = 5, ctx: Context | None = None) -> dict:
         """Resolve a name to entity IDs: an exact alias first, then the words of the names, then the entity text.
 
-        Each entity has its id, kind, name, aliases, owner, canonical documents, how it matched (alias, name or text)
+        Cite the path of the entity that answers the request. Each entity has its id, kind, name, path (the entity
+        document), aliases, owner, canonical documents, how it matched (alias, name or text)
         and a score. An ambiguous alias gives all its entities. kind narrows the result. Only an alias match is
         exact: a name or text result is the nearest entity and does not prove that the named entity exists.
         """
@@ -309,7 +310,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
         entity is the source), in (the entity is the target: the clients of a feature) or both (each hop follows
         a relation out or in). relation names one
         relation type. kind keeps the edges whose far end has the kind. as_of (default today) drops an edge that is
-        not valid then, with each edge behind it. Each edge has its source and target (id, kind, name), relation,
+        not valid then, with each edge behind it. Each edge has its source and target (id, kind, name, path), relation,
         origin, confidence, validity, source_doc and depth. Only declared edges unless include_extracted is true.
         """
         return get().related(

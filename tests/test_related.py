@@ -65,8 +65,18 @@ def test_related_in_direction_gives_the_clients_of_a_feature(tools):
     assert far(result, "in") == [("client-acme", 1), ("client-beta", 1)]
     edge = next(e for e in result["edges"] if e["source"]["id"] == "client-acme")
     assert edge["relation"] == "requests"
-    assert edge["source"] == {"id": "client-acme", "kind": "client", "name": "Acme"}
-    assert edge["target"] == {"id": "feat-tiers", "kind": "feature", "name": "Loyalty Tiers"}
+    assert edge["source"] == {
+        "id": "client-acme",
+        "kind": "client",
+        "name": "Acme",
+        "path": "Kb/entities/Acme.md",
+    }
+    assert edge["target"] == {
+        "id": "feat-tiers",
+        "kind": "feature",
+        "name": "Loyalty Tiers",
+        "path": "Kb/entities/Loyalty Tiers.md",
+    }
     assert (edge["origin"], edge["confidence"], edge["valid_from"], edge["valid_until"]) == (
         "declared",
         None,
@@ -222,3 +232,22 @@ def test_related_both_at_depth_three_through_a_hub_is_fast(tools):
     result = tools.related("sys-core", direction="both", depth=3)
     assert time.perf_counter() - start < 0.15
     assert len(result["edges"]) > 1000
+
+
+def test_related_gives_no_path_of_a_private_document(tools):
+    tools.cfg.private_patterns.append("Kb/private/*")
+    path = tools.cfg.root / "Kb/private/Secret.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(entity("sys-secret", "Secret", "system", "sensitivity: private\ndependsOn: '[[Loyalty Tiers]]'\n"))
+    path = tools.cfg.root / "Kb/entities/Open.md"
+    path.write_text(entity("sys-open", "Open", "system", "dependsOn: '[[Secret]]'\n"))
+    update(tools.cfg, tools.conn, tools.embedder)
+    for result in (
+        tools.related("Open"),
+        tools.related("Loyalty Tiers", direction="in"),
+        tools.related("Loyalty Tiers", direction="both", depth=2),
+    ):
+        assert "Kb/private" not in str(result)
+    tools.cfg.allow_private = True
+    edge = tools.related("Open")["edges"][0]
+    assert edge["target"]["path"] == "Kb/private/Secret.md"
