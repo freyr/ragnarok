@@ -21,6 +21,7 @@ COMMANDS = {
     "cache": "Work with the embedding cache in core.db",
     "migrate": "Move a version 1 index into core.db and a new index.db, with no new embedding",
     "backup": "Copy core.db with the SQLite backup API",
+    "w0": "Write the W0 record of the last step of a Claude Code transcript (score), or copy records (import)",
     "init": "Set up this computer: config, Ollama, model, index and the MCP server in Claude Code",
     "doctor": "Check the six parts of the setup and print the fix for each failure",
 }
@@ -65,6 +66,9 @@ def build_parser() -> argparse.ArgumentParser:
     cp = parsers["cache"]
     cp.add_argument("action", choices=["import"])
     cp.add_argument("--from", dest="source", type=Path, required=True, help="a version 1 index file")
+    wp = parsers["w0"]
+    wp.add_argument("action", choices=["score", "import"], help="score: read the Stop hook JSON on stdin")
+    wp.add_argument("--from", dest="source", type=Path, help="import: another core file")
     parsers["backup"].add_argument("--to", type=Path, help="the copy (default <data_dir>/backups/core-<UTC time>.db)")
     parsers["index"].add_argument("--min-words", type=int, help="build a separate index with this minimum chunk size")
     parsers["index"].add_argument(
@@ -205,6 +209,22 @@ def cmd_backup(cfg, args) -> int:
         print(f"No core file at {cfg.core_path}.", file=sys.stderr)
         return 1
     print(f"backup {backup(cfg, args.to)}")
+    return 0
+
+
+def cmd_w0(cfg, args) -> int:
+    from . import w0
+
+    if args.action == "import":
+        if args.source is None or not args.source.exists():
+            print(f"No core file at {args.source}. Give it with --from.", file=sys.stderr)
+            return 1
+        print(f"imported {w0.import_steps(cfg, args.source)} w0 steps")
+        return 0
+    try:
+        w0.score(cfg, sys.stdin.read())
+    except Exception as e:  # noqa: BLE001 - the Stop hook must never fail
+        w0.log_error(e)
     return 0
 
 
@@ -486,6 +506,7 @@ HANDLERS = {
     "migrate": cmd_migrate,
     "backup": cmd_backup,
     "status": cmd_status,
+    "w0": cmd_w0,
     "search": cmd_search,
 }
 
@@ -497,6 +518,15 @@ def main(argv: list[str] | None = None) -> int:
     if handler is None:
         print(f"ragnarok {args.command}: not implemented yet", file=sys.stderr)
         return 2
+    if args.command == "w0" and args.action == "score":
+        try:
+            cfg = load_config(args.config)
+        except Exception as e:  # noqa: BLE001 - the Stop hook must never fail
+            from .w0 import log_error
+
+            log_error(e)
+            return 0
+        return handler(cfg, args)
     return handler(load_config(args.config), args)
 
 

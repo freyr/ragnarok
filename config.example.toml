@@ -134,7 +134,9 @@ retention_days = 90
 
 # The admission evaluator.
 [w0]
-summary_chars = 2000      # the length of the summary of a candidate that the evaluator sees
-private_paths = []        # path prefixes that the evaluator never reads, for example ["Notes/Journal"]
+summary_chars = 2000      # the length of the step summary that `ragnarok w0 score` stores
+# a step that touches a path with one of these prefixes keeps only the hash of its summary; a prefix is
+# absolute, starts with ~, or is relative to root, for example ["Notes/Journal"]
+private_paths = []
 cost_ratio = 10           # a false reject costs this many false admits
 band = [0.03, 0.30]       # the uncertain band of the score

@@ -175,6 +175,8 @@ Without frontmatter, the path rules give the metadata. The default rules work fo
 | `ragnarok backfill propose\|export\|merge\|apply <vault> [file...]` | Proposes, describes and applies missing frontmatter keys. The order is `propose`, `export`, Claude writes descriptions, `merge <vault> <file>...`, you examine the proposal, `apply`. |
 | `ragnarok survey <vault> [--json]` | Prints the folders, frontmatter keys, marker files, name patterns and ticket prefixes of a vault folder. Run it before you write `[vault_rules.<vault>]`. It prints no note text. |
 | `ragnarok explain <trace_id> [--gold PATH ...] [--json]` | Prints one traced call as a stage table. |
+| `ragnarok w0 score` | Reads the JSON of a Claude Code `Stop` hook on stdin and writes the step summary of the last turn to `w0_step` in `core.db`. A step that touches a private path keeps only the hash. `/kb-save` labels the step before it. It never scans, never embeds, and exits with 0 on each error (the log is `logs/w0.log`). |
+| `ragnarok w0 import --from <core file>` | Copies the `w0_step` rows of another core file, each row one time. |
 | `ragnarok eval mechanical\|pool\|agent` | Runs an evaluation on the question sets in `data/eval/sets/`. |
 
 Run each command with `uv run` in the checkout, for example `uv run ragnarok search "boiler"`.

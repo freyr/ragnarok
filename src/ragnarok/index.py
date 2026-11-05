@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import calendar
 import hashlib
 import re
 import sqlite3
@@ -776,6 +777,13 @@ def resolve_links(conn: sqlite3.Connection) -> None:
     conn.executemany("UPDATE link SET to_node = ? WHERE from_doc = ? AND ord = ?", updates)
 
 
+def _age_seconds(created: str | None) -> int | None:
+    """The seconds from a UTC time of the form 2026-11-05T10:00:00Z to now, or None."""
+    if not created:
+        return None
+    return int(time.time() - calendar.timegm(time.strptime(created, "%Y-%m-%dT%H:%M:%SZ")))
+
+
 def status(cfg: Config, conn: sqlite3.Connection) -> dict:
     one = lambda q: conn.execute(q).fetchone()[0]  # noqa: E731
     size = lambda path: round(path.stat().st_size / 1e6, 1) if path.exists() else 0  # noqa: E731
@@ -794,6 +802,8 @@ def status(cfg: Config, conn: sqlite3.Connection) -> dict:
         "vectors": one("SELECT count(*) FROM unit_emb"),
         "cache": one("SELECT count(*) FROM embed_cache"),
         "w0_steps": one("SELECT count(*) FROM w0_step"),
+        "w0_labeled_steps": one("SELECT count(*) FROM w0_step WHERE label_command = 1"),
+        "w0_last_step_age_s": _age_seconds(one("SELECT max(created) FROM w0_step")),
         "violations": one("SELECT count(*) FROM violation"),
         "links": one("SELECT count(*) FROM link"),
         "resolved_links": one("SELECT count(*) FROM link WHERE to_node IS NOT NULL"),
