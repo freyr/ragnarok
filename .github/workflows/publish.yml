@@ -67,7 +67,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/ragnarok
+      url: https://pypi.org/p/ragnarok-mcp
     permissions:
       id-token: write
     steps:
@@ -76,6 +76,9 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          # a release that was uploaded by hand still goes on to the MCP Registry
+          skip-existing: true
 
   registry:
     if: github.ref_type == 'tag'
@@ -109,10 +112,10 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
         run: |
           for _ in $(seq 30); do
-            if curl -fsS "https://pypi.org/pypi/ragnarok/${REF_NAME#v}/json" >/dev/null; then exit 0; fi
+            if curl -fsS "https://pypi.org/pypi/ragnarok-mcp/${REF_NAME#v}/json" >/dev/null; then exit 0; fi
             sleep 10
           done
-          echo "::error::ragnarok ${REF_NAME#v} is not on PyPI after 5 minutes"
+          echo "::error::ragnarok-mcp ${REF_NAME#v} is not on PyPI after 5 minutes"
           exit 1
       - name: Publish to the MCP Registry
         run: |

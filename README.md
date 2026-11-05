@@ -47,7 +47,7 @@ model, and the index is one SQLite file.
 
 ## Setup
 
-ragnarok is on [PyPI](https://pypi.org/p/ragnarok) and in the
+ragnarok is on [PyPI](https://pypi.org/p/ragnarok-mcp) as `ragnarok-mcp` and in the
 [MCP Registry](https://registry.modelcontextprotocol.io) as `io.github.freyr/ragnarok`.
 
 ### With the Claude Code plugin (no clone)
@@ -62,10 +62,10 @@ In Claude Code:
 Then in a terminal:
 
 ```bash
-uvx ragnarok init
+uvx ragnarok-mcp init
 ```
 
-The plugin starts the server with `uvx ragnarok serve` and adds the search guidance to each session. The home
+The plugin starts the server with `uvx ragnarok-mcp serve` and adds the search guidance to each session. The home
 folder is `~/.ragnarok`. To use a different folder, set `RAGNAROK_HOME` in the `env` of
 `~/.claude/settings.json` and in your shell.
 
@@ -209,7 +209,7 @@ Without frontmatter, the path rules give the metadata. The default rules work fo
 | `ragnarok survey <vault> [--json]` | Prints the folders, frontmatter keys, marker files, name patterns and ticket prefixes of a vault folder. Run it before you write `[vault_rules.<vault>]`. It prints no note text. |
 | `ragnarok eval mechanical\|pool\|agent` | Runs an evaluation on the question sets in `data/eval/sets/`. |
 
-Run each command with `uvx ragnarok`, for example `uvx ragnarok search "boiler"`, or with `uv run` in the
+Run each command with `uvx ragnarok-mcp`, for example `uvx ragnarok-mcp search "boiler"`, or with `uv run` in the
 checkout.
 
 ## Where things are

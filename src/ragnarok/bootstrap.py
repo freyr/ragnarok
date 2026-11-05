@@ -6,7 +6,7 @@ that is already ok.
 
 The MCP server comes from the Claude Code plugin `ragnarok` (server `plugin:ragnarok:ragnarok`), or from a
 registration at the user scope. A checkout registers `uv --directory <checkout> run ragnarok serve`; an
-installed package registers `uvx ragnarok serve`.
+installed package (PyPI: ragnarok-mcp) registers `uvx ragnarok-mcp serve`.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ class Check:
 def serve_args(home: Path) -> list[str]:
     if is_checkout(home):
         return ["uv", "--directory", str(home), "run", "ragnarok", "serve"]
-    return ["uvx", "ragnarok", "serve"]
+    return ["uvx", "ragnarok-mcp", "serve"]
 
 
 def register_args(home: Path) -> list[str]:

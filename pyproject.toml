@@ -1,5 +1,5 @@
 [project]
-name = "ragnarok"
+name = "ragnarok-mcp"
 version = "1.1.0"
 description = "Local RAG search over Obsidian vaults: SQLite (sqlite-vec + FTS5), Ollama embeddings, FastMCP server"
 requires-python = ">=3.12"
@@ -26,6 +26,7 @@ Issues = "https://github.com/freyr/ragnarok/issues"
 
 [project.scripts]
 ragnarok = "ragnarok.cli:main"
+ragnarok-mcp = "ragnarok.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6"]

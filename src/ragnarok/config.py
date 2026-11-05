@@ -1,7 +1,7 @@
 """Configuration: vault locations, exclusions, sensitive paths, path rules, model and splitter settings.
 
 The home folder holds config.toml, data/ (index, backups, proposals) and logs/. It is the folder in
-RAGNAROK_HOME, else the repo checkout, else ~/.ragnarok (an installed package, for example `uvx ragnarok`).
+RAGNAROK_HOME, else the repo checkout, else ~/.ragnarok (an installed package, for example `uvx ragnarok-mcp`).
 A relative path in config.toml is relative to the folder of the file.
 """
 
@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tomllib
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -25,7 +26,7 @@ def default_home() -> Path:
 def is_checkout(folder: Path) -> bool:
     """True when the folder is a repo checkout of ragnarok."""
     pyproject = folder / "pyproject.toml"
-    return pyproject.is_file() and 'name = "ragnarok"' in pyproject.read_text()
+    return pyproject.is_file() and re.search(r'^name = "ragnarok(-mcp)?"$', pyproject.read_text(), re.M) is not None
 
 
 def home_dir() -> Path:
