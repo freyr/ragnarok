@@ -271,7 +271,12 @@ def search(
     gets the entity of each name."""
     if include_private and not cfg.allow_private:
         raise PrivateNotAllowed("include_private needs allow_private = true in the configuration")
-    subjects = resolve_subjects(conn, subject, include_private, trace) if subject is not None else None
+    # an empty list is no filter, not a filter that nothing passes
+    type, collection, class_, subject, status = (
+        None if isinstance(v, (list, tuple)) and not v else v for v in (type, collection, class_, subject, status)
+    )
+    # the same rule as find_entity, get_entity and related: an entity ID that they give resolves here too
+    subjects = resolve_subjects(conn, subject, cfg.allow_private, trace) if subject is not None else None
     if resolved is not None and subjects:
         resolved.extend(subjects)
     subject_ids = tuple(dict.fromkeys(e["id"] for e in subjects)) if subjects is not None else None

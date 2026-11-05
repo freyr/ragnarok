@@ -157,6 +157,33 @@ def test_subject_filter_keeps_only_documents_of_the_subject(kb_index):
     assert found(kb_index, subject=["sys-billing", "feat-tiers"]) == BILLING | TIERS  # a list is an OR
 
 
+def test_an_empty_list_filter_is_no_filter(kb_index):
+    every = found(kb_index)
+    for key in ("type", "collection", "class_", "subject", "status"):
+        assert found(kb_index, **{key: []}) == every, key
+
+
+def test_a_private_entity_resolves_as_a_subject_when_private_is_allowed(tmp_path):
+    from ragnarok.config import Config
+
+    cfg = Config(
+        root=tmp_path,
+        index_path=tmp_path / "index.db",
+        vaults=["Kb"],
+        dimension=len(TopicEmbedder.TOPICS),
+        private_patterns=["Kb/entities/Billing System.md"],
+        allow_private=True,
+    )
+    for rel, text in KB_NOTES.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    conn = connect(cfg)
+    emb = TopicEmbedder()
+    update(cfg, conn, emb)
+    assert found((cfg, conn, emb), subject="Billing") == BILLING
+
+
 def test_subject_name_resolves_through_aliases(kb_index):
     cfg, conn, emb = kb_index
     resolved = []
