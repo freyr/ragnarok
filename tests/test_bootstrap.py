@@ -194,13 +194,13 @@ def test_the_package_holds_the_config_template():
 
 
 def test_a_package_home_registers_uvx_with_its_home(package_home):
-    assert bootstrap.serve_args(package_home) == ["uvx", "ragnarok", "serve"]
+    assert bootstrap.serve_args(package_home) == ["uvx", "ragnarok-mcp", "serve"]
     assert bootstrap.register_args(package_home) == [
         "claude", "mcp", "add", "--scope", "user", "-e", f"RAGNAROK_HOME={package_home}",
-        "ragnarok", "--", "uvx", "ragnarok", "serve",
+        "ragnarok", "--", "uvx", "ragnarok-mcp", "serve",
     ]  # fmt: skip
-    assert bootstrap.register_args(default_home())[5:] == ["ragnarok", "--", "uvx", "ragnarok", "serve"]
-    assert bootstrap.registered("uvx ragnarok serve", package_home)
+    assert bootstrap.register_args(default_home())[5:] == ["ragnarok", "--", "uvx", "ragnarok-mcp", "serve"]
+    assert bootstrap.registered("uvx ragnarok-mcp serve", package_home)
     assert not bootstrap.registered(f"uv --directory {package_home} run ragnarok serve", package_home)
 
 
