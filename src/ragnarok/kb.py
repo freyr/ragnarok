@@ -997,21 +997,29 @@ def related(
             UNION ALL
             {" UNION ALL ".join(step)}
         )
-        SELECT w.id, COALESCE(min(CASE WHEN w.ok THEN w.depth END), min(w.depth)) AS hops, max(w.ok),
+        , best AS (
+            SELECT id, reached, ok, depth,
+                   rank() OVER (PARTITION BY id ORDER BY ok DESC, depth) AS pos
+            FROM walk
+        )
+        SELECT b.id, b.depth AS hops, b.ok,
                r.src, r.rel, r.dst, r.origin, r.confidence, r.valid_from,
                r.valid_until, r.source_doc,
                COALESCE(se.kind, 'doc'), COALESCE(se.name, sd.title), COALESCE(de.kind, 'doc'),
-               COALESCE(de.name, dd.title),
-               (SELECT w2.reached FROM walk w2 WHERE w2.id = w.id
-                ORDER BY w2.ok DESC, w2.depth, w2.reached LIMIT 1) AS reached
-        FROM walk w CROSS JOIN relation r ON r.id = w.id
+               COALESCE(de.name, dd.title), b.reached
+        FROM best b CROSS JOIN relation r ON r.id = b.id
         LEFT JOIN entity se ON se.id = r.src LEFT JOIN doc sd ON sd.id = r.src
         LEFT JOIN entity de ON de.id = r.dst LEFT JOIN doc dd ON dd.id = r.dst
-        GROUP BY w.id ORDER BY hops, r.src, r.rel, r.dst, w.id""",
+        WHERE b.pos = 1 GROUP BY b.id, b.reached ORDER BY hops, r.src, r.rel, r.dst, b.id, b.reached""",
         params,
     ).fetchall()
+    # an edge has one row for each end reached on its best path; the kind filter keeps it when any end has the kind
+    grouped: dict[int, list] = {}
+    for row in rows:
+        grouped.setdefault(row[0], []).append(row)
     edges, before, kept, removed, far_ends = [], [], [], {}, set()
-    for _, hops, ok, src, rel, dst, origin, confidence, valid_from, valid_until, source_doc, *names, reached in rows:
+    for group in grouped.values():
+        _, hops, ok, src, rel, dst, origin, confidence, valid_from, valid_until, source_doc, *names, _ = group[0]
         edge = {
             "source": {"id": src, "kind": names[0], "name": names[1]},
             "relation": rel,
@@ -1023,16 +1031,18 @@ def related(
             "source_doc": source_doc,
             "depth": hops,
         }
-        end = edge["target" if reached == dst else "source"]
-        removed_by = "as_of" if not ok else "kind" if kind and end["kind"] != kind else None
+        ends = [edge["target" if row[-1] == dst else "source"] for row in group]
+        match = [e for e in ends if not kind or e["kind"] == kind]
+        removed_by = "as_of" if not ok else "kind" if not match else None
         short = {"src": src, "rel": rel, "dst": dst, "depth": hops}
         before.append(short)
         if removed_by is None:
             edges.append(edge)
             kept.append(short)
-            far_ends.add(end["id"])
+            far_ends.update(e["id"] for e in match)
         else:
-            removed.setdefault(end["id"], removed_by)
+            for end in ends:
+                removed.setdefault(end["id"], removed_by)
     gone = [{"id": i, "filter": f} for i, f in removed.items() if i not in far_ends]
     name, entity_kind = conn.execute("SELECT name, kind FROM entity WHERE id = ?", (entity_id,)).fetchone()
     result = {"entity": {"id": entity_id, "kind": entity_kind, "name": name}, "valid_at": day, "edges": edges}

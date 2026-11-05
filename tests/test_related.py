@@ -27,6 +27,9 @@ NOTES = {
     "Kb/entities/Payment Gateway.md": entity("sys-gateway", "Payment Gateway", "system"),
     "Kb/entities/Cycle A.md": entity("cyc-a", "Cycle A", "system", "dependsOn: '[[Cycle B]]'\n"),
     "Kb/entities/Cycle B.md": entity("cyc-b", "Cycle B", "system", "dependsOn: '[[Cycle C]]'\n"),
+    "Kb/entities/Kt S.md": entity("kt-s", "Kt S", "system", "dependsOn: ['[[Kt A]]', '[[Kt B]]']\n"),
+    "Kb/entities/Kt A.md": entity("kt-a", "Kt A", "system", "dependsOn: '[[Kt B]]'\n"),
+    "Kb/entities/Kt B.md": entity("kt-b", "Kt B", "feature"),
     "Kb/entities/Cycle C.md": entity("cyc-c", "Cycle C", "system", "dependsOn: '[[Cycle A]]'\n"),
 }
 
@@ -194,3 +197,28 @@ def test_related_both_trace_records_the_edges_before_the_filters(tools):
         {"id": "sys-engine", "filter": "kind"},
         {"id": "sys-gateway", "filter": "kind"},
     ]
+
+
+def test_related_both_with_a_kind_keeps_an_edge_that_out_keeps(tools):
+    # Kt S -> Kt A, Kt S -> Kt B, Kt A -> Kt B: the edge A -> B has the ends A and B at depth 2 with both
+    out = tools.related("kt-s", direction="out", kind="feature", depth=2)
+    assert ends(out) == [("kt-a", "dependsOn", "kt-b", 2), ("kt-s", "dependsOn", "kt-b", 1)]
+    both = tools.related("kt-s", direction="both", kind="feature", depth=2)
+    assert ends(both) == ends(out)
+
+
+def test_related_both_at_depth_three_through_a_hub_is_fast(tools):
+    import time
+
+    add = (
+        "INSERT INTO relation (src, rel, dst, dst_text, source_doc, origin)"
+        " VALUES (?, 'partOf', ?, ?, 'sys-core~doc', 'declared')"
+    )
+    for i in range(400):
+        for step in (1, 7, 31):
+            tools.conn.execute(add, (f"n{i}", f"n{(i * step + 1) % 400}", "x"))
+        tools.conn.execute(add, (f"n{i}", "sys-core", "Core System"))
+    start = time.perf_counter()
+    result = tools.related("sys-core", direction="both", depth=3)
+    assert time.perf_counter() - start < 0.15
+    assert len(result["edges"]) > 1000
