@@ -17,7 +17,7 @@ from .metadata import read_note
 from .redact import redact
 from .search import PrivateNotAllowed, search
 from .splitter import sections
-from .trace import Trace
+from .trace import Trace, safely
 
 PROJECT_POOL = 50  # notes that find_projects groups into projects
 DESCRIPTION_WORDS = 60
@@ -124,6 +124,13 @@ class Tools:
         }
         return result.warnings
 
+    def _returned(self, paths) -> None:
+        """Record the notes that a tool returned: ids, paths, status (score null)."""
+        if self.trace:
+            marks = ",".join("?" * len(paths := sorted(set(paths))))
+            ids = [i for (i,) in self.conn.execute(f"SELECT id FROM doc WHERE path IN ({marks}) ORDER BY path", paths)]
+            safely("returned documents", self.trace.returned, [(i, None) for i in ids])
+
     def _visible(self) -> str:
         return "" if self.cfg.allow_private else " AND n.sensitivity = 'normal'"
 
@@ -161,6 +168,7 @@ class Tools:
         for (v, project), g in ranked:
             info = self._project_info(v, project)
             projects.append({**info, "score": round(g["score"], 5), "matching_notes": g["notes"]})
+        self._returned([p for item in projects for p in item["matching_notes"]])
         return {"results": projects, "warnings": warnings}
 
     @traced
@@ -181,6 +189,7 @@ class Tools:
                 {"path": path, "title": title, "type": type_, "status": status, "description": description}
             )
         results = [{**self._project_info(v, project), "notes": notes} for v, notes in by_vault.items()]
+        self._returned([n["path"] for notes in by_vault.values() for n in notes])
         return {"results": results, "warnings": warnings}
 
     @traced
@@ -195,19 +204,21 @@ class Tools:
             f"SELECT n.vault, n.project, n.path, n.status FROM doc n WHERE {where}{self._visible()} ORDER BY n.path",
             params,
         ).fetchall()
-        projects = []
+        projects, summaries = [], []
         for v, project, path, status in rows:
             fm, _ = read_note(self.cfg.note_path(path))
             state = _state(fm, status == "archived")
             if state not in wanted:
                 continue
             info = self._project_info(v, project)
+            summaries.append(path)
             projects.append({**info, "state": state, "updated": _plain(fm.get("updated")), "gate": fm.get("gate")})
         by_state: dict[str, list[dict]] = {}
         for p in projects:
             by_state.setdefault(p["state"], []).append(p)
         for group in by_state.values():
             group.sort(key=lambda p: str(p["updated"] or ""), reverse=True)
+        self._returned(summaries)
         return {"results": by_state, "count": len(projects), "warnings": warnings}
 
     @traced
@@ -246,6 +257,7 @@ class Tools:
             f" WHERE l.to_node = ?{self._visible()} ORDER BY n.path",
             (doc_id,),
         ).fetchall()
+        self._returned([path])
         return {
             "path": path,
             "vault": vault,
@@ -271,6 +283,7 @@ class Tools:
             (key.strip().upper(),),
         ).fetchall()
         keys = ("path", "title", "project", "type", "status")
+        self._returned([r[0] for r in rows])
         return {"results": [dict(zip(keys, r, strict=True)) for r in rows], "warnings": warnings}
 
     # --- project summary ---------------------------------------------------------------------------------------

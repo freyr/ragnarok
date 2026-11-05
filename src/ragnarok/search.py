@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import datetime as dt
 import re
 import sqlite3
 from dataclasses import asdict, dataclass
@@ -11,7 +10,7 @@ from dataclasses import asdict, dataclass
 import numpy as np
 
 from .config import Config
-from .trace import TOP, Trace, gold_paths
+from .trace import TOP, Trace, gold_paths, safely
 
 RRF_K = 60
 CANDIDATES = 200  # units from each list
@@ -184,9 +183,10 @@ def search(
         raise PrivateNotAllowed("include_private needs allow_private = true in the configuration")
     filters = Filters(vault, project, area, type, include_archived, include_private)
     stage = trace.stage if trace else lambda name: contextlib.nullcontext()
+    plan, vector = None, None
     if trace:
         with stage("plan"):
-            plan = _plan(conn, filters, cfg.kb.exact_limit)
+            plan = safely("plan", _plan, conn, filters, cfg.kb.exact_limit)
     lists: list[list[tuple[str, int]]] = []
     pools = {"dense": 0, "fts": 0}
     if mode in ("hybrid", "dense"):
@@ -232,18 +232,47 @@ def search(
             snippet = " ".join(words[:SNIPPET_WORDS]) + (" …" if len(words) > SNIPPET_WORDS else "")
             hits.append(Hit(*n, heading, snippet, round(scores[nid], 5), *ranks[nid]))
     if trace:
-        plan["pools"] = pools
-        trace.set("ragnarok.plan", plan)
-        _record(conn, trace, filters, scores, ranks, best, order, top)
+        if plan is not None:
+            trace.set("ragnarok.plan", {**plan, "pools": pools})
+        safely("candidates", _record, conn, trace, filters, (query, vector), scores, ranks, best, order, top)
     return hits
 
 
-def _record(conn, trace: Trace, filters: Filters, scores, ranks, best, order, top) -> None:
+def _first_seen(doc_ids) -> dict[str, int]:
+    """The rank of each document: the position of its first unit in a ranked list of unit owners."""
+    ranks: dict[str, int] = {}
+    for d in doc_ids:
+        ranks.setdefault(d, len(ranks) + 1)
+    return ranks
+
+
+def _prefilter_ranks(conn, query: str, vector) -> dict[str, tuple[int | None, int | None]]:
+    """The note rank of every document with no filter: an exact scan of all units, and the unfiltered FTS list."""
+    dense: dict[str, int] = {}
+    if vector is not None:
+        rows = conn.execute("SELECT unit_id, doc_id, embedding FROM unit_emb").fetchall()
+        if rows:
+            ids = np.fromiter((r[0] for r in rows), dtype=np.int64, count=len(rows))
+            matrix = np.frombuffer(b"".join(r[2] for r in rows), dtype=np.float32).reshape(len(rows), -1)
+            q = np.asarray(vector, dtype=np.float32)
+            order = np.lexsort((ids, -(matrix @ (q / np.linalg.norm(q)))))
+            dense = _first_seen(rows[i][1] for i in order)
+    fts: dict[str, int] = {}
+    if match := fts_query(query):
+        sql = (
+            "SELECT c.doc_id FROM unit_fts f JOIN unit c ON c.id = f.rowid"
+            " WHERE unit_fts MATCH ? ORDER BY bm25(unit_fts, 2.0, 1.0)"
+        )
+        fts = _first_seen(r[0] for r in conn.execute(sql, [match]))
+    return {d: (dense.get(d), fts.get(d)) for d in dense.keys() | fts.keys()}
+
+
+def _record(conn, trace: Trace, filters: Filters, probe, scores, ranks, best, order, top) -> None:
     """The candidates (the top 50 of each pool, and every gold document), the returned documents and their status."""
     final = {nid: i for i, nid in enumerate(order, start=1)}
     in_top = {nid for nid, r in ranks.items() if any(x is not None and x <= TOP for x in r)}
     gold_ids = {}
-    for path in gold_paths():
+    for path in safely("gold paths", gold_paths) or []:
         row = conn.execute("SELECT id FROM doc WHERE path = ?", (path,)).fetchone()
         gold_ids[path] = row[0] if row else None
     wanted = in_top | {i for i in gold_ids.values() if i}
@@ -253,6 +282,9 @@ def _record(conn, trace: Trace, filters: Filters, scores, ranks, best, order, to
         r[0]: dict(zip(cols, r, strict=True))
         for r in conn.execute(f"SELECT {', '.join(cols)} FROM doc WHERE id IN ({marks})", list(wanted))
     }
+
+    gold_set = {i for i in gold_ids.values() if i}
+    before = (safely("prefilter ranks", _prefilter_ranks, conn, *probe) if gold_set else None) or {}
 
     def record(nid: str, gold: bool) -> dict:
         d, (dense_rank, fts_rank) = docs[nid], ranks.get(nid, (None, None))
@@ -267,25 +299,15 @@ def _record(conn, trace: Trace, filters: Filters, scores, ranks, best, order, to
             "authority": {},  # the factors that apply; a later stage fills it
             "final_rank": final.get(nid),
         }
-        return {**out, "gold": True} if gold else out
+        if not gold:
+            return out
+        dense_before, fts_before = before.get(nid, (None, None))
+        return {**out, "gold": True, "prefilter_dense_rank": dense_before, "prefilter_fts_rank": fts_before}
 
-    gold_set = {i for i in gold_ids.values() if i}
     candidates = [record(nid, nid in gold_set) for nid in sorted(in_top, key=lambda n: final[n])]
     candidates += [record(nid, True) for nid in gold_ids.values() if nid and nid not in in_top]
     candidates += [
         {"doc_id": None, "path": p, "gold": True, "filters": {}} for p, nid in gold_ids.items() if nid is None
     ]
     trace.set("ragnarok.candidates", candidates)
-    trace.set("gen_ai.retrieval.documents", [{"id": nid, "score": round(scores[nid], 5)} for nid in top])
-    now = dt.datetime.now(dt.UTC).timestamp()
-    returned = {
-        r[0]: r
-        for r in conn.execute(f"SELECT id, status, mtime_ns FROM doc WHERE id IN ({','.join('?' * len(top))})", top)
-    }
-    trace.set(
-        "ragnarok.returned.status",
-        [
-            {"id": nid, "status": returned[nid][1], "age_days": round((now - returned[nid][2] / 1e9) / 86400, 1)}
-            for nid in top
-        ],
-    )
+    trace.returned([(nid, round(scores[nid], 5)) for nid in top])

@@ -17,7 +17,7 @@ from .embed import EmbedError, OllamaEmbedder
 from .index import IndexMismatch, connect
 from .search import PrivateNotAllowed
 from .tools import Tools
-from .trace import purge
+from .trace import purge, safely
 
 log = logging.getLogger("ragnarok.server")
 
@@ -162,7 +162,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
     server = MCPServer(
         name="ragnarok", instructions=INSTRUCTIONS.format(vaults=", ".join((cfg or load_config(watch)).vaults))
     )
-    purge(tools.cfg if tools is not None else cfg or load_config(watch))
+    safely("purge", purge, tools.cfg if tools is not None else cfg or load_config(watch))
 
     @server.tool()
     @timed

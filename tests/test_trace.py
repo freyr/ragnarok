@@ -159,3 +159,83 @@ def test_old_trace_files_are_deleted(tools):
     build(tools=dataclasses.replace(tools, cfg=cfg))
     assert sorted(p.name for p in folder.iterdir()) == sorted(names[k] for k in ("edge", "new", "other"))
     assert purge(cfg) == []
+
+
+def test_a_read_only_trace_file_does_not_change_the_result(tools, caplog):
+    folder = trace_dir(tools.cfg)
+    tools.search("boiler")  # makes today's file
+    (file,) = folder.glob("*.jsonl")
+    file.chmod(0o444)
+    folder.chmod(0o555)
+    try:
+        result = tools.search("boiler", limit=3)
+        assert len(result["results"]) == 3
+        with pytest.raises(FileNotFoundError):  # the real error, not the trace error
+            tools.open_note("Home/Nothing.md")
+    finally:
+        folder.chmod(0o755)
+        file.chmod(0o644)
+    assert "trace" in caplog.text
+
+
+def test_a_bad_gold_value_does_not_change_the_result(tools, monkeypatch):
+    monkeypatch.setenv(GOLD_ENV, "not json")
+    assert len(tools.search("boiler", limit=3)["results"]) == 3
+
+
+def test_a_failing_purge_does_not_stop_the_server(tools, monkeypatch):
+    from ragnarok import server as server_module
+
+    def broken(cfg):
+        raise PermissionError("no")
+
+    monkeypatch.setattr(server_module, "purge", broken)
+    build(tools=tools)
+
+
+def test_gold_removed_by_a_filter_has_ranks_from_before_the_filter(tools, monkeypatch):
+    gold = "Home/Astro/Theory/Field Stop.md"
+    monkeypatch.setenv(GOLD_ENV, json.dumps([gold, "Home/Heating/notes/n03.md"]))
+    line = line_of(tools.cfg, tools.search("boiler eyepiece", project="Heating")["trace_id"])
+    records = {c["path"]: c for c in line["ragnarok.candidates"] if c.get("gold")}
+    removed = records[gold]
+    assert removed["filters"]["project"] is False
+    assert removed["dense_rank"] is None and removed["fts_rank"] is None  # after the filter
+    assert removed["prefilter_dense_rank"] >= 1
+    assert removed["prefilter_fts_rank"] == 1  # the only note with the word "eyepiece"
+    kept = records["Home/Heating/notes/n03.md"]
+    assert kept["prefilter_fts_rank"] >= 1 and kept["fts_rank"] >= 1
+
+
+def test_gold_without_a_match_has_null_prefilter_fts_rank(tools, monkeypatch):
+    monkeypatch.setenv(GOLD_ENV, json.dumps(["Home/Astro/Theory/Field Stop.md"]))
+    line = line_of(tools.cfg, tools.search("boiler", project="Heating")["trace_id"])
+    (record,) = [c for c in line["ragnarok.candidates"] if c.get("gold")]
+    assert record["prefilter_fts_rank"] is None and record["prefilter_dense_rank"] >= 1
+
+
+def test_every_read_tool_records_the_returned_documents(tools):
+    boiler = "Home/Heating/notes/boiler.md"
+    calls = {
+        "search": (tools.search("boiler", limit=3), lambda r: [x["path"] for x in r["results"]]),
+        "find_projects": (
+            tools.find_projects("boiler"),
+            lambda r: [p for x in r["results"] for p in x["matching_notes"]],
+        ),
+        "list_project": (
+            tools.list_project("Heating"),
+            lambda r: [n["path"] for x in r["results"] for n in x["notes"]],
+        ),
+        "open_projects": (
+            tools.open_projects(),
+            lambda r: [f"{p['folder']}/SUMMARY.md" for group in r["results"].values() for p in group],
+        ),
+        "open_note": (tools.open_note(boiler), lambda r: [boiler]),
+        "find_by_jira": (tools.find_by_jira("OPS-77"), lambda r: [x["path"] for x in r["results"]]),
+    }
+    for name, (result, returned) in calls.items():
+        line = line_of(tools.cfg, result["trace_id"])
+        docs = line["gen_ai.retrieval.documents"]
+        assert sorted(d["path"] for d in docs) == sorted(set(returned(result))), name
+        assert docs and all(d["id"] for d in docs), name
+        assert [s["id"] for s in line["ragnarok.returned.status"]] == [d["id"] for d in docs], name

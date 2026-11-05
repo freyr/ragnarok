@@ -11,6 +11,7 @@ import datetime as dt
 import functools
 import hashlib
 import json
+import logging
 import os
 import subprocess
 import time
@@ -19,8 +20,19 @@ from pathlib import Path
 
 from .config import Config
 
+log = logging.getLogger("ragnarok.trace")
+
 TOP = 50  # documents of each pool that the trace records
 GOLD_ENV = "RAGNAROK_TRACE_GOLD"  # a JSON list of gold note paths; the evaluation sets it
+
+
+def safely(what: str, fn, *args):
+    """Run trace-only work. A failure logs a warning and gives None: a trace problem never changes a call."""
+    try:
+        return fn(*args)
+    except Exception as e:
+        log.warning("trace: %s failed (%s: %s); the call goes on", what, type(e).__name__, e)
+        return None
 
 
 def trace_dir(cfg: Config) -> Path:
@@ -114,7 +126,27 @@ class Trace:
     def set(self, key: str, value) -> None:
         self.fields[key] = value
 
+    def returned(self, ids_scores: list[tuple[str, float | None]]) -> None:
+        """The returned documents with their path, score and status, and the age of each."""
+        ids = [i for i, _ in ids_scores]
+        rows = {
+            r[0]: r
+            for r in self.conn.execute(
+                f"SELECT id, path, status, mtime_ns FROM doc WHERE id IN ({','.join('?' * len(ids))})", ids
+            )
+        }
+        now = dt.datetime.now(dt.UTC).timestamp()
+        self.fields["gen_ai.retrieval.documents"] = [
+            {"id": i, "path": rows[i][1], "score": score} for i, score in ids_scores
+        ]
+        self.fields["ragnarok.returned.status"] = [
+            {"id": i, "status": rows[i][2], "age_days": round((now - rows[i][3] / 1e9) / 86400, 1)} for i in ids
+        ]
+
     def finish(self, error: str | None = None) -> None:
+        safely("write", self._write, error)
+
+    def _write(self, error: str | None) -> None:
         self.ms["total"] = round((time.perf_counter() - self.start) * 1000)
         self.fields["error.type"] = error
         self.fields["ragnarok.index.version"] = index_version(self.cfg, self.conn)
