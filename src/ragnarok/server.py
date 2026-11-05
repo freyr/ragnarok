@@ -255,7 +255,8 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
         """Resolve a name to entity IDs: an exact alias first, then the words of the names, then the entity text.
 
         Each entity has its id, kind, name, aliases, owner, canonical documents, how it matched (alias, name or text)
-        and a score. An ambiguous alias gives all its entities. kind narrows the result.
+        and a score. An ambiguous alias gives all its entities. kind narrows the result. Only an alias match is
+        exact: a name or text result is the nearest entity and does not prove that the named entity exists.
         """
         return get().find_entity(name, kind=kind, limit=limit)
 

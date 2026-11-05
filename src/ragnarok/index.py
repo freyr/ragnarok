@@ -838,11 +838,14 @@ def _write(
 def reconcile(cfg: Config, conn: sqlite3.Connection, embedder, result: UpdateResult | None = None) -> int:
     """Split again each doc whose units were built from another hash, or that has no units. Return the count.
 
+    It also writes `entity_fts` again when it differs from the entity rows of core.db.
+
     The two files are not atomic together, so core.db is the truth: a unit carries the `doc_hash` it was built
     from. A doc whose file no longer has `doc.hash` is left to the next update. A note with no units (an empty
     note) is read again but not counted. A unit of a doc that does not exist is deleted: another index file that
     shares core.db (a --min-words variant) was not open when the doc was deleted or got its frontmatter ID.
     """
+    kb.sync_fts(conn)
     orphans = "FROM unit WHERE doc_id NOT IN (SELECT id FROM doc)"
     if conn.execute(f"SELECT 1 {orphans} LIMIT 1").fetchone():  # a write only when there is one, as the scan is hot
         conn.execute(f"DELETE {orphans}")

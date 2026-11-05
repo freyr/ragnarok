@@ -220,3 +220,21 @@ def test_a_rebuild_fills_entity_fts_again(tools):
     update(cfg, conn, tools.embedder)
     assert len(fts_rows(conn)) == 5
     assert Tools(cfg, conn, tools.embedder).find_entity("staging")["results"][0]["id"] == "env-stage"
+
+
+@pytest.mark.parametrize("as_of", ["2026-11", "today"])
+def test_get_entity_with_an_as_of_that_is_not_a_date_is_an_error(tools, as_of):
+    with pytest.raises(ValueError, match="ISO date"):
+        tools.get_entity("env-stage", as_of=as_of)
+
+
+def test_a_second_index_file_on_one_core_db_fills_entity_fts(tools):
+    cfg = tools.cfg
+    other = Config(root=cfg.root, index_path=cfg.root / "index-b.db", vaults=cfg.vaults, dimension=cfg.dimension,
+                   kb=cfg.kb)  # fmt: skip
+    assert other.core_path == cfg.core_path
+    conn = connect(other)
+    update(other, conn, tools.embedder)
+    assert len(fts_rows(conn)) == 5
+    result = Tools(other, conn, tools.embedder).find_entity("billing invoice")
+    assert result["results"][0]["matched_by"] == "name"

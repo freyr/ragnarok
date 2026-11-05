@@ -318,11 +318,7 @@ def write(conn: sqlite3.Connection, doc_id: str, kb: KbDoc) -> None:
         # the FTS row is in index.db, and it lives and dies with the entity row
         conn.execute(
             "INSERT INTO entity_fts (entity_id, name, aliases) VALUES (?, ?, ?)",
-            (
-                entity_id,
-                kb.name,
-                " ".join(alias for norm, alias in rows["aliases"] if norm != normalize_alias(kb.name)),
-            ),
+            (entity_id, kb.name, _fts_aliases(kb.name, rows["aliases"])),
         )
         conn.executemany(
             "INSERT INTO entity_alias (entity_id, alias_norm, alias) VALUES (?, ?, ?)",
@@ -344,6 +340,31 @@ def write(conn: sqlite3.Connection, doc_id: str, kb: KbDoc) -> None:
             for aspect, text in rows["canonical"]
         ],
     )
+
+
+def _fts_aliases(name: str, aliases) -> str:
+    return " ".join(alias for norm, alias in aliases if norm != normalize_alias(name))
+
+
+def sync_fts(conn: sqlite3.Connection) -> bool:
+    """Write `entity_fts` again from `entity` when they differ. Return True when it wrote.
+
+    `entity_fts` is in index.db, so an index file that shares core.db with another one (a --min-words variant, or
+    an index.db deleted by hand) did not see the entity writes of the other one.
+    """
+    aliases: dict[str, list] = {}
+    for entity_id, norm, alias in conn.execute("SELECT entity_id, alias_norm, alias FROM entity_alias ORDER BY rowid"):
+        aliases.setdefault(entity_id, []).append((norm, alias))
+    expected = {
+        (entity_id, name, _fts_aliases(name, aliases.get(entity_id, [])))
+        for entity_id, name in conn.execute("SELECT id, name FROM entity")
+    }
+    if set(conn.execute("SELECT entity_id, name, aliases FROM entity_fts")) == expected:
+        return False
+    conn.execute("DELETE FROM entity_fts")
+    conn.executemany("INSERT INTO entity_fts (entity_id, name, aliases) VALUES (?, ?, ?)", sorted(expected))
+    conn.commit()
+    return True
 
 
 def delete(conn: sqlite3.Connection, doc_id: str) -> None:
@@ -822,6 +843,8 @@ def get(conn: sqlite3.Connection, entity_id: str, as_of: str | None, allow_priva
         raise LookupError(f"No entity with the id {entity_id!r}. Use an id from find_entity.")
     kind, name, owner, status, entity_as_of, review_by = row
     day = _iso_date(as_of) if as_of else date.today().isoformat()
+    if day is None:
+        raise ValueError(f"as_of must be an ISO date (YYYY-MM-DD), not {as_of!r}.")
     valid = " AND (valid_from IS NULL OR valid_from <= :day) AND (valid_until IS NULL OR valid_until >= :day)"
     live = {
         attribute: (system, skill)
