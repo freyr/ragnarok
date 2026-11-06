@@ -295,6 +295,18 @@ def config_path() -> Path:
     return home_dir() / "config.toml"
 
 
+def _check_when_factors(table: dict) -> None:
+    """A row key is a note key of the default table; a row has a positive number for each kind of question."""
+    for note, row in table.items():
+        if note not in _when_factors():
+            raise ValueError(f"unknown note key in [kb.when_factors]: {note}")
+        if not isinstance(row, dict) or set(row) != set(WHEN_KINDS):
+            raise ValueError(f"[kb.when_factors] {note} needs exactly the keys {', '.join(WHEN_KINDS)}")
+        for kind, factor in row.items():
+            if isinstance(factor, bool) or not isinstance(factor, (int, float)) or factor <= 0:
+                raise ValueError(f"[kb.when_factors] {note}.{kind} must be a positive number, not {factor!r}")
+
+
 def _load_kb(table: dict) -> KbConfig:
     """The [kb] table. A list table (kinds, doc_types, relation_types, attributes) replaces its default; a
     relation_types table keeps the DOC_RELATIONS types that it does not name."""
@@ -312,6 +324,11 @@ def _load_kb(table: dict) -> KbConfig:
             value = {kind: {name: AttributeDef(**a) for name, a in attrs.items()} for kind, attrs in value.items()}
         elif key == "authority":
             value = AuthorityConfig(**value)
+        elif key == "when_rules":
+            if unknown := set(value) - (set(WHEN_KINDS) - {"now"}):
+                raise ValueError(f"unknown kind of question in [kb.when_rules]: {', '.join(sorted(unknown))}")
+        elif key == "when_factors":
+            _check_when_factors(value)
         values[key] = value
     return KbConfig(**values)
 
