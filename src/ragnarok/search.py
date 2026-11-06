@@ -215,8 +215,8 @@ def question_kind(cfg: Config, query: str, when: str | None = None) -> tuple[str
     """The kind of question (now, future, history or unknown), its source (parameter or rule) and the rule word
     that matched. With no `when`, a word or phrase of `kb.when_rules` in the query text decides (whole words, any
     case); history goes before future, so that "what was the plan" is a history question. Else `unknown`: no
-    `when` factor, no canonical factor and no entity-first, so that a question of no known kind keeps the
-    relevance order."""
+    `when` factor (1.0), so that current notes get no preference; the canonical factor and entity-first apply
+    as for `now`."""
     if when is not None:
         if when not in WHEN_KINDS:
             raise ValueError(f"when must be one of {', '.join(WHEN_KINDS)}, not {when!r}")
