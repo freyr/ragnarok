@@ -818,6 +818,25 @@ def test_read_path_map():
         "Home/Heating/old-boiler.md": ["Home/Heating/notes/boiler.md", "Home/Heating/SUMMARY.md"],
         "Work/old cpu.md": ["Work/Devops/db-resize/research-cpu.md"],
     }
+    # a quoted path is one path: a comma in a note name does not cut it
+    quoted = "- `Kb/old, runbook.md` → `Kb/core/Runbook — HA, Z2M.md`, `Kb/core/part 2.md`\n"
+    assert kb_eval.read_path_map(quoted) == {
+        "Kb/old, runbook.md": ["Kb/core/Runbook — HA, Z2M.md", "Kb/core/part 2.md"]
+    }
+
+
+def test_filtered_runner_reports_a_mapped_path_that_is_not_in_the_index(indexed):
+    questions = [{"id": "d1", "type": "fact", "question": "boiler?", "expected": ["Home/Heating/old-boiler.md"]}]
+    path_map = {"Home/Heating/old-boiler.md": ["Home/Heating/notes/boiler.md", "Home/Heating/gone, part 2.md"]}
+    hits = {"boiler?": ["Home/Heating/notes/boiler.md"]}
+    lines, _, _, _ = filtered_run(indexed, questions, new_hits=hits, base_hits=hits, path_map=path_map)
+    assert "MAP Home/Heating/old-boiler.md Home/Heating/gone, part 2.md absent from the index" in lines
+    assert not any(x.startswith("MAP") and "notes/boiler.md" in x for x in lines)
+    # an old path with no new path in the index: the question goes, and the MAP line says why
+    path_map = {"Home/Heating/old-boiler.md": ["Home/Heating/gone.md"]}
+    lines, _, _, _ = filtered_run(indexed, questions, new_hits=hits, base_hits=hits, path_map=path_map)
+    assert lines[0].endswith("n=0")
+    assert "MAP Home/Heating/old-boiler.md Home/Heating/gone.md absent from the index" in lines
 
 
 def test_filtered_runner_accepts_a_new_path_as_the_old_expected_note(indexed):

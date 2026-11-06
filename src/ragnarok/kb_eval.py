@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -352,18 +353,21 @@ def kb_mechanical(
 
 
 def read_path_map(text: str) -> dict[str, list[str]]:
-    """The path map of a conversion: one line for each old path, `<old> → <new>, <new>` (or `->`). Backticks, a
-    leading `- `, blank lines and lines that start with # are ignored."""
+    """The path map of a conversion: one line for each old path, `<old> → <new>, <new>` (or `->`). A path in
+    backticks is one path, also with a comma in it; with no backticks, a comma separates the new paths. A leading
+    `- `, blank lines and lines that start with # are ignored."""
     out: dict[str, list[str]] = {}
     for raw in text.splitlines():
-        line = raw.strip().removeprefix("- ").replace("`", "").strip()
+        line = raw.strip().removeprefix("- ").strip()
         if not line or line.startswith("#"):
             continue
         sep = "→" if "→" in line else "->"
         if sep not in line:
             raise ValueError(f"a path map line with no → or ->: {raw!r}")
         old, new = line.split(sep, 1)
-        out[old.strip()] = [p.strip() for p in new.split(",") if p.strip()]
+        quoted = re.findall(r"`([^`]+)`", new)
+        news = quoted if quoted else new.split(",")
+        out[old.replace("`", "").strip()] = [p.strip() for p in news if p.strip()]
     return out
 
 
@@ -393,6 +397,8 @@ def filtered(
         """The paths in the index that stand for an expected note."""
         return [*([e] if e in known else []), *(n for n in path_map.get(e, []) if n in known and n != e)]
 
+    olds = dict.fromkeys(e for q in questions for e in q.get("expected", []) if e in path_map)
+    absent = [f"MAP {e} {n} absent from the index" for e in olds for n in path_map[e] if n not in known]
     questions = [q for q in questions if any(resolve(e) for e in q.get("expected", []))]
     expected = {q["id"]: [e for e in q["expected"] if resolve(e)] for q in questions}
     paths = sorted({p for es in expected.values() for e in es for p in resolve(e)})
@@ -411,7 +417,7 @@ def filtered(
         k = 10 if (q.get("type") or "").startswith("synthesis") else 5
         plans.append((q, filters, k))
     base = base_call([("search", {"query": q["question"], **f, "limit": k}) for q, f, k in plans])
-    lines, regressed = [f"# filtered recall@K, baseline and new code (authority off), n={len(plans)}"], []
+    lines, regressed = [f"# filtered recall@K, baseline and new code (authority off), n={len(plans)}", *absent], []
     for (q, f, k), result in zip(plans, base, strict=True):
         # a returned path that stands for an expected note counts as that note (the first one, for a merge)
         alias = {p: e for e in reversed(expected[q["id"]]) for p in resolve(e)}
