@@ -431,11 +431,13 @@ def report(
     latency: list[int],
     agents: list[str] = DEFAULT_AGENTS,
     match=None,
+    per_question: Path | None = None,
 ) -> list[str]:
     """The quality table. The first agent is the tested one, the last is the reference.
 
     Run n of one agent pairs with run n of the other. The questions with a `class` get the KB measures of kb_eval;
-    match is their entity name matcher (default: kb_eval.Matcher on the evaluation home).
+    match is their entity name matcher (default: kb_eval.Matcher on the evaluation home). With per_question, write
+    the per-question values of these questions for each agent there, also for one agent.
     """
     from . import kb_eval
 
@@ -472,6 +474,9 @@ def report(
     if any(classed.values()):
         match = match or kb_eval.Matcher(eval_config(cfg))
         lines += kb_eval.report_rows(classed, results, agents, match)
+        if per_question is not None:
+            values = kb_eval.agent_values(classed, results, agents, match)
+            kb_eval.write_per_question(per_question, "agent", kb_eval.AGENT, values)
     if draft:
         lines.append(
             f"| Retrieval, draft set (n={len(draft)}) | {test} - {ref} recall@K >= +0.10, interval above 0 | "
@@ -547,4 +552,8 @@ def evaluate(
     )
     results = run_all(cfg, sets, out_dir, calls, model, agents, runs, reuse_mirror=reuse_mirror, baseline=baseline)
     latency = search_latency(eval_home(cfg) / "logs" / "server.log")
-    return report(cfg, sets, results, latency, agents)
+    if not any("class" in q for questions in sets.values() for q in questions):
+        return report(cfg, sets, results, latency, agents)
+    per_question = out_dir / f"kb-agent-{'+'.join(agents)}.json"
+    lines = report(cfg, sets, results, latency, agents, per_question=per_question)
+    return [*lines, f"per-question values: {per_question}"]

@@ -238,7 +238,16 @@ def test_report_with_one_agent_warns_and_gives_no_paired_difference(vault):
 
 
 def test_failed_run_gets_the_worst_value_of_each_measure(vault):
-    worst = {"canonical_first": 0.0, "stale": 1.0, "f1": 0.0, "route": 0.0, "no_answer": 0.0, "run": True}
+    worst = {
+        "canonical_first": 0.0,
+        "stale": 1.0,
+        "f1": 0.0,
+        "route": 0.0,
+        "no_answer": 0.0,
+        "answer_first": 0.0,
+        "wrong": 1.0,
+        "run": True,
+    }
     crashed = run([GOLD], route="kb", error=True)
     no_object = run(answered=False, route=None)
     for r in (crashed, no_object):
@@ -277,7 +286,7 @@ def indexed(vault):
     return vault, conn
 
 
-def filtered_run(indexed, questions, base_type=None, new_hits=None, base_error=()):
+def filtered_run(indexed, questions, base_type=None, new_hits=None, base_error=(), base_hits=None, path_map=None):
     cfg, conn = indexed
     calls, searched = [], []
 
@@ -291,6 +300,8 @@ def filtered_run(indexed, questions, base_type=None, new_hits=None, base_error=(
                 out.append({**meta, "type": base_type or meta["type"]})
             elif args["query"] in base_error:  # the baseline search tool fails
                 out.append({"error": "index locked"})
+            elif base_hits is not None:
+                out.append({"results": [{"path": p} for p in base_hits.get(args["query"], [])]})
             else:  # the baseline finds every expected note
                 q = next(q for q in questions if q["question"] == args["query"])
                 out.append({"results": [{"path": p} for p in q["expected"]]})
@@ -300,7 +311,7 @@ def filtered_run(indexed, questions, base_type=None, new_hits=None, base_error=(
         searched.append(kwargs)
         return [type("Hit", (), {"path": p}) for p in (new_hits or {}).get(query, [])]
 
-    lines, regressed = kb_eval.filtered(cfg, conn, FakeEmbedder(), questions, base, new_search)
+    lines, regressed = kb_eval.filtered(cfg, conn, FakeEmbedder(), questions, base, new_search, path_map=path_map)
     return lines, regressed, calls, searched
 
 
@@ -603,3 +614,302 @@ def test_attribute_reads_the_trace_folder_of_the_evaluation_home(tmp_path, capsy
     empty.mkdir()
     assert cli.main(["--config", str(config), "evaluate", "attribute", str(lab.runs), "--trace-dir", str(empty)]) == 0
     assert "st-01 single-truth UNLABELED" in capsys.readouterr().out
+
+
+# --- the kinds of question (now, future, history) -----------------------------------------------------------------
+
+WRONG = "Kb/howto/deploy-rejected.md"
+NOW = {
+    "id": "nw-01",
+    "class": "now",
+    "when": "now",
+    "question": "How do I deploy now?",
+    "question_alt": "Current deploy steps?",
+    "answer": "with the pipeline",
+    "gold": [{"path": GOLD, "grade": 2}, {"path": GOLD_LOW, "grade": 1}],
+    "wrong": [WRONG],
+}
+NOW_EMPTY = {**NOW, "id": "nw-02", "gold": [], "wrong": [STALE]}  # no gold on this mirror
+
+
+def hits(*paths):
+    return [type("Hit", (), {"path": p}) for p in paths]
+
+
+def test_answer_first_and_wrong_at_5_on_a_synthetic_set():
+    assert kb_eval.score_ranked(NOW, [GOLD, WRONG]) == {"answer_first": 1.0, "wrong": 1.0}
+    assert kb_eval.score_ranked(NOW, [GOLD_LOW, GOLD]) == {"answer_first": 0.0, "wrong": 0.0}  # not a top gold
+    late = [OTHER, DUP, "a.md", "b.md", "c.md", WRONG]  # the wrong note is sixth
+    assert kb_eval.score_ranked(NOW, late) == {"answer_first": 0.0, "wrong": 0.0}
+    assert kb_eval.score_ranked(NOW, [STALE]) == {"answer_first": 0.0, "wrong": 0.0}  # distractors are not wrong
+    for cls in ("future", "history"):
+        assert kb_eval.score_ranked({**NOW, "class": cls, "when": cls}, [GOLD]) == {"answer_first": 1.0, "wrong": 0.0}
+
+
+def test_answer_first_and_wrong_citation_of_an_agent_run():
+    score = kb_eval.score_run(NOW, run([GOLD, WRONG]), ids)
+    assert (score["answer_first"], score["wrong"]) == (1.0, 1.0)
+    score = kb_eval.score_run(NOW, run([OTHER, GOLD]), ids)
+    assert (score["answer_first"], score["wrong"]) == (0.0, 0.0)
+    score = kb_eval.score_run(NOW, run([OTHER, "x.md", "y.md", "z.md", "w.md", WRONG]), ids)
+    assert score["wrong"] == 1.0  # a cited note at any place
+    worst = kb_eval.score_run(NOW, run([GOLD], error=True), ids)
+    assert (worst["answer_first"], worst["wrong"], worst["run"]) == (0.0, 1.0, True)
+
+
+def test_a_question_with_empty_gold_stays_with_answer_first_0_and_wrong_from_its_list():
+    assert kb_eval.score_ranked(NOW_EMPTY, [GOLD, STALE]) == {"answer_first": 0.0, "wrong": 1.0}
+    assert kb_eval.score_ranked(NOW_EMPTY, [OTHER]) == {"answer_first": 0.0, "wrong": 0.0}
+    score = kb_eval.score_run(NOW_EMPTY, run([STALE]), ids)
+    assert (score["answer_first"], score["wrong"]) == (0.0, 1.0)
+
+
+def mechanical_new(vault, tmp_path, monkeypatch, systems, base=None):
+    """The mechanical runner on a `now` set with a fake new-code search: kb (no `when`) and kb-when."""
+    vault.dimension = 8
+    conn = connect(vault)
+    update(vault, conn, FakeEmbedder())
+    sets = tmp_path / "sets"
+    sets.mkdir(exist_ok=True)
+    (sets / "now.json").write_text(json.dumps([NOW, NOW_EMPTY]))
+    searched = []
+
+    def fake_search(cfg, conn_, embedder, query, limit=None, **kw):
+        searched.append((query, kw.get("when")))
+        if query in (NOW["question"], NOW["question_alt"]) and kw.get("when") == "now":
+            return hits(GOLD)
+        return hits(GOLD, WRONG) if query == NOW["question"] else hits(OTHER, STALE)
+
+    monkeypatch.setattr(kb_eval, "search", fake_search)
+    out = tmp_path / "per-question.json"
+    lines = kb_eval.kb_mechanical(vault, conn, FakeEmbedder(), sets, base, systems=systems, out=out)
+    return lines, json.loads(out.read_text()), searched
+
+
+def test_mechanical_runner_runs_the_new_code_alone_with_and_without_when(vault, tmp_path, monkeypatch):
+    lines, data, searched = mechanical_new(vault, tmp_path, monkeypatch, ["kb", "kb-when"])
+    # kb gives no `when` (the rule list decides); kb-when gives the `when` of the question
+    assert sorted({w for _, w in searched}, key=str) == [None, "now"]
+    assert len(searched) == 8  # 2 questions, 2 forms, 2 systems
+    # nw-01, kb: form 1 [GOLD, WRONG] gives 1 and 1, form 2 [OTHER, STALE] gives 0 and 0; kb-when: [GOLD] twice
+    # nw-02 (empty gold, wrong STALE), kb: [GOLD, WRONG] gives 0 and 0, [OTHER, STALE] gives 0 and 1
+    assert data["runner"] == "mechanical"
+    assert data["systems"] == {
+        "kb": [
+            {"id": "nw-01", "set": "now", "class": "now", "answer_first": 0.5, "wrong": 0.5},
+            {"id": "nw-02", "set": "now", "class": "now", "answer_first": 0.0, "wrong": 0.5},
+        ],
+        "kb-when": [
+            {"id": "nw-01", "set": "now", "class": "now", "answer_first": 1.0, "wrong": 0.0},
+            {"id": "nw-02", "set": "now", "class": "now", "answer_first": 0.0, "wrong": 0.0},
+        ],
+    }
+    assert data["measures"] == {"answer_first": ["answer-first", 1], "wrong": ["wrong@5", -1]}
+    text = "\n".join(lines)
+    assert "## now: answer-first and wrong@5, n=2" in text
+    assert "  answer-first kb 0.25  kb-when 0.50" in text
+    assert "  wrong@5 kb 0.50  kb-when 0.00" in text
+    assert " - " not in text.split("## now")[1]  # no baseline in this run: no paired difference
+
+
+def test_mechanical_runner_runs_the_baseline_alone_and_marks_kb_when_as_a_diagnostic(vault, tmp_path, monkeypatch):
+    calls = []
+
+    def base(batch):
+        calls.extend(batch)
+        return [{"type": "note"} if t == "open_note" else {"results": [{"path": GOLD}]} for t, a in batch]
+
+    lines, data, searched = mechanical_new(vault, tmp_path, monkeypatch, ["base"], base)
+    assert searched == []  # the new code does not run
+    assert not any("absent from kb" in x for x in lines)
+    assert [r["answer_first"] for r in data["systems"]["base"]] == [1.0, 0.0]
+    assert [t for t, _ in calls].count("search") == 4
+
+    lines, _, _ = mechanical_new(vault, tmp_path, monkeypatch, ["base", "kb", "kb-when"], base)
+    text = "\n".join(lines)
+    # answer-first: base [1, 0], kb [0.5, 0], kb-when [1, 0]
+    assert "    kb - base: -0.25" in text
+    assert "    kb-when - base (diagnostic): +0.00 [+0.00, +0.00]" in text
+
+
+def test_mechanical_runner_keeps_the_old_systems_and_measures(vault, tmp_path):
+    vault.dimension = 8
+    conn = connect(vault)
+    update(vault, conn, FakeEmbedder())
+    note = "Home/Heating/notes/boiler.md"
+    q = {**SINGLE, "gold": [{"path": note, "grade": 2}], "distractors": []}
+    sets = tmp_path / "sets"
+    sets.mkdir()
+    (sets / "single-truth.json").write_text(json.dumps([q, {**JOIN, "gold": []}]))
+
+    def base(batch):
+        return [{"type": "note"} if t == "open_note" else {"results": [{"path": note}]} for t, a in batch]
+
+    out = tmp_path / "pq.json"
+    lines = kb_eval.kb_mechanical(vault, conn, FakeEmbedder(), sets, base, out=out)
+    assert "## single-truth: canonical-first and stale@5, n=1" in lines  # the join question with no gold stays out
+    data = json.loads(out.read_text())
+    assert list(data["systems"]) == ["base", "kb", "kb-eligibility"]
+    assert data["systems"]["base"] == [
+        {"id": "st-01", "set": "single-truth", "class": "single-truth", "canonical_first": 1.0, "stale": 0.0}
+    ]
+
+
+def test_agent_report_has_rows_for_the_kinds_of_question_and_writes_the_per_question_file(vault, tmp_path):
+    sets = {"now": [NOW, NOW_EMPTY]}
+    results = {
+        "now": {
+            # nw-01: mcp-kb cites the top gold twice; mcp-base cites the wrong note first
+            "nw-01": {"mcp-kb": [run([GOLD]), run([GOLD])], "mcp-base": [run([WRONG, GOLD]), run([WRONG, GOLD])]},
+            # nw-02 (empty gold): mcp-kb cites another note; mcp-base cites the wrong note of the list
+            "nw-02": {"mcp-kb": [run([OTHER]), run([OTHER])], "mcp-base": [run([STALE]), run([STALE])]},
+        }
+    }
+    out = tmp_path / "agent.json"
+    lines = agent_eval.report(vault, sets, results, [], ["mcp-kb", "mcp-base"], match=ids, per_question=out)
+    first = next(x for x in lines if x.startswith("| Answer-first, now"))
+    # answer-first: mcp-kb [1, 0], mcp-base [0, 0]; resampled means of [1, 0] are 0, 0.5 or 1
+    assert first.startswith("| Answer-first, now (n=2)") and "mcp-base 0.00, mcp-kb 0.50" in first
+    assert "+0.50 [+0.00, +1.00]" in first
+    wrong = next(x for x in lines if x.startswith("| Wrong citation, now"))
+    # wrong citation: mcp-base [1, 1], mcp-kb [0, 0]: mcp-base - mcp-kb is 1 for each question
+    assert "mcp-base - mcp-kb" in wrong and "+1.00 [+1.00, +1.00]" in wrong
+    data = json.loads(out.read_text())
+    assert data["runner"] == "agent"
+    assert data["systems"]["mcp-base"] == [
+        {"id": "nw-01", "set": "now", "class": "now", "answer_first": 0.0, "wrong": 1.0},
+        {"id": "nw-02", "set": "now", "class": "now", "answer_first": 0.0, "wrong": 1.0},
+    ]
+    assert data["measures"]["answer_first"] == ["Answer-first", 1]
+    assert data["measures"]["wrong"] == ["Wrong citation", -1]
+
+    # one agent (tasks 15 A and C): no paired row, but the file holds the values, the mean over the runs
+    one = {"now": {"nw-01": {"mcp-kb": [run([GOLD]), run([OTHER])]}}}
+    agent_eval.report(vault, {"now": [NOW]}, one, [], ["mcp-kb"], match=ids, per_question=out)
+    rows = json.loads(out.read_text())["systems"]["mcp-kb"]
+    assert rows == [{"id": "nw-01", "set": "now", "class": "now", "answer_first": 0.5, "wrong": 0.0}]
+
+
+def test_agent_evaluate_writes_the_per_question_file_in_the_output_folder(vault, tmp_path, monkeypatch):
+    sets_dir = tmp_path / "sets"
+    sets_dir.mkdir()
+    (sets_dir / "now.json").write_text(json.dumps([NOW]))
+    results = {"now": {"nw-01": {"mcp-kb": [run([GOLD])]}}}
+    monkeypatch.setattr(agent_eval, "run_all", lambda *a, **kw: results)
+    monkeypatch.setattr(agent_eval, "eval_config", lambda cfg: cfg)
+    monkeypatch.setattr(kb_eval, "Matcher", lambda cfg: ids)
+    out = tmp_path / "out"
+    lines = agent_eval.evaluate(vault, sets_dir, ["now"], out, 8, "sonnet", None, agents=["mcp-kb"])
+    path = out / "kb-agent-mcp-kb.json"
+    assert f"per-question values: {path}" in lines
+    assert json.loads(path.read_text())["systems"]["mcp-kb"][0]["answer_first"] == 1.0
+
+
+# --- the path map of the conversion -------------------------------------------------------------------------------
+
+
+def test_read_path_map():
+    text = (
+        "# the path map\n\n"
+        "- `Home/Heating/old-boiler.md` → `Home/Heating/notes/boiler.md`, `Home/Heating/SUMMARY.md`\n"
+        "Work/old cpu.md -> Work/Devops/db-resize/research-cpu.md\n"
+    )
+    assert kb_eval.read_path_map(text) == {
+        "Home/Heating/old-boiler.md": ["Home/Heating/notes/boiler.md", "Home/Heating/SUMMARY.md"],
+        "Work/old cpu.md": ["Work/Devops/db-resize/research-cpu.md"],
+    }
+
+
+def test_filtered_runner_accepts_a_new_path_as_the_old_expected_note(indexed):
+    questions = [
+        {"id": "d1", "type": "fact", "question": "boiler?", "expected": ["Home/Heating/old-boiler.md"]},
+        {"id": "d2", "type": "fact", "question": "cpu?", "expected": ["Work/old-cpu.md"]},
+    ]
+    path_map = {
+        "Home/Heating/old-boiler.md": ["Home/Heating/notes/boiler.md", "Home/Heating/SUMMARY.md"],
+        "Work/old-cpu.md": ["Work/Devops/db-resize/research-cpu.md"],
+    }
+    # the baseline finds part 1 of the split, the new code finds part 2: both count for the old note
+    base_hits = {"boiler?": ["Home/Heating/notes/boiler.md"], "cpu?": ["Work/Devops/db-resize/research-cpu.md"]}
+    new_hits = {"boiler?": ["Home/Heating/SUMMARY.md"], "cpu?": ["Home/Bike/shortlist.md"]}
+    lines, regressed, calls, searched = filtered_run(
+        indexed, questions, new_hits=new_hits, base_hits=base_hits, path_map=path_map
+    )
+    assert "d1 K=5 base 1.00 new 1.00" in "\n".join(lines)
+    assert "d2 K=5 base 1.00 new 0.00 LOWER" in "\n".join(lines)
+    assert regressed == ["d2"]
+    cfg, conn = indexed
+    vault, project, area = conn.execute(
+        "SELECT vault, project, area FROM doc WHERE path = 'Work/Devops/db-resize/research-cpu.md'"
+    ).fetchone()
+    assert {k: searched[1][k] for k in ("vault", "project", "area")} == {
+        "vault": vault,
+        "project": project,
+        "area": area,
+    }
+    # with no path map, the old paths are not in the index: no question
+    lines, regressed, _, _ = filtered_run(indexed, questions, new_hits=new_hits, base_hits=base_hits)
+    assert lines[0].endswith("n=0") and regressed == []
+
+
+# --- the command line ---------------------------------------------------------------------------------------------
+
+
+def kb_home(tmp_path, baseline=False):
+    """A config and an evaluation home with an index file, for the `evaluate kb` and `filtered` commands."""
+    extra = {"baseline_checkout": str(tmp_path / "bc"), "baseline_home": str(tmp_path / "bh")} if baseline else {}
+    cfg = Config(root=tmp_path / "vaults", data_dir=tmp_path / "data", vaults=["Kb"], **extra)
+    config = tmp_path / "config.toml"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    config.write_text(dump_config(cfg, root=str(tmp_path / "vaults"), data_dir=str(tmp_path / "data")))
+    home = agent_eval.eval_home(cfg)
+    (home / "vaults").mkdir(parents=True)
+    (home / "config.toml").write_text(dump_config(replace(cfg, vault_paths={}), root="vaults", data_dir="data"))
+    connect(agent_eval.eval_config(cfg)).close()
+    return config, home
+
+
+def test_evaluate_kb_takes_the_systems_and_writes_the_per_question_file(tmp_path, monkeypatch, capsys):
+    config, home = kb_home(tmp_path)
+    seen = {}
+
+    def spy(ecfg, conn, embedder, sets_dir, base_call, systems=None, out=None):
+        seen.update(sets=sets_dir, base=base_call, systems=systems, out=out)
+        return ["## now"]
+
+    monkeypatch.setattr(kb_eval, "kb_mechanical", spy)
+    # the new code alone needs no baseline in the config
+    assert cli.main(["--config", str(config), "evaluate", "kb", "--systems", "kb,kb-when"]) == 0
+    assert seen == {
+        "sets": home / "sets-kb",
+        "base": None,
+        "systems": ["kb", "kb-when"],
+        "out": home / "results" / "kb-mechanical-kb+kb-when.json",
+    }
+    assert f"per-question values: {seen['out']}" in capsys.readouterr().out
+    assert cli.main(["--config", str(config), "evaluate", "kb", "--systems", "kb,nope"]) == 1
+    assert "--systems" in capsys.readouterr().err
+    assert cli.main(["--config", str(config), "evaluate", "kb", "--systems", "base"]) == 1  # base needs a baseline
+    config, home = kb_home(tmp_path / "with-base", baseline=True)
+    out = tmp_path / "res"
+    assert cli.main(["--config", str(config), "evaluate", "kb", "--out", str(out)]) == 0
+    assert seen["systems"] == ["base", "kb", "kb-eligibility"] and seen["base"] is not None
+    assert seen["out"] == out / "kb-mechanical-base+kb+kb-eligibility.json"
+
+
+def test_evaluate_filtered_reads_the_path_map(tmp_path, monkeypatch):
+    config, home = kb_home(tmp_path, baseline=True)
+    (home / "sets-regression").mkdir()
+    (home / "sets-regression" / "draft-long.json").write_text("[]")
+    pmap = tmp_path / "path-map.md"
+    pmap.write_text("A/old.md → A/new-1.md, A/new-2.md\n")
+    seen = []
+
+    def spy(ecfg, conn, embedder, questions, base_call, path_map=None):
+        seen.append(path_map)
+        return [], []
+
+    monkeypatch.setattr(kb_eval, "filtered", spy)
+    assert cli.main(["--config", str(config), "evaluate", "filtered", "--path-map", str(pmap)]) == 0
+    assert cli.main(["--config", str(config), "evaluate", "filtered"]) == 0
+    assert seen == [{"A/old.md": ["A/new-1.md", "A/new-2.md"]}, None]

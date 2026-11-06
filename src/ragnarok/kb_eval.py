@@ -6,6 +6,11 @@ The question sets are JSON lists in <data_dir>/eval/sets-kb/<class>.json. A ques
 `gold_eligibility` (search filters that admit the gold), `gold_route`, `gold_entities`, `gold_claims`,
 `distractors` (paths with a kind: stale, duplicate, homonym) and `origin`.
 
+A question of a kind of question has `class` now, future or history, `when` (the same value), `question`,
+`question_alt`, `answer`, `gold` (paths with a grade; it can be empty) and `wrong` (paths). Its measures are
+answer-first and wrong (wrong@5 in the mechanical runner, wrong citation for an agent). A question with empty gold
+stays in the runs: its answer-first is 0.
+
 The unit of analysis is the question: its value is the mean of its runs, and the paired bootstrap resamples the
 questions. A RUN run (it crashed, timed out, or gave no final JSON object) gets the worst value of each measure.
 """
@@ -26,10 +31,32 @@ from .evaluate import bootstrap, score_draft
 from .search import CANDIDATES, search
 from .trace import find_lines
 
-MEASURES = ("canonical_first", "stale", "f1", "route", "no_answer")
-WORST = {"canonical_first": 0.0, "stale": 1.0, "f1": 0.0, "route": 0.0, "no_answer": 0.0, "run": True}
+MEASURES = ("canonical_first", "stale", "f1", "route", "no_answer", "answer_first", "wrong")
+WORST = {
+    "canonical_first": 0.0,
+    "stale": 1.0,
+    "f1": 0.0,
+    "route": 0.0,
+    "no_answer": 0.0,
+    "answer_first": 0.0,
+    "wrong": 1.0,
+    "run": True,
+}
 STALE_TOP = 5  # the mechanical stale citation: a stale distractor in the top 5
+WRONG_TOP = 5  # the mechanical wrong@5: a wrong note in the top 5
 KB_LIMIT = 10  # the documents that the mechanical KB runner asks for
+KINDS = ("now", "future", "history")  # the classes of a kind of question
+# the systems of the mechanical runner: the baseline over MCP, the new code with no `when` (the rule list decides),
+# the new code with the gold eligibility as filters, the new code with the `when` of the question (a diagnostic)
+SYSTEMS = ("base", "kb", "kb-eligibility", "kb-when")
+DEFAULT_SYSTEMS = ("base", "kb", "kb-eligibility")
+# the mechanical measures: title and sign (+1: a higher value is better, -1: a lower value is better)
+MECHANICAL = {
+    "canonical_first": ("canonical-first", 1),
+    "stale": (f"stale@{STALE_TOP}", -1),
+    "answer_first": ("answer-first", 1),
+    "wrong": (f"wrong@{WRONG_TOP}", -1),
+}
 
 
 class Matcher:
@@ -61,10 +88,18 @@ def stale_paths(q: dict) -> set[str]:
     return {d["path"] for d in q.get("distractors", []) if d.get("kind") == "stale"}
 
 
+def wrong_paths(q: dict) -> set[str]:
+    return set(q.get("wrong", []))
+
+
 def score_ranked(q: dict, ranked: list[str]) -> dict:
-    """The mechanical measures of one returned list: canonical-first and a stale distractor in the top 5."""
+    """The mechanical measures of one returned list: canonical-first and a stale distractor in the top 5; for a
+    kind of question, answer-first (rank 1 is a top gold) and a wrong note in the top 5."""
+    first = float(bool(ranked) and ranked[0] in top_gold(q))
+    if q.get("class") in KINDS:
+        return {"answer_first": first, "wrong": float(bool(wrong_paths(q) & set(ranked[:WRONG_TOP])))}
     return {
-        "canonical_first": float(bool(ranked) and ranked[0] in top_gold(q)),
+        "canonical_first": first,
         "stale": float(bool(stale_paths(q) & set(ranked[:STALE_TOP]))),
     }
 
@@ -86,6 +121,8 @@ def score_run(q: dict, run: dict, match) -> dict:
         "f1": f1(match(entities), match(q.get("gold_entities", []))),
         "route": float(run["route"] == q.get("gold_route")),
         "no_answer": float(not notes and not entities),
+        "answer_first": float(bool(notes) and notes[0] in top_gold(q)),
+        "wrong": float(bool(wrong_paths(q) & set(notes))),
         "run": False,
     }
 
@@ -117,7 +154,35 @@ ROWS = {
     "join": [("f1", "Set F1", 1)],
     "live": [("route", "Correct route", 1)],
     "negative": [("route", "Correct route", 1), ("no_answer", "No-answer accuracy", 1)],
+    **{kind: [("answer_first", "Answer-first", 1), ("wrong", "Wrong citation", -1)] for kind in KINDS},
 }
+AGENT = {measure: (title, sign) for rows in ROWS.values() for measure, title, sign in rows}
+
+
+def agent_values(sets: dict[str, list[dict]], results: dict, agents: list[str], match) -> dict[str, list[dict]]:
+    """The rows of each agent: for each question that each agent ran, id, set, class and the mean over the runs
+    of each measure of its class. Run n of one agent pairs with run n of the other."""
+    values: dict[str, list[dict]] = {a: [] for a in agents}
+    for name, questions in sets.items():
+        for q in questions:
+            r = results.get(name, {}).get(q["id"])
+            if not r or any(not r.get(a) for a in agents):
+                continue
+            n = min(len(r[a]) for a in agents)
+            for a in agents:
+                value = question_value([score_run(q, run, match) for run in r[a][:n]])
+                measures = {m: value[m] for m, _, _ in ROWS[q["class"]]}
+                values[a].append({"id": q["id"], "set": name, "class": q["class"], **measures})
+    return values
+
+
+def write_per_question(path: Path, runner: str, measures: dict, values: dict[str, list[dict]]) -> None:
+    """The per-question file of a run, for `evaluate compare`: the runner, the title and sign of each measure, and
+    the rows of each system in the order of the run."""
+    used = {m for rows in values.values() for r in rows for m in r}
+    data = {"runner": runner, "measures": {m: list(t) for m, t in measures.items() if m in used}, "systems": values}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=1, ensure_ascii=False))
 
 
 def report_rows(sets: dict[str, list[dict]], results: dict, agents: list[str], match) -> list[str]:
@@ -129,15 +194,10 @@ def report_rows(sets: dict[str, list[dict]], results: dict, agents: list[str], m
         return [
             f"KB rows need two agents (test and baseline) in one run; got {', '.join(agents)}: no paired difference"
         ]
+    values = agent_values(sets, results, agents, match)
     by_class: dict[str, list[dict]] = {}
-    for name, questions in sets.items():
-        for q in questions:
-            r = results.get(name, {}).get(q["id"])
-            if not r or any(not r.get(a) for a in agents):
-                continue
-            n = min(len(r[a]) for a in agents)
-            row = {a: question_value([score_run(q, run, match) for run in r[a][:n]]) for a in agents}
-            by_class.setdefault(q["class"], []).append(row)
+    for i, row in enumerate(values[test]):
+        by_class.setdefault(row["class"], []).append({a: values[a][i] for a in agents})
     lines = []
     for cls, rows in by_class.items():
         for measure, title, sign in ROWS[cls]:
@@ -200,74 +260,142 @@ def _paths(hits) -> list[str]:
     return [h.path for h in hits]
 
 
-def kb_mechanical(ecfg: Config, conn, embedder, sets_dir: Path, base_call) -> list[str]:
-    """canonical-first and stale citation of the baseline (its search tool), the new code with the query only
-    (kb), and the new code with the gold eligibility as filters (kb-eligibility), for each set of sets_dir.
+def _listed(q: dict) -> list[str]:
+    """The gold, distractor and wrong paths of a question."""
+    return [*gold_paths(q), *(d["path"] for d in q.get("distractors", [])), *q.get("wrong", [])]
 
-    The two query forms are the two runs of a question. Each gold or distractor path that a system does not hold
-    gives a MEASURE line.
+
+def kb_mechanical(
+    ecfg: Config, conn, embedder, sets_dir: Path, base_call, systems=DEFAULT_SYSTEMS, out: Path | None = None
+) -> list[str]:
+    """The mechanical measures of each system in systems, for each set of sets_dir: canonical-first and stale@5
+    for a single-truth question, answer-first and wrong@5 for a kind of question.
+
+    The systems: base, the baseline through its tool calls (base_call; None when base is not in systems); kb,
+    the new code with the query only, so the rule list decides the kind of question; kb-eligibility, the new code
+    with the gold eligibility as filters; kb-when, the new code with the `when` of the question (a diagnostic).
+    The two query forms are the two runs of a question. A question with no gold stays out, except a kind of
+    question. Each gold, distractor or wrong path that a system does not hold gives a MEASURE line. With out, write
+    the per-question file there.
     """
-    known = {p for (p,) in conn.execute("SELECT path FROM doc")}
+    systems = list(systems)
+    if unknown := [s for s in systems if s not in SYSTEMS]:
+        raise ValueError(f"unknown systems {', '.join(unknown)}; the systems are {', '.join(SYSTEMS)}")
+    if "base" in systems and base_call is None:
+        raise ValueError("the system base needs the baseline")
+    new_code = any(s != "base" for s in systems)
+    known = {p for (p,) in conn.execute("SELECT path FROM doc")} if new_code else set()
     lines: list[str] = []
+    values: dict[str, list[dict]] = {s: [] for s in systems}
     for path in sorted(sets_dir.glob("*.json")):
         questions = json.loads(path.read_text())
-        listed = sorted(
-            {p for q in questions for p in [*gold_paths(q), *(d["path"] for d in q.get("distractors", []))]}
-        )
-        graded = [q for q in questions if q.get("gold")]
-        searches = [("search", {"query": form, "limit": KB_LIMIT}) for q in graded for form in _forms(q)]
-        answers = base_call([("open_note", {"path": p, "outline": True}) for p in listed] + searches)
-        held = {p for p, a in zip(listed, answers, strict=False) if "error" not in a}
-        base = iter(answers[len(listed) :])
+        listed = sorted({p for q in questions for p in _listed(q)})
+        graded = [q for q in questions if q.get("gold") or q.get("class") in KINDS]
+        held: set[str] = set()
+        base = iter(())
+        if "base" in systems:
+            searches = [("search", {"query": form, "limit": KB_LIMIT}) for q in graded for form in _forms(q)]
+            answers = base_call([("open_note", {"path": p, "outline": True}) for p in listed] + searches)
+            held = {p for p, a in zip(listed, answers, strict=False) if "error" not in a}
+            base = iter(answers[len(listed) :])
+        checks = [*([("base", held)] if "base" in systems else []), *([("kb", known)] if new_code else [])]
         for q in questions:
-            for p in [*gold_paths(q), *(d["path"] for d in q.get("distractors", []))]:
-                lines += [
-                    f"MEASURE {q['id']} {p} absent from {s}" for s, h in (("base", held), ("kb", known)) if p not in h
-                ]
+            for p in _listed(q):
+                lines += [f"MEASURE {q['id']} {p} absent from {s}" for s, h in checks if p not in h]
         rows = []
         for q in graded:
-            runs: dict[str, list[dict]] = {"base": [], "kb": [], "kb-eligibility": []}
+            runs: dict[str, list[dict]] = {s: [] for s in systems}
             for form in _forms(q):
-                result = next(base)
-                if "error" in result:
-                    lines.append(f"ERROR {q['id']} baseline search: {result['error']}")
-                runs["base"].append(score_ranked(q, [h["path"] for h in result.get("results", [])]))
-                runs["kb"].append(score_ranked(q, _paths(search(ecfg, conn, embedder, form, limit=KB_LIMIT))))
-                try:
-                    hits = search(ecfg, conn, embedder, form, limit=KB_LIMIT, **_eligibility(q))
-                except LookupError as e:  # a gold subject that does not resolve
-                    lines.append(f"QUERY {q['id']} gold_eligibility: {e}")
-                    hits = []
-                runs["kb-eligibility"].append(score_ranked(q, _paths(hits)))
-            rows.append({s: {m: float(np.mean([r[m] for r in rs])) for m in rs[0]} for s, rs in runs.items()})
-        lines.append(f"## {path.stem}: canonical-first and stale@{STALE_TOP}, n={len(rows)}")
+                if "base" in systems:
+                    result = next(base)
+                    if "error" in result:
+                        lines.append(f"ERROR {q['id']} baseline search: {result['error']}")
+                    runs["base"].append(score_ranked(q, [h["path"] for h in result.get("results", [])]))
+                if "kb" in systems:
+                    runs["kb"].append(score_ranked(q, _paths(search(ecfg, conn, embedder, form, limit=KB_LIMIT))))
+                if "kb-eligibility" in systems:
+                    try:
+                        hits = search(ecfg, conn, embedder, form, limit=KB_LIMIT, **_eligibility(q))
+                    except LookupError as e:  # a gold subject that does not resolve
+                        lines.append(f"QUERY {q['id']} gold_eligibility: {e}")
+                        hits = []
+                    runs["kb-eligibility"].append(score_ranked(q, _paths(hits)))
+                if "kb-when" in systems:
+                    hits = search(ecfg, conn, embedder, form, limit=KB_LIMIT, when=q.get("when"))
+                    runs["kb-when"].append(score_ranked(q, _paths(hits)))
+            row = {s: {m: float(np.mean([r[m] for r in rs])) for m in rs[0]} for s, rs in runs.items()}
+            rows.append(row)
+            for s in systems:
+                values[s].append({"id": q["id"], "set": path.stem, "class": q.get("class"), **row[s]})
+        measures = list(score_ranked(graded[0], [])) if graded else ["canonical_first", "stale"]
+        lines.append(f"## {path.stem}: {' and '.join(MECHANICAL[m][0] for m in measures)}, n={len(rows)}")
         if not rows:
             continue
-        for measure, title, sign in (("canonical_first", "canonical-first", 1), ("stale", f"stale@{STALE_TOP}", -1)):
+        for measure in measures:
+            title, sign = MECHANICAL[measure]
             lines.append(
                 f"  {title} " + "  ".join(f"{s} {np.mean([r[s][measure] for r in rows]):.2f}" for s in rows[0])
             )
-            for system in ("kb", "kb-eligibility"):
+            if "base" not in systems:
+                continue  # a system of another home pairs with this one in `evaluate compare`
+            for system in [s for s in systems if s != "base"]:
                 a, b = (system, "base") if sign > 0 else ("base", system)
                 d, lo, hi = bootstrap([r[a][measure] for r in rows], [r[b][measure] for r in rows])
-                lines.append(f"    {a} - {b}: {d:+.2f} [{lo:+.2f}, {hi:+.2f}]")
+                note = " (diagnostic)" if system == "kb-when" else ""
+                lines.append(f"    {a} - {b}{note}: {d:+.2f} [{lo:+.2f}, {hi:+.2f}]")
+    if out is not None:
+        write_per_question(out, "mechanical", MECHANICAL, values)
     return lines
 
 
 # --- the filtered no-regression runner ----------------------------------------------------------------------------
 
 
-def filtered(ecfg: Config, conn, embedder, questions: list[dict], base_call, new_search=search):
+def read_path_map(text: str) -> dict[str, list[str]]:
+    """The path map of a conversion: one line for each old path, `<old> → <new>, <new>` (or `->`). Backticks, a
+    leading `- `, blank lines and lines that start with # are ignored."""
+    out: dict[str, list[str]] = {}
+    for raw in text.splitlines():
+        line = raw.strip().removeprefix("- ").replace("`", "").strip()
+        if not line or line.startswith("#"):
+            continue
+        sep = "→" if "→" in line else "->"
+        if sep not in line:
+            raise ValueError(f"a path map line with no → or ->: {raw!r}")
+        old, new = line.split(sep, 1)
+        out[old.strip()] = [p.strip() for p in new.split(",") if p.strip()]
+    return out
+
+
+def filtered(
+    ecfg: Config,
+    conn,
+    embedder,
+    questions: list[dict],
+    base_call,
+    new_search=search,
+    path_map: dict[str, list[str]] | None = None,
+):
     """Recall@K of the baseline and of the new code (authority off) with the filters of the first expected note.
 
     The questions are those with an expected note in the index. K is the K of score_draft. The filters are vault,
     project and area of the first expected note, and its type only when both systems give the same type to each
     expected note. Return the lines and the ids of the questions where the new recall is lower.
+
+    path_map (old path to new paths) maps an expected note that a conversion moved or split: each of its new paths
+    in the index stands for it, a returned new path counts as the old note, and the filters come from its first
+    new path.
     """
     known = {p for (p,) in conn.execute("SELECT path FROM doc WHERE sensitivity = 'normal'")}
-    questions = [q for q in questions if any(e in known for e in q.get("expected", []))]
-    expected = {q["id"]: [e for e in q["expected"] if e in known] for q in questions}
-    paths = sorted({e for es in expected.values() for e in es})
+    path_map = path_map or {}
+
+    def resolve(e: str) -> list[str]:
+        """The paths in the index that stand for an expected note."""
+        return [*([e] if e in known else []), *(n for n in path_map.get(e, []) if n in known and n != e)]
+
+    questions = [q for q in questions if any(resolve(e) for e in q.get("expected", []))]
+    expected = {q["id"]: [e for e in q["expected"] if resolve(e)] for q in questions}
+    paths = sorted({p for es in expected.values() for e in es for p in resolve(e)})
     meta = {}
     for p in paths:
         row = conn.execute("SELECT vault, project, area, type FROM doc WHERE path = ?", (p,)).fetchone()
@@ -275,24 +403,30 @@ def filtered(ecfg: Config, conn, embedder, questions: list[dict], base_call, new
     base_meta = dict(zip(paths, base_call([("open_note", {"path": p, "outline": True}) for p in paths]), strict=True))
     plans = []
     for q in questions:
-        first = meta[expected[q["id"]][0]]
+        first = meta[resolve(expected[q["id"]][0])[0]]
         filters = {k: first[k] for k in ("vault", "project", "area") if first[k] is not None}
-        if first["type"] is not None and all(base_meta[e].get("type") == meta[e]["type"] for e in expected[q["id"]]):
+        resolved = [p for e in expected[q["id"]] for p in resolve(e)]
+        if first["type"] is not None and all(base_meta[p].get("type") == meta[p]["type"] for p in resolved):
             filters["type"] = first["type"]
         k = 10 if (q.get("type") or "").startswith("synthesis") else 5
         plans.append((q, filters, k))
     base = base_call([("search", {"query": q["question"], **f, "limit": k}) for q, f, k in plans])
     lines, regressed = [f"# filtered recall@K, baseline and new code (authority off), n={len(plans)}"], []
     for (q, f, k), result in zip(plans, base, strict=True):
+        # a returned path that stands for an expected note counts as that note (the first one, for a merge)
+        alias = {p: e for e in reversed(expected[q["id"]]) for p in resolve(e)}
         ranked = {
-            "base": [h["path"] for h in result.get("results", [])],
-            "new": _paths(new_search(ecfg, conn, embedder, q["question"], **f, limit=k, authority=False)),
+            "base": [alias.get(h["path"], h["path"]) for h in result.get("results", [])],
+            "new": [
+                alias.get(p, p)
+                for p in _paths(new_search(ecfg, conn, embedder, q["question"], **f, limit=k, authority=False))
+            ],
         }
         if "error" in result:  # a failed baseline search is no measurement: the question cannot pass
             lines.append(f"ERROR {q['id']} baseline search: {result['error']}")
             regressed.append(q["id"])
             continue
-        s = score_draft(q, ranked, known, ["base", "new"])
+        s = score_draft(q, ranked, known | set(expected[q["id"]]), ["base", "new"])
         lower = s["new_recall"] < s["base_recall"]
         if lower:
             regressed.append(q["id"])

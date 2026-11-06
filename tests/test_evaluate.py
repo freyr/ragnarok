@@ -1,4 +1,10 @@
-from ragnarok.evaluate import METHODS, bootstrap, inside, pool_markdown, read_pool_markdown, score_hard
+import json
+
+import pytest
+
+from ragnarok import cli
+from ragnarok.config import Config, dump_config
+from ragnarok.evaluate import METHODS, bootstrap, compare, inside, pool_markdown, read_pool_markdown, score_hard
 
 ROWS = [
     {
@@ -58,3 +64,67 @@ def test_note_precision_uses_checked_notes():
     r = score_hard(q, ranked)
     assert r["hybrid_prec@5"] == 0.4
     assert r["hybrid_nprec@5"] == 0.2
+
+
+MEASURES = {"answer_first": ["answer-first", 1], "wrong": ["wrong@5", -1]}
+
+
+def row(qid, cls, answer_first, wrong):
+    return {"id": qid, "set": cls, "class": cls, "answer_first": answer_first, "wrong": wrong}
+
+
+# the first file: system C; the second file: system A, in another order, with one question of its own
+FIRST = {
+    "runner": "mechanical",
+    "measures": MEASURES,
+    "systems": {
+        "kb": [row("a1", "now", 1.0, 0.0), row("a2", "now", 0.5, 0.0), row("a3", "now", 1.0, 0.5)]
+        + [row("a4", "future", 0.0, 0.0)]
+    },
+}
+SECOND = {
+    "runner": "mechanical",
+    "measures": MEASURES,
+    "systems": {
+        "base": [row("a3", "now", 0.0, 1.0), row("a5", "now", 1.0, 0.0), row("a1", "now", 0.0, 1.0)]
+        + [row("a2", "now", 0.5, 0.0), row("a4", "future", 1.0, 0.0)]
+    },
+}
+
+
+def test_compare_pairs_by_question_id_and_gives_the_in_run_bootstrap():
+    lines = compare(FIRST, SECOND)
+    # now, in the order of the first file (a1, a2, a3): answer-first C [1, 0.5, 1], A [0, 0.5, 0]: C - A [1, 0, 1]
+    _, lo, hi = bootstrap([1.0, 0.5, 1.0], [0.0, 0.5, 0.0])
+    assert f"  answer-first (n=3): first 0.83, second 0.17; first - second +0.67 [{lo:+.2f}, {hi:+.2f}]" in lines
+    # wrong@5: A [1, 0, 1], C [0, 0, 0.5]: A - C [1, 0, 0.5], mean 0.5
+    _, lo, hi = bootstrap([1.0, 0.0, 1.0], [0.0, 0.0, 0.5])
+    assert f"  wrong@5 (n=3): first 0.17, second 0.67; second - first +0.50 [{lo:+.2f}, {hi:+.2f}]" in lines
+    assert "## now (n=3)" in lines and "## future (n=1)" in lines
+    assert "  answer-first (n=1): first 0.00, second 1.00; first - second -1.00 [-1.00, -1.00]" in lines
+    assert "unpaired: a5 (second only)" in lines
+
+
+def test_compare_needs_one_system_of_each_file_and_the_same_runner():
+    two = {**FIRST, "systems": {**FIRST["systems"], "kb-when": FIRST["systems"]["kb"]}}
+    with pytest.raises(ValueError, match="kb, kb-when"):
+        compare(two, SECOND)
+    assert compare(two, SECOND, first_system="kb-when") == compare(FIRST, SECOND)
+    with pytest.raises(ValueError, match="runner"):
+        compare(FIRST, {**SECOND, "runner": "agent"})
+
+
+def test_evaluate_compare_command(tmp_path, capsys):
+    cfg = Config(root=tmp_path / "vaults", data_dir=tmp_path / "data", vaults=["Kb"])
+    config = tmp_path / "config.toml"
+    config.write_text(dump_config(cfg, root=str(tmp_path / "vaults"), data_dir=str(tmp_path / "data")))
+    first, second = tmp_path / "c.json", tmp_path / "a.json"
+    first.write_text(json.dumps(FIRST))
+    second.write_text(json.dumps(SECOND))
+    assert cli.main(["--config", str(config), "evaluate", "compare", str(first), str(second)]) == 0
+    out = capsys.readouterr().out
+    _, lo, hi = bootstrap([1.0, 0.5, 1.0], [0.0, 0.5, 0.0])
+    assert f"first - second +0.67 [{lo:+.2f}, {hi:+.2f}]" in out
+    assert f"# compare, first {first} (kb), second {second} (base)" in out
+    assert cli.main(["--config", str(config), "evaluate", "compare", str(first)]) == 1
+    assert "two per-question files" in capsys.readouterr().err

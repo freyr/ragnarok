@@ -110,6 +110,54 @@ def bootstrap(a: list[float], b: list[float], n: int = 5000, seed: int = 0) -> t
     return float(d.mean()), float(np.percentile(s, 2.5)), float(np.percentile(s, 97.5))
 
 
+def pick_system(data: dict, name: str | None, which: str) -> tuple[str, list[dict]]:
+    systems = data["systems"]
+    if name is None:
+        if len(systems) != 1:
+            raise ValueError(f"the {which} file holds the systems {', '.join(systems)}: choose one")
+        name = next(iter(systems))
+    if name not in systems:
+        raise ValueError(f"the {which} file holds no system {name!r}; it holds {', '.join(systems)}")
+    return name, systems[name]
+
+
+def compare(first: dict, second: dict, first_system: str | None = None, second_system: str | None = None):
+    """The paired bootstrap of two per-question files (kb_eval.write_per_question), one system of each.
+
+    The questions pair by id, in the order of the first file. For each class and each measure: the two means and
+    the difference in the direction of the gain (first minus second for a measure with sign +1, second minus first
+    for sign -1), with its 95% interval."""
+    if first.get("runner") != second.get("runner"):
+        raise ValueError(f"the files come from different runners: {first.get('runner')}, {second.get('runner')}")
+    _, rows_a = pick_system(first, first_system, "first")
+    _, rows_b = pick_system(second, second_system, "second")
+    by_id = {r["id"]: r for r in rows_b}
+    ids_a = {r["id"] for r in rows_a}
+    by_class: dict[str, list[tuple[dict, dict]]] = {}
+    for r in rows_a:
+        if r["id"] in by_id:
+            by_class.setdefault(r["class"], []).append((r, by_id[r["id"]]))
+    lines = []
+    for cls, pairs in by_class.items():
+        lines.append(f"## {cls} (n={len(pairs)})")
+        for measure, (title, sign) in first["measures"].items():
+            pairs_m = [(a, b) for a, b in pairs if measure in a and measure in b]
+            if not pairs_m:
+                continue
+            va, vb = [a[measure] for a, _ in pairs_m], [b[measure] for _, b in pairs_m]
+            d, lo, hi = bootstrap(va, vb) if sign > 0 else bootstrap(vb, va)
+            label = "first - second" if sign > 0 else "second - first"
+            lines.append(
+                f"  {title} (n={len(pairs_m)}): first {np.mean(va):.2f}, second {np.mean(vb):.2f}; "
+                f"{label} {d:+.2f} [{lo:+.2f}, {hi:+.2f}]"
+            )
+    unpaired = [f"{r['id']} (first only)" for r in rows_a if r["id"] not in by_id]
+    unpaired += [f"{r['id']} (second only)" for r in rows_b if r["id"] not in ids_a]
+    if unpaired:
+        lines.append(f"unpaired: {', '.join(unpaired)}")
+    return lines
+
+
 def _table(rows: list[dict], measure: str, title: str) -> list[str]:
     lines = [
         f"{title} n={len(rows)}",

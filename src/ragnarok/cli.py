@@ -18,7 +18,8 @@ COMMANDS = {
     "survey": "Print the facts that the path rules of a vault need",
     "explain": "Print one traced call as a stage table",
     "eval": "Run the evaluation sets, make the mirror (prepare), print its hash (mirror-hash), run the KB sets"
-    " (kb), the filtered no-regression check (filtered) or label the failed runs (attribute)",
+    " (kb), the filtered no-regression check (filtered), label the failed runs (attribute) or compare two"
+    " per-question files (compare)",
     "cache": "Work with the embedding cache in core.db",
     "kb": "Knowledge base: check (print the count of each integrity check from the stored violations)",
     "migrate": "Move a version 1 index into core.db and a new index.db, with no new embedding",
@@ -61,9 +62,21 @@ def build_parser() -> argparse.ArgumentParser:
     xp.add_argument("--json", action="store_true", help="print the raw record (--gold applies to the table only)")
     ep = parsers["eval"]
     ep.add_argument(
-        "kind", choices=["mechanical", "pool", "agent", "prepare", "mirror-hash", "kb", "filtered", "attribute"]
+        "kind",
+        choices=["mechanical", "pool", "agent", "prepare", "mirror-hash", "kb", "filtered", "attribute", "compare"],
     )
-    ep.add_argument("run_dir", nargs="?", type=Path, help="attribute: the folder of the agent runs")
+    ep.add_argument(
+        "run_dir", nargs="?", type=Path, help="attribute: the folder of the agent runs; compare: the first file"
+    )
+    ep.add_argument("second", nargs="?", type=Path, help="compare: the second per-question file")
+    ep.add_argument("--first-system", help="compare: the system of the first file (default its only system)")
+    ep.add_argument("--second-system", help="compare: the system of the second file (default its only system)")
+    ep.add_argument(
+        "--systems",
+        default="base,kb,kb-eligibility",
+        help="kb: comma list of base, kb, kb-eligibility and kb-when (kb-when gives the `when` of each question)",
+    )
+    ep.add_argument("--path-map", type=Path, help="filtered: the path map of a conversion (old path → new paths)")
     ep.add_argument("--trace-dir", type=Path, help="attribute: the trace folder (default the evaluation home's)")
     ep.add_argument(
         "--confirm-measure", action="append", default=[], help="attribute: a question id that is MEASURE (repeatable)"
@@ -408,6 +421,8 @@ def cmd_eval(cfg, args) -> int:
         return 0
     if args.kind in ("kb", "filtered", "attribute"):
         return _kb_eval(cfg, args)
+    if args.kind == "compare":
+        return _compare(args)
     if args.kind == "mirror-hash":
         from .agent_eval import eval_home, mirror_hash
 
@@ -482,8 +497,13 @@ def _kb_eval(cfg, args) -> int:
         )
         print("\n".join(result["lines"]))
         return 0
-    if not (cfg.baseline_checkout and cfg.baseline_home):
-        print("eval kb and filtered need baseline_checkout and baseline_home in config.toml", file=sys.stderr)
+    systems = [s.strip() for s in args.systems.split(",") if s.strip()]
+    if not systems or [s for s in systems if s not in kb_eval.SYSTEMS]:
+        print(f"--systems takes a comma list of {', '.join(kb_eval.SYSTEMS)}", file=sys.stderr)
+        return 1
+    needs_base = args.kind == "filtered" or "base" in systems
+    if needs_base and not (cfg.baseline_checkout and cfg.baseline_home):
+        print("eval filtered and the system base need baseline_checkout and baseline_home", file=sys.stderr)
         return 1
     if not ecfg.index_path.exists():
         print(f"No index at {ecfg.index_path}. Run `ragnarok eval prepare`.", file=sys.stderr)
@@ -491,18 +511,42 @@ def _kb_eval(cfg, args) -> int:
     from .embed import OllamaEmbedder
     from .index import connect
 
-    base = kb_eval.mcp_caller(Path(cfg.baseline_checkout), Path(cfg.baseline_home))
+    base = kb_eval.mcp_caller(Path(cfg.baseline_checkout), Path(cfg.baseline_home)) if needs_base else None
     conn = connect(ecfg)
     try:
         if args.kind == "kb":
-            lines = kb_eval.kb_mechanical(
-                ecfg, conn, OllamaEmbedder(ecfg), args.sets or eval_home(cfg) / "sets-kb", base
-            )
+            out = (args.out or eval_home(cfg) / "results") / f"kb-mechanical-{'+'.join(systems)}.json"
+            sets = args.sets or eval_home(cfg) / "sets-kb"
+            lines = kb_eval.kb_mechanical(ecfg, conn, OllamaEmbedder(ecfg), sets, base, systems=systems, out=out)
+            lines.append(f"per-question values: {out}")
         else:
             path = (args.sets or eval_home(cfg) / "sets-regression") / "draft-long.json"
-            lines, _ = kb_eval.filtered(ecfg, conn, OllamaEmbedder(ecfg), json.loads(path.read_text()), base)
+            path_map = kb_eval.read_path_map(args.path_map.read_text()) if args.path_map else None
+            lines, _ = kb_eval.filtered(
+                ecfg, conn, OllamaEmbedder(ecfg), json.loads(path.read_text()), base, path_map=path_map
+            )
     finally:
         conn.close()
+    print("\n".join(lines))
+    return 0
+
+
+def _compare(args) -> int:
+    """eval compare: the paired bootstrap of two per-question files of kb or agent runs."""
+    from .evaluate import compare, pick_system
+
+    if args.run_dir is None or args.second is None:
+        print("eval compare needs two per-question files", file=sys.stderr)
+        return 1
+    first, second = (json.loads(p.read_text()) for p in (args.run_dir, args.second))
+    try:
+        name_a, _ = pick_system(first, args.first_system, "first")
+        name_b, _ = pick_system(second, args.second_system, "second")
+        lines = compare(first, second, name_a, name_b)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
+    print(f"# compare, first {args.run_dir} ({name_a}), second {args.second} ({name_b})")
     print("\n".join(lines))
     return 0
 
