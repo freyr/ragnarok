@@ -177,11 +177,14 @@ def agent_values(sets: dict[str, list[dict]], results: dict, agents: list[str], 
     return values
 
 
-def write_per_question(path: Path, runner: str, measures: dict, values: dict[str, list[dict]]) -> None:
-    """The per-question file of a run, for `evaluate compare`: the runner, the title and sign of each measure, and
-    the rows of each system in the order of the run."""
+def write_per_question(
+    path: Path, runner: str, measures: dict, values: dict[str, list[dict]], extra: dict | None = None
+) -> None:
+    """The per-question file of a run, for `evaluate compare`: the runner, the title and sign of each measure, the
+    rows of each system in the order of the run, and the keys of extra."""
     used = {m for rows in values.values() for r in rows for m in r}
     data = {"runner": runner, "measures": {m: list(t) for m, t in measures.items() if m in used}, "systems": values}
+    data.update(extra or {})
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=1, ensure_ascii=False))
 
@@ -267,7 +270,14 @@ def _listed(q: dict) -> list[str]:
 
 
 def kb_mechanical(
-    ecfg: Config, conn, embedder, sets_dir: Path, base_call, systems=DEFAULT_SYSTEMS, out: Path | None = None
+    ecfg: Config,
+    conn,
+    embedder,
+    sets_dir: Path,
+    base_call,
+    systems=DEFAULT_SYSTEMS,
+    out: Path | None = None,
+    collect: list | None = None,
 ) -> list[str]:
     """The mechanical measures of each system in systems, for each set of sets_dir: canonical-first and stale@5
     for a single-truth question, answer-first and wrong@5 for a kind of question.
@@ -277,7 +287,8 @@ def kb_mechanical(
     with the gold eligibility as filters; kb-when, the new code with the `when` of the question (a diagnostic).
     The two query forms are the two runs of a question. A question with no gold stays out, except a kind of
     question. Each gold, distractor or wrong path that a system does not hold gives a MEASURE line. With out, write
-    the per-question file there.
+    the per-question file there. With collect, append the returned paths of each query form and system to it (set,
+    id, system, form, paths).
     """
     systems = list(systems)
     if unknown := [s for s in systems if s not in SYSTEMS]:
@@ -307,23 +318,27 @@ def kb_mechanical(
         for q in graded:
             runs: dict[str, list[dict]] = {s: [] for s in systems}
             for form in _forms(q):
+                ranked: dict[str, list[str]] = {}
                 if "base" in systems:
                     result = next(base)
                     if "error" in result:
                         lines.append(f"ERROR {q['id']} baseline search: {result['error']}")
-                    runs["base"].append(score_ranked(q, [h["path"] for h in result.get("results", [])]))
+                    ranked["base"] = [h["path"] for h in result.get("results", [])]
                 if "kb" in systems:
-                    runs["kb"].append(score_ranked(q, _paths(search(ecfg, conn, embedder, form, limit=KB_LIMIT))))
+                    ranked["kb"] = _paths(search(ecfg, conn, embedder, form, limit=KB_LIMIT))
                 if "kb-eligibility" in systems:
                     try:
                         hits = search(ecfg, conn, embedder, form, limit=KB_LIMIT, **_eligibility(q))
                     except LookupError as e:  # a gold subject that does not resolve
                         lines.append(f"QUERY {q['id']} gold_eligibility: {e}")
                         hits = []
-                    runs["kb-eligibility"].append(score_ranked(q, _paths(hits)))
+                    ranked["kb-eligibility"] = _paths(hits)
                 if "kb-when" in systems:
-                    hits = search(ecfg, conn, embedder, form, limit=KB_LIMIT, when=q.get("when"))
-                    runs["kb-when"].append(score_ranked(q, _paths(hits)))
+                    ranked["kb-when"] = _paths(search(ecfg, conn, embedder, form, limit=KB_LIMIT, when=q.get("when")))
+                for s, paths in ranked.items():
+                    runs[s].append(score_ranked(q, paths))
+                    if collect is not None:
+                        collect.append({"set": path.stem, "id": q["id"], "system": s, "form": form, "paths": paths})
             row = {s: {m: float(np.mean([r[m] for r in rs])) for m in rs[0]} for s, rs in runs.items()}
             rows.append(row)
             for s in systems:

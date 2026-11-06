@@ -664,7 +664,7 @@ def test_a_question_with_empty_gold_stays_with_answer_first_0_and_wrong_from_its
     assert (score["answer_first"], score["wrong"]) == (0.0, 1.0)
 
 
-def mechanical_new(vault, tmp_path, monkeypatch, systems, base=None):
+def mechanical_new(vault, tmp_path, monkeypatch, systems, base=None, collect=None):
     """The mechanical runner on a `now` set with a fake new-code search: kb (no `when`) and kb-when."""
     vault.dimension = 8
     conn = connect(vault)
@@ -682,12 +682,21 @@ def mechanical_new(vault, tmp_path, monkeypatch, systems, base=None):
 
     monkeypatch.setattr(kb_eval, "search", fake_search)
     out = tmp_path / "per-question.json"
-    lines = kb_eval.kb_mechanical(vault, conn, FakeEmbedder(), sets, base, systems=systems, out=out)
+    lines = kb_eval.kb_mechanical(vault, conn, FakeEmbedder(), sets, base, systems=systems, out=out, collect=collect)
     return lines, json.loads(out.read_text()), searched
 
 
 def test_mechanical_runner_runs_the_new_code_alone_with_and_without_when(vault, tmp_path, monkeypatch):
-    lines, data, searched = mechanical_new(vault, tmp_path, monkeypatch, ["kb", "kb-when"])
+    collect = []
+    lines, data, searched = mechanical_new(vault, tmp_path, monkeypatch, ["kb", "kb-when"], collect=collect)
+    # the collector gets the returned paths of each query form and system, with no second search
+    assert len(searched) == 8 and len(collect) == 8
+    assert collect[:4] == [
+        {"set": "now", "id": "nw-01", "system": "kb", "form": NOW["question"], "paths": [GOLD, WRONG]},
+        {"set": "now", "id": "nw-01", "system": "kb-when", "form": NOW["question"], "paths": [GOLD]},
+        {"set": "now", "id": "nw-01", "system": "kb", "form": NOW["question_alt"], "paths": [OTHER, STALE]},
+        {"set": "now", "id": "nw-01", "system": "kb-when", "form": NOW["question_alt"], "paths": [GOLD]},
+    ]
     # kb gives no `when` (the rule list decides); kb-when gives the `when` of the question
     assert sorted({w for _, w in searched}, key=str) == [None, "now"]
     assert len(searched) == 8  # 2 questions, 2 forms, 2 systems

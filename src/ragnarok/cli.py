@@ -20,6 +20,8 @@ COMMANDS = {
     "eval": "Run the evaluation sets, make the mirror (prepare), print its hash (mirror-hash), run the KB sets"
     " (kb), the filtered no-regression check (filtered), label the failed runs (attribute) or compare two"
     " per-question files (compare)",
+    "bench": "Measure the new code against A, B and the last run on the fixture, with the deciders of"
+    " <home>/bench.toml (run), or rebuild the fixture indexes and record the fixture hash (index)",
     "cache": "Work with the embedding cache in core.db",
     "kb": "Knowledge base: check (print the count of each integrity check from the stored violations)",
     "migrate": "Move a version 1 index into core.db and a new index.db, with no new embedding",
@@ -100,6 +102,12 @@ def build_parser() -> argparse.ArgumentParser:
     ep.add_argument("--out", type=Path, help="folder for the results (default <data_dir>/eval/results)")
     ep.add_argument("--min-words", type=int, help="use a separate index with this minimum chunk size")
     ep.add_argument("--reuse-mirror", action="store_true", help="agent, prepare: keep the mirror that exists")
+    bn = parsers["bench"]
+    bn.add_argument("action", choices=["run", "index"])
+    bn.add_argument("--label", default="run", help="run: the name at the end of the run folder")
+    bn.add_argument(
+        "--record-only", action="store_true", help="index: record the fixture hash of the current indexes, no rebuild"
+    )
     cp = parsers["cache"]
     cp.add_argument("action", choices=["import"])
     cp.add_argument("--from", dest="source", type=Path, required=True, help="a version 1 index file")
@@ -551,6 +559,28 @@ def _compare(args) -> int:
     return 0
 
 
+def cmd_bench(cfg, args) -> int:
+    from . import bench, kb_eval
+    from .agent_eval import eval_config
+
+    home = _config_file(args).parent
+    try:
+        if args.action == "index":
+            print(bench.record_index(cfg, home) if args.record_only else bench.build_index(cfg, home))
+            return 0
+        if not (cfg.baseline_checkout and cfg.baseline_home):
+            print("bench run needs baseline_checkout and baseline_home", file=sys.stderr)
+            return 1
+        from .embed import OllamaEmbedder
+
+        base = kb_eval.mcp_caller(Path(cfg.baseline_checkout), Path(cfg.baseline_home))
+        print(bench.run(cfg, home, args.label, base, OllamaEmbedder(eval_config(cfg))), end="")
+    except (bench.BenchError, FileNotFoundError) as e:
+        print(e, file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_explain(cfg, args) -> int:
     from .trace import find_line, render_explain
 
@@ -699,6 +729,7 @@ HANDLERS = {
     "backfill": cmd_backfill,
     "survey": cmd_survey,
     "eval": cmd_eval,
+    "bench": cmd_bench,
     "explain": cmd_explain,
     "serve": cmd_serve,
     "inspect": cmd_inspect,
