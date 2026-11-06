@@ -247,6 +247,21 @@ def test_type_status_class_and_collection_filters(kb_index):
     assert found(kb_index, status=["archived", "superseded"]) == set()
 
 
+def test_cli_search_takes_class_proposal(tmp_path, monkeypatch, capsys):
+    from ragnarok import cli, embed
+
+    plan = "---\ntype: plan\nsubject: '[[Billing]]'\n---\n# Deploy plan\nWe will deploy the billing service.\n"
+    (tmp_path / "Kb/plans").mkdir(parents=True)
+    (tmp_path / "Kb/plans/deploy-plan.md").write_text(plan)
+    cfg, conn, _ = kb_setup(tmp_path)
+    conn.close()
+    monkeypatch.setattr(embed, "OllamaEmbedder", lambda cfg: TopicEmbedder())
+    args = cli.build_parser().parse_args(["search", "deploy service", "--class", "proposal", "--json"])
+    assert cli.cmd_search(cfg, args) == 0
+    hits = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [(h["path"], h["class"]) for h in hits] == [("Kb/plans/deploy-plan.md", "proposal")]
+
+
 def test_result_has_the_scent_fields(kb_index):
     from ragnarok.tools import Tools
 

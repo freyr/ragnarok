@@ -250,14 +250,90 @@ def test_summary_stage_does_not_reach_notes_outside_the_project(vault):
     assert meta(vault, "Home/Astro/Theory/Field Stop.md").status == "active"
 
 
-def test_how_to_keeps_its_type_and_guide_has_class_none(vault):
+def test_how_to_keeps_its_type_and_guide_has_class_state(vault):
     how_to = resolve(vault, "Home/Bike/x.md", {"type": "how-to"}, "", lambda f: False)
     assert (how_to.type, how_to.sources["type"], how_to.class_) == ("how-to", "frontmatter", "state")
     guide = resolve(vault, "Home/Bike/x.md", {"type": "guide"}, "", lambda f: False)
-    assert (guide.type, guide.class_) == ("guide", "none")
+    assert (guide.type, guide.class_) == ("guide", "state")
     # a raw value outside the closed list still goes through TYPE_MAP
     runbook = resolve(vault, "Home/Bike/x.md", {"type": "runbook"}, "", lambda f: False)
-    assert (runbook.type, runbook.sources["type"], runbook.class_) == ("guide", "frontmatter-map", "none")
+    assert (runbook.type, runbook.sources["type"], runbook.class_) == ("guide", "frontmatter-map", "state")
+
+
+# the default kind of each type, written out here and not read from the configuration
+DEFAULT_KINDS = {
+    "entity": "state",
+    "reference": "state",
+    "how-to": "state",
+    "tutorial": "state",
+    "explanation": "state",
+    "guide": "state",
+    "summary": "state",
+    "drivers": "state",
+    "plan": "proposal",
+    "spec": "proposal",
+    "brainstorm": "proposal",
+    "research": "record",
+    "decision": "record",
+    "incident": "record",
+    "measurement": "record",
+    "meeting": "record",
+    "review": "record",
+    "log": "record",
+    "note": "none",
+    "template": "none",
+}
+
+
+@pytest.mark.parametrize("note_type, kind", sorted(DEFAULT_KINDS.items()))
+def test_the_type_gives_the_default_kind(vault, note_type, kind):
+    m = resolve(vault, "Home/Bike/x.md", {"type": note_type}, "", lambda f: False)
+    assert (m.type, m.class_) == (note_type, kind)
+
+
+@pytest.mark.parametrize(
+    "note_type, value, kind",
+    [
+        ("research", "state", "state"),
+        ("note", "record", "record"),
+        ("plan", "State", "state"),
+        ("how-to", "proposal", "proposal"),
+        ("guide", "bogus", "bogus"),  # kept as given: the check V1 reports it
+    ],
+)
+def test_the_class_key_replaces_the_default_kind(vault, note_type, value, kind):
+    m = resolve(vault, "Home/Bike/x.md", {"type": note_type, "class": value}, "", lambda f: False)
+    assert m.class_ == kind
+
+
+def test_an_entity_document_ignores_the_class_and_validity_keys(vault):
+    fm = {"type": "entity", "kind": "room", "class": "record", "validity": "open"}
+    m = resolve(vault, "Home/Bike/x.md", fm, "", lambda f: False)
+    assert (m.class_, m.validity) == ("state", "current")
+
+
+@pytest.mark.parametrize(
+    "fm, validity",
+    [
+        ({"type": "how-to"}, "current"),
+        ({"type": "plan"}, "open"),
+        ({"type": "research"}, None),
+        ({"type": "note"}, None),
+        ({"type": "how-to", "superseded_by": "[[new]]"}, "superseded"),
+        ({"type": "spec", "superseded_by": "[[new]]"}, "superseded"),
+        ({"type": "decision", "superseded_by": "[[new]]"}, None),
+        ({"type": "note", "class": "proposal"}, "open"),
+        ({"type": "research", "class": "state"}, "current"),
+        # a validity key wins over the default, also with superseded_by
+        ({"type": "spec", "validity": "Accepted"}, "accepted"),
+        ({"type": "how-to", "superseded_by": "[[new]]", "validity": "current"}, "current"),
+        # an invalid value or a key on a record is kept as given: the checks V5 and V6 report it
+        ({"type": "how-to", "validity": "open"}, "open"),
+        ({"type": "decision", "validity": "accepted"}, "accepted"),
+    ],
+)
+def test_the_validity_of_a_note(vault, fm, validity):
+    assert resolve(vault, "Home/Bike/x.md", fm, "", lambda f: False).validity == validity
 
 
 @pytest.mark.parametrize("status", ["superseded", "redirect", "archived"])
@@ -295,11 +371,18 @@ def test_identity_key_for_subject_and_task(vault):
 
 
 def test_identity_key_for_a_project_type(vault):
-    m = resolve(vault, "Home/Heating/plan-boiler.md", {"type": "plan"}, "", lambda f: True)
-    assert (m.project, m.identity_key) == ("Heating", "Home|plan|Heating")
+    m = resolve(vault, "Home/Heating/SUMMARY.md", {"type": "summary"}, "", lambda f: True)
+    assert (m.project, m.identity_key) == ("Heating", "Home|summary|Heating")
     # a note with no project has no key
-    loose = resolve(vault, "Home/loose.md", {"type": "plan", "project": "none"}, "", lambda f: False)
+    loose = resolve(vault, "Home/loose.md", {"type": "summary", "project": "none"}, "", lambda f: False)
     assert loose.project == "none" and loose.identity_key is None
+
+
+@pytest.mark.parametrize("note_type", ["plan", "spec", "brainstorm"])
+def test_a_proposal_has_no_identity_key(vault, note_type):
+    # two proposals of one project are alternatives, not duplicates
+    m = resolve(vault, "Home/Heating/x.md", {"type": note_type}, "", lambda f: True)
+    assert (m.project, m.identity_key) == ("Heating", None)
 
 
 @pytest.mark.parametrize(

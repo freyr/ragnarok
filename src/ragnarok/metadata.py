@@ -74,6 +74,9 @@ TYPE_MAP = {
     "summary": "summary",
 }
 
+# the validity of a note with no `validity` key, by kind; a record and a note with no kind have none
+DEFAULT_VALIDITY = {"state": "current", "proposal": "open"}
+
 JIRA_RE = re.compile(r"\b([A-Z][A-Z0-9]{1,9})-(\d+)\b")
 
 
@@ -90,7 +93,8 @@ class NoteMeta:
     description: str | None = None
     jira: list[str] = field(default_factory=list)
     sources: dict[str, str] = field(default_factory=dict)
-    class_: str = "none"  # the class of the type: state, record or none
+    class_: str = "none"  # the kind: state, proposal, record, or none for no kind
+    validity: str | None = None  # state: current or superseded; proposal: open, accepted, rejected or superseded
     mode: str = "files"
     collection: str = ""
     # a reference stays as text; owner, primary_subject and superseded_by stay empty until the references resolve
@@ -305,6 +309,24 @@ def _type_from_path(parts: list[str]) -> str | None:
     return None
 
 
+def _key_text(fm: dict, key: str) -> str | None:
+    value = fm.get(key)
+    text = str(value).strip().lower() if value is not None else ""
+    return text or None
+
+
+def _kind_and_validity(fm: dict, note_type: str, default_kind: str, successor: str | None) -> tuple[str, str | None]:
+    """The kind (the `class` key, else the default of the type) and the validity (the `validity` key, else the
+    default of the kind). An entity document reads neither key. A value is kept as given, so the check reports it."""
+    if note_type == "entity":
+        kind, validity = default_kind, None
+    else:
+        kind, validity = _key_text(fm, "class") or default_kind, _key_text(fm, "validity")
+    if validity is None and kind in DEFAULT_VALIDITY:
+        validity = "superseded" if successor is not None else DEFAULT_VALIDITY[kind]
+    return kind, validity
+
+
 def resolve(
     cfg: Config,
     rel: str,
@@ -385,6 +407,7 @@ def resolve(
     supersedes = _targets(fm.get("supersedes"))
     dispute = fm.get("dispute") if isinstance(fm.get("dispute"), dict) else {}
     dispute_due = _iso_date(dispute["due"]) if dispute.get("due") is not None else None
+    class_, validity = _kind_and_validity(fm, note_type, doc_type.class_ if doc_type else "none", superseded_by_text)
 
     return NoteMeta(
         vault=vault,
@@ -398,7 +421,8 @@ def resolve(
         description=description,
         jira=jira,
         sources=sources,
-        class_=doc_type.class_ if doc_type else "none",
+        class_=class_,
+        validity=validity,
         collection=vault,
         owner_text=owner_text,
         subjects=subjects,

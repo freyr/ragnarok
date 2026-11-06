@@ -80,7 +80,8 @@ vendor = "local"
 feature = "local"
 process = "local"
 
-# The closed list of document types. class: state, record or none. one_per: subject+task, subject, entity, project
+# The closed list of document types. class (the default kind of the type): state, proposal, record or none; the
+# frontmatter key `class` replaces it for one note. one_per: subject+task, subject, entity, project
 # or none. Optional: required_sections (list), review_months (number), standard.
 [kb.doc_types]
 how-to = {class = "state", one_per = "subject+task", standard = "Diataxis"}
@@ -90,17 +91,17 @@ explanation = {class = "state", one_per = "subject+task", standard = "Diataxis"}
 entity = {class = "state", one_per = "entity", standard = "Backstage entity descriptor"}
 drivers = {class = "state", one_per = "project", standard = "local"}
 summary = {class = "state", one_per = "project", standard = "local"}
-spec = {class = "state", one_per = "project", standard = "local"}
-plan = {class = "state", one_per = "project", standard = "local"}
+spec = {class = "proposal", one_per = "none", standard = "local"}
+plan = {class = "proposal", one_per = "none", standard = "local"}
+brainstorm = {class = "proposal", one_per = "none", standard = "local"}
 decision = {class = "record", one_per = "none", standard = "MADR"}
 incident = {class = "record", one_per = "none", standard = "KCS"}
 research = {class = "record", one_per = "none", standard = "local"}
 measurement = {class = "record", one_per = "none", standard = "local"}
 meeting = {class = "record", one_per = "none", standard = "local"}
 review = {class = "record", one_per = "none", standard = "local"}
-brainstorm = {class = "record", one_per = "none", standard = "local"}
 log = {class = "record", one_per = "none", standard = "local"}
-guide = {class = "none", one_per = "none", standard = "legacy"}
+guide = {class = "state", one_per = "none", standard = "legacy"}
 note = {class = "none", one_per = "none", standard = "legacy"}
 template = {class = "none", one_per = "none", standard = "legacy"}
 
@@ -113,6 +114,9 @@ providesApi = {src_kinds = [], dst_kinds = [], inverse = "apiProvidedBy", standa
 consumesApi = {src_kinds = [], dst_kinds = [], inverse = "apiConsumedBy", standard = "backstage"}
 requests = {src_kinds = ["doc", "client"], dst_kinds = ["feature"], inverse = "requestedBy", standard = "local"}
 memberOf = {src_kinds = ["person"], dst_kinds = ["group"], inverse = "hasMember", standard = "local"}
+# The links of a note (the frontmatter keys of the same name) to a note or an entity.
+implemented_in = {src_kinds = ["doc"], dst_kinds = [], inverse = "implements", standard = "local"}
+followed_by = {src_kinds = ["doc"], dst_kinds = [], inverse = "follows", standard = "local"}
 
 # The attributes of a kind: [kb.attributes.<kind>.<name>]. There are none by default. Example with placeholder names.
 # value_type is a free label. A live attribute holds no value: it names the system of record and the skill.

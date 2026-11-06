@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--area")
     sp.add_argument("--type", action="append", help="a document type (repeatable: any of them)")
     sp.add_argument("--collection")
-    sp.add_argument("--class", dest="class_", choices=["state", "record", "none"])
+    sp.add_argument("--class", dest="class_", choices=["state", "proposal", "record", "none"])
     sp.add_argument("--subject", action="append", help="an entity ID, name or alias (repeatable: any of them)")
     sp.add_argument("--status", action="append", help="active, archived or superseded (repeatable: any of them)")
     sp.add_argument("--no-archived", action="store_true", help="only notes with status active")
@@ -94,7 +94,11 @@ def build_parser() -> argparse.ArgumentParser:
     kp.add_argument("action", choices=["check"])
     kp.add_argument("--collection")
     kp.add_argument("--subject", help="an entity ID, name or alias")
-    kp.add_argument("--ids", action="store_true", help="also list each M1 and M3 violation")
+    kp.add_argument(
+        "--scope",
+        help="only the notes whose path starts with this folder prefix, such as Vault/Area/; adds the checks V1 to V6",
+    )
+    kp.add_argument("--ids", action="store_true", help="also list each M1, M3 and (with --scope) V1 to V6 violation")
     wp = parsers["w0"]
     wp.add_argument("action", choices=["score", "import", "backfill"], help="score: read the Stop hook JSON on stdin")
     wp.add_argument("--from", dest="source", type=Path, help="import: another core file")
@@ -291,7 +295,7 @@ def cmd_kb(cfg, args) -> int:
             raise IndexMismatch(f"No index at {cfg.index_path}. Run `ragnarok index`.")
         conn = connect(cfg)
         try:
-            result = kb.report(conn, args.collection, args.subject, cfg.allow_private)
+            result = kb.report(conn, args.collection, args.subject, cfg.allow_private, args.scope)
         except LookupError as e:
             print(e, file=sys.stderr)
             return 1

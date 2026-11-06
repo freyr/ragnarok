@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS main.doc (
     hash TEXT NOT NULL,
     declared_id TEXT,
     class TEXT NOT NULL,
+    validity TEXT,
     mode TEXT NOT NULL,
     collection TEXT NOT NULL,
     owner TEXT,
@@ -501,13 +502,14 @@ def _same(cfg: Config, conn: sqlite3.Connection, doc_id: str, m, chunks, kbdoc: 
     It compares only the values from the file: `resolve_refs()` writes the resolved values and the identity key.
     """
     row = conn.execute(
-        "SELECT title, project, area, type, status, sensitivity, description, class, task, canonical,"
+        "SELECT title, project, area, type, status, sensitivity, description, class, validity, task, canonical,"
         " owner_text, superseded_by_text, as_of, review_by, dispute_owner_text, dispute_due FROM doc WHERE id = ?",
         (doc_id,),
     ).fetchone()
     base = (m.title, m.project, m.area, m.type, m.status, m.sensitivity, m.description)
     extra = (
         m.class_,
+        m.validity,
         m.task,
         int(m.canonical),
         m.owner_text,
@@ -794,9 +796,9 @@ def _write(
         )
         conn.execute(
             "INSERT INTO doc (id, vault, path, title, project, area, type, status, sensitivity, description,"
-            " mtime_ns, size, hash, declared_id, class, mode, collection, owner, owner_text, primary_subject, task,"
-            " identity_key, canonical, superseded_by, superseded_by_text, as_of, review_by, dispute_owner_text,"
-            " dispute_due) VALUES (" + ", ".join("?" * 29) + ")",
+            " mtime_ns, size, hash, declared_id, class, validity, mode, collection, owner, owner_text,"
+            " primary_subject, task, identity_key, canonical, superseded_by, superseded_by_text, as_of, review_by,"
+            " dispute_owner_text, dispute_due) VALUES (" + ", ".join("?" * 30) + ")",
             (
                 doc_id,
                 m.vault,
@@ -813,6 +815,7 @@ def _write(
                 p.hash,
                 p.frontmatter_id,
                 m.class_,
+                m.validity,
                 m.mode,
                 m.collection,
                 m.owner,

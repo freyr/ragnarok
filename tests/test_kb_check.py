@@ -5,6 +5,7 @@ import json
 import pytest
 from test_index import FakeEmbedder
 
+from ragnarok import kb
 from ragnarok.config import AttributeDef, Config, KbConfig
 from ragnarok.index import connect, update
 from ragnarok.tools import Tools
@@ -170,3 +171,176 @@ def test_kb_check_filters_by_subject(cfg):
     assert tools.kb_check(subject="sys-b")["M1"]["count"] == 1
     with pytest.raises(LookupError):
         tools.kb_check(subject="Nobody Here")
+
+
+# --- the kind and the validity (V1 to V6) -----------------------------------------------------------------------
+
+
+def note(front: str, body: str = "Text.") -> str:
+    return f"---\n{front}subject: '[[Sys A]]'\n---\n# Doc\n{body}\n"
+
+
+def ids_of(conn) -> dict[str, str]:
+    return {p: i for p, i in conn.execute("SELECT path, id FROM doc")}
+
+
+def test_the_index_holds_the_kind_and_the_validity(cfg):
+    put(cfg, "plan-a.md", note("type: plan\n"))
+    put(cfg, "spec-a.md", note("type: spec\nvalidity: rejected\n"))
+    put(cfg, "how.md", note("type: how-to\ntask: t\nsuperseded_by: '[[plan-a]]'\n"))
+    put(cfg, "rec.md", note("type: research\nclass: state\n"))
+    put(cfg, "dec.md", note("type: decision\nas_of: 2026-01-02\n"))
+    conn, emb = build(cfg)
+    sql = "SELECT path, class, validity FROM doc WHERE path NOT LIKE '%/entities/%'"
+    rows = {p: (c, v) for p, c, v in conn.execute(sql)}
+    assert rows == {
+        "Kb/plan-a.md": ("proposal", "open"),
+        "Kb/spec-a.md": ("proposal", "rejected"),
+        "Kb/how.md": ("state", "superseded"),
+        "Kb/rec.md": ("state", "current"),
+        "Kb/dec.md": ("record", None),
+    }
+    # a change of the validity key alone is a change of the note
+    put(cfg, "spec-a.md", note("type: spec\nvalidity: superseded\nsuperseded_by: '[[plan-a]]'\n"))
+    update(cfg, conn, emb)
+    assert conn.execute("SELECT validity FROM doc WHERE path = 'Kb/spec-a.md'").fetchone()[0] == "superseded"
+
+
+def test_an_entity_document_keeps_its_entity_kind(cfg):
+    room = "---\nid: room-1\ntype: entity\nkind: room\nclass: record\nvalidity: open\n---\n# Room\nA room.\n"
+    put(cfg, "entities/Room.md", room)
+    conn, _ = build(cfg)
+    assert conn.execute("SELECT kind FROM entity WHERE id = 'room-1'").fetchone()[0] == "room"
+    row = conn.execute("SELECT class, validity FROM doc WHERE id = 'room-1~doc'").fetchone()
+    assert row == ("state", "current")
+    for rule in ("V1", "V5", "V6"):
+        assert violations(conn, rule) == [], rule
+
+
+def test_implemented_in_and_followed_by_are_relations_to_a_note_or_an_entity(cfg):
+    put(cfg, "how.md", note("type: how-to\ntask: t\n"))
+    put(cfg, "rec-2.md", note("type: research\nas_of: 2026-02-01\n"))
+    put(cfg, "spec-a.md", note("type: spec\nvalidity: accepted\nimplemented_in: ['[[how]]', '[[Sys B]]']\n"))
+    put(cfg, "rec-1.md", note("type: research\nas_of: 2026-01-01\nfollowed_by: '[[rec-2]]'\n"))
+    conn, _ = build(cfg)
+    ids = ids_of(conn)
+    rows = set(conn.execute("SELECT src, rel, dst, dst_text FROM relation"))
+    assert rows == {
+        (ids["Kb/spec-a.md"], "implemented_in", ids["Kb/how.md"], "how"),
+        (ids["Kb/spec-a.md"], "implemented_in", "sys-b", "Sys B"),
+        (ids["Kb/rec-1.md"], "followed_by", ids["Kb/rec-2.md"], "rec-2"),
+    }
+    assert violations(conn, "ref") == []
+    assert violations(conn, "vocab") == []
+    assert violations(conn, "relation_kinds") == []
+    assert violations(conn, "V3") == []
+
+
+def test_v1_a_note_with_no_kind(cfg):
+    put(cfg, "loose.md", note(""))
+    put(cfg, "typo.md", note("type: how-to\ntask: t\nclass: sate\n"))
+    put(cfg, "given.md", note("type: note\nclass: state\n"))
+    conn, _ = build(cfg)
+    ids = ids_of(conn)
+    assert violations(conn, "V1") == [([ids["Kb/loose.md"]], "class: none"), ([ids["Kb/typo.md"]], "class: sate")]
+
+
+def test_v2_a_superseded_note_with_no_superseded_by(cfg):
+    put(cfg, "how.md", note("type: how-to\ntask: a\nvalidity: superseded\n"))
+    put(cfg, "how-ok.md", note("type: how-to\ntask: b\nvalidity: superseded\nsuperseded_by: '[[how]]'\n"))
+    put(cfg, "plan-a.md", note("type: plan\nvalidity: superseded\n"))
+    conn, _ = build(cfg)
+    ids = ids_of(conn)
+    assert sorted(i[0] for i, _ in violations(conn, "V2")) == sorted([ids["Kb/how.md"], ids["Kb/plan-a.md"]])
+
+
+def test_v3_an_accepted_proposal_with_no_implemented_in(cfg):
+    put(cfg, "spec-a.md", note("type: spec\nvalidity: accepted\n"))
+    put(cfg, "spec-b.md", note("type: spec\nvalidity: accepted\nimplemented_in: '[[Sys B]]'\n"))
+    conn, _ = build(cfg)
+    assert violations(conn, "V3") == [([ids_of(conn)["Kb/spec-a.md"]], "validity: accepted")]
+
+
+def test_v4_a_record_with_no_as_of(cfg):
+    put(cfg, "rec.md", note("type: research\n"))
+    put(cfg, "rec-ok.md", note("type: research\nas_of: 2026-01-01\n"))
+    put(cfg, "state.md", note("type: research\nclass: state\n"))
+    conn, _ = build(cfg)
+    assert violations(conn, "V4") == [([ids_of(conn)["Kb/rec.md"]], None)]
+
+
+def test_v5_a_validity_that_is_not_valid_for_the_kind(cfg):
+    put(cfg, "how.md", note("type: how-to\ntask: t\nvalidity: open\n"))
+    put(cfg, "plan-a.md", note("type: plan\nvalidity: current\n"))
+    put(cfg, "spec-a.md", note("type: spec\nvalidity: rejected\n"))
+    put(cfg, "ref.md", note("type: reference\ntask: r\nvalidity: current\n"))
+    conn, _ = build(cfg)
+    ids = ids_of(conn)
+    expected = [([ids["Kb/how.md"]], "state: open"), ([ids["Kb/plan-a.md"]], "proposal: current")]
+    assert sorted(violations(conn, "V5")) == sorted(expected)
+
+
+def test_v6_a_validity_key_on_a_record(cfg):
+    put(cfg, "dec.md", note("type: decision\nas_of: 2026-01-01\nvalidity: accepted\n"))
+    put(cfg, "dec-ok.md", note("type: decision\nas_of: 2026-01-01\n"))
+    conn, _ = build(cfg)
+    assert violations(conn, "V6") == [([ids_of(conn)["Kb/dec.md"]], "validity: accepted")]
+    assert violations(conn, "V5") == []
+
+
+def test_kb_check_scope_keeps_the_notes_under_a_folder_prefix(cfg):
+    put(cfg, "Area/rec.md", note("type: research\n", "See [[broken-in]]."))
+    put(cfg, "Area/loose.md", note(""))
+    put(cfg, "Other/rec.md", note("type: research\n", "See [[broken-out]]."))
+    conn, _ = build(cfg)
+    every = kb.report(conn)
+    assert every["M1"]["count"] == 2
+    scoped_all = kb.report(conn, scope="Kb/")
+    assert (scoped_all["V4"]["count"], scoped_all["M1"]["count"]) == (2, 2)
+    scoped = kb.report(conn, scope="Kb/Area/")
+    assert (scoped["V4"]["count"], scoped["V1"]["count"], scoped["M1"]["count"]) == (1, 1, 1)
+    assert [v["detail"] for v in scoped["M1"]["violations"]] == ["broken-in"]
+    assert [v["nodes"] for v in scoped["V4"]["violations"]] == [[ids_of(conn)["Kb/Area/rec.md"]]]
+    assert kb.report(conn, scope="Kb/Nothing/")["V4"]["count"] == 0
+    # the scope and the collection filter together
+    assert kb.report(conn, "Other", scope="Kb/Area/")["V4"]["count"] == 0
+
+
+def test_cli_kb_check_takes_a_scope(cfg, capsys):
+    from ragnarok.cli import build_parser, cmd_kb
+
+    put(cfg, "Area/rec.md", note("type: research\n"))
+    put(cfg, "Other/rec.md", note("type: research\n"))
+    build(cfg)[0].close()
+    args = build_parser().parse_args(["kb", "check", "--scope", "Kb/Area/", "--ids"])
+    assert cmd_kb(cfg, args) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["V4"]["count"] == 1
+    assert len(out["V4"]["violations"]) == 1
+
+
+def test_kb_check_with_no_scope_lists_no_v_finding(cfg):
+    # the checks of the kind and the validity apply to the notes of a scope only
+    put(cfg, "rec.md", note("type: research\n"))
+    put(cfg, "loose.md", note(""))
+    conn, emb = build(cfg)
+    assert violations(conn, "V4") and violations(conn, "V1")
+    for result in (kb.report(conn), Tools(cfg, conn, emb).kb_check(), kb.report(conn, collection="Kb")):
+        assert not [check for check in result if check.startswith("V")], result.keys()
+    assert kb.report(conn, scope="Kb/")["V4"]["count"] == 1
+
+
+def test_a_custom_relation_table_keeps_the_note_relations(cfg, tmp_path):
+    from ragnarok.config import load_config
+
+    path = tmp_path / "config.toml"
+    path.write_text("[kb.relation_types.runs]\nsrc_kinds = []\ndst_kinds = []\ninverse = 'runBy'\n")
+    custom = load_config(path)
+    cfg.kb = custom.kb
+    assert set(cfg.kb.relation_types) == {"runs", "implemented_in", "followed_by"}
+    put(cfg, "how.md", note("type: how-to\ntask: t\n"))
+    put(cfg, "spec-a.md", note("type: spec\nvalidity: accepted\nimplemented_in: '[[how]]'\n"))
+    put(cfg, "rec-1.md", note("type: research\nas_of: 2026-01-01\nfollowed_by: '[[how]]'\n"))
+    conn, _ = build(cfg)
+    assert conn.execute("SELECT count(*) FROM relation").fetchone()[0] == 2
+    assert violations(conn, "vocab") == []

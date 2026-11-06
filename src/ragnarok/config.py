@@ -10,7 +10,7 @@ import hashlib
 import json
 import os
 import tomllib
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 
 PATH_KEYS = ("root", "data_dir", "index_path")
@@ -55,7 +55,8 @@ def _kinds() -> dict[str, str]:
 
 @dataclass
 class DocType:
-    """A closed document type. class_ is `state`, `record` or `none`; one_per is the identity key."""
+    """A closed document type. class_ (the default kind) is `state`, `proposal`, `record` or `none`; one_per is the
+    identity key."""
 
     class_: str
     one_per: str
@@ -90,14 +91,24 @@ def _doc_types() -> dict[str, DocType]:
     for names, class_, one_per, standard in (
         (["how-to", "tutorial", "reference", "explanation"], "state", "subject+task", "Diataxis"),
         (["entity"], "state", "entity", "Backstage entity descriptor"),
-        (["drivers", "summary", "spec", "plan"], "state", "project", "local"),
+        (["drivers", "summary"], "state", "project", "local"),
+        (["spec", "plan", "brainstorm"], "proposal", "none", "local"),
         (["decision"], "record", "none", "MADR"),
         (["incident"], "record", "none", "KCS"),
-        (["research", "measurement", "meeting", "review", "brainstorm", "log"], "record", "none", "local"),
-        (["guide", "note", "template"], "none", "none", "legacy"),
+        (["research", "measurement", "meeting", "review", "log"], "record", "none", "local"),
+        (["guide"], "state", "none", "legacy"),
+        (["note", "template"], "none", "none", "legacy"),
     ):
         types.update({name: DocType(class_, one_per, standard=standard) for name in names})
     return types
+
+
+# the frontmatter links of a note that is not an entity document (the key is the relation name); each relation
+# type table keeps them, so that the vocabulary check knows them
+DOC_RELATIONS = {
+    "implemented_in": RelationType(["doc"], [], "implements"),
+    "followed_by": RelationType(["doc"], [], "follows"),
+}
 
 
 def _relation_types() -> dict[str, RelationType]:
@@ -109,6 +120,7 @@ def _relation_types() -> dict[str, RelationType]:
         "consumesApi": RelationType([], [], "apiConsumedBy", backstage),
         "requests": RelationType(["doc", "client"], ["feature"], "requestedBy"),
         "memberOf": RelationType(["person"], ["group"], "hasMember"),
+        **{name: replace(t) for name, t in DOC_RELATIONS.items()},
     }
 
 
@@ -256,7 +268,8 @@ def config_path() -> Path:
 
 
 def _load_kb(table: dict) -> KbConfig:
-    """The [kb] table. A list table (kinds, doc_types, relation_types, attributes) replaces its default."""
+    """The [kb] table. A list table (kinds, doc_types, relation_types, attributes) replaces its default; a
+    relation_types table keeps the DOC_RELATIONS types that it does not name."""
     values = {}
     for key, value in table.items():
         if key == "doc_types":
@@ -266,6 +279,7 @@ def _load_kb(table: dict) -> KbConfig:
             }
         elif key == "relation_types":
             value = {name: RelationType(**t) for name, t in value.items()}
+            value.update({name: replace(t) for name, t in DOC_RELATIONS.items() if name not in value})
         elif key == "attributes":
             value = {kind: {name: AttributeDef(**a) for name, a in attrs.items()} for kind, attrs in value.items()}
         elif key == "authority":

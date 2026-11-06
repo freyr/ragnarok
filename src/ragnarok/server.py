@@ -191,9 +191,9 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
         """Hybrid search (meaning and keywords) over the vault notes. Returns notes, each with its best section.
 
         Filters: vault (the name of a vault folder), project (folder slug), area, type (research, spec, plan,
-        how-to, decision, ..., one or a list), collection, class (state, record or none), status (active, archived,
-        superseded; one or a list) and subject (an entity ID, name or alias, or a list: any of them matches). A
-        redirect is never a result. include_private works only when the user allows it.
+        how-to, decision, ..., one or a list), collection, class (state, proposal, record or none), status (active,
+        archived, superseded; one or a list) and subject (an entity ID, name or alias, or a list: any of them
+        matches). A redirect is never a result. include_private works only when the user allows it.
 
         Resolve the entities first (find_entity); for a question with one true answer use subject and type; a live
         value comes from the skill that get_entity names, not from a note. An unknown or ambiguous subject is an

@@ -14,7 +14,10 @@ KINDS = {"domain", "system", "component", "resource", "api", "group", "person"} 
     "feature",
     "process",
 }
-RELATIONS = {"partOf", "dependsOn", "providesApi", "consumesApi", "requests", "memberOf"}
+RELATIONS = {"partOf", "dependsOn", "providesApi", "consumesApi", "requests", "memberOf"} | {
+    "implemented_in",
+    "followed_by",
+}
 DOC_TYPES = {
     "how-to": ("state", "subject+task"),
     "tutorial": ("state", "subject+task"),
@@ -23,17 +26,17 @@ DOC_TYPES = {
     "entity": ("state", "entity"),
     "drivers": ("state", "project"),
     "summary": ("state", "project"),
-    "spec": ("state", "project"),
-    "plan": ("state", "project"),
+    "spec": ("proposal", "none"),
+    "plan": ("proposal", "none"),
     "decision": ("record", "none"),
     "incident": ("record", "none"),
     "research": ("record", "none"),
     "measurement": ("record", "none"),
     "meeting": ("record", "none"),
     "review": ("record", "none"),
-    "brainstorm": ("record", "none"),
+    "brainstorm": ("proposal", "none"),
     "log": ("record", "none"),
-    "guide": ("none", "none"),
+    "guide": ("state", "none"),
     "note": ("none", "none"),
     "template": ("none", "none"),
 }
@@ -167,3 +170,6 @@ def test_default_relation_kinds_admit_the_spec_examples():
     assert rel["memberOf"].src_kinds == ["person"]
     for name in ("partOf", "dependsOn", "providesApi", "consumesApi"):
         assert rel[name].src_kinds == [] and rel[name].dst_kinds == []
+    # the links of a note: from a document to a note or an entity
+    for name in ("implemented_in", "followed_by"):
+        assert rel[name].src_kinds == ["doc"] and rel[name].dst_kinds == []

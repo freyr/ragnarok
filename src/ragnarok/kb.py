@@ -12,7 +12,7 @@ from datetime import date
 
 import numpy as np
 
-from .config import Config
+from .config import DOC_RELATIONS, Config
 from .metadata import _identity_key, _iso_date, _targets
 from .search import fts_query
 
@@ -211,7 +211,10 @@ def parse(cfg: Config, meta, fm: dict) -> KbDoc:
         as_of=meta.as_of,
         review_by=meta.review_by,
     )
-    for rel in cfg.kb.relation_types:
+    names = list(cfg.kb.relation_types)
+    if meta.type != "entity":
+        names += [rel for rel in DOC_RELATIONS if rel not in names]
+    for rel in names:
         value = fm.get(rel)
         if isinstance(value, str | list):
             for target in _targets(value):
@@ -527,8 +530,11 @@ def resolve_refs(conn: sqlite3.Connection) -> None:
     _update(conn, "UPDATE entity SET owner = ? WHERE id = ?", rows)
 
     rows = []
-    for id_, source_doc, old, text in conn.execute("SELECT id, source_doc, dst, dst_text FROM relation").fetchall():
+    relations = conn.execute("SELECT id, source_doc, rel, dst, dst_text FROM relation").fetchall()
+    for id_, source_doc, rel, old, text in relations:
         new = r.entity(text, source_doc)
+        if new is None and rel in DOC_RELATIONS:
+            new = r.doc(text, source_doc)
         if new != old:
             rows.append((new, id_))
     _update(conn, "UPDATE relation SET dst = ? WHERE id = ?", rows)
@@ -584,8 +590,12 @@ def resolve_refs(conn: sqlite3.Connection) -> None:
 
 # --- the violations ---------------------------------------------------------------------------------------------
 
-CHECKS = ("M1", "M3", "ref", "vocab", "relation_kinds", "live_value", "canonical_twice", "subjects")
-LISTED = ("M1", "M3")  # the checks that kb_check reports with each violation
+# V1 to V6: the kind and the validity of a note (V, because M1 is the broken-link check)
+VALIDITY_CHECKS = ("V1", "V2", "V3", "V4", "V5", "V6")
+CHECKS = ("M1", "M3", "ref", "vocab", "relation_kinds", "live_value", "canonical_twice", "subjects", *VALIDITY_CHECKS)
+LISTED = ("M1", "M3", *VALIDITY_CHECKS)  # the checks that kb_check reports with each violation
+KINDS = ("state", "proposal", "record")
+VALIDITY = {"state": ("current", "superseded"), "proposal": ("open", "accepted", "rejected", "superseded")}
 MAX_SUBJECTS = 3
 
 
@@ -660,10 +670,37 @@ def _violations(conn: sqlite3.Connection) -> list[tuple[str, list[str], str | No
     # an entity document is its own subject
     for id_, n in rows(
         "SELECT d.id, count(s.ord) FROM doc d LEFT JOIN doc_subject s ON s.doc_id = d.id"
-        " WHERE d.class IN ('state', 'record') AND d.id NOT IN (SELECT doc_id FROM entity)"
+        " WHERE d.class IN ('state', 'proposal', 'record') AND d.id NOT IN (SELECT doc_id FROM entity)"
         f" GROUP BY d.id HAVING count(s.ord) = 0 OR count(s.ord) > {MAX_SUBJECTS}"
     ):
         found.append(("subjects", [id_], f"{n} subjects"))
+    found += _validity_violations(conn)
+    return found
+
+
+def _validity_violations(conn: sqlite3.Connection) -> list[tuple[str, list[str], str | None]]:
+    """V1 a note with no kind; V2 a superseded note with no successor; V3 an accepted proposal with no
+    `implemented_in`; V4 a record with no `as_of`; V5 a validity that the kind does not have; V6 a validity on a
+    record."""
+    found: list[tuple[str, list[str], str | None]] = []
+    implemented = {d for (d,) in conn.execute("SELECT source_doc FROM relation WHERE rel = 'implemented_in'")}
+    docs = conn.execute(
+        "SELECT id, class, validity, superseded_by, superseded_by_text, as_of FROM doc ORDER BY path"
+    ).fetchall()
+    for id_, kind, validity, successor, successor_text, as_of in docs:
+        if kind not in KINDS:
+            found.append(("V1", [id_], f"class: {kind}"))
+            continue
+        if validity == "superseded" and successor is None and successor_text is None:
+            found.append(("V2", [id_], "validity: superseded"))
+        if kind == "proposal" and validity == "accepted" and id_ not in implemented:
+            found.append(("V3", [id_], "validity: accepted"))
+        if kind == "record" and as_of is None:
+            found.append(("V4", [id_], None))
+        if kind in VALIDITY and validity not in VALIDITY[kind]:
+            found.append(("V5", [id_], f"{kind}: {validity}"))
+        if kind == "record" and validity is not None:
+            found.append(("V6", [id_], f"validity: {validity}"))
     return found
 
 
@@ -689,17 +726,23 @@ def _subject_entities(conn: sqlite3.Connection, subject: str) -> set[str]:
 
 
 def report(
-    conn: sqlite3.Connection, collection: str | None = None, subject: str | None = None, allow_private: bool = True
+    conn: sqlite3.Connection,
+    collection: str | None = None,
+    subject: str | None = None,
+    allow_private: bool = True,
+    scope: str | None = None,
 ) -> dict:
-    """The stored violations as a count for each check. M1 and M3 list each violation with its node IDs and detail.
+    """The stored violations as a count for each check. M1, M3 and V1 to V6 list each violation with its node IDs
+    and detail. V1 to V6 apply to the notes of a scope: with no scope the result has no V1 to V6.
 
-    A violation is in scope when one of its documents is in the collection and has the subject, as a subject or as
-    the entity document. Without allow_private, a violation of a private document is left out.
+    A violation is in scope when one of its documents is in the collection, has a path that starts with the scope (a
+    folder prefix such as `<vault>/<folder>/`) and has the subject, as a subject or as the entity document. Without
+    allow_private, a violation of a private document is left out.
     """
     entities = _subject_entities(conn, subject) if subject else None
     doc_of = {i: i for (i,) in conn.execute("SELECT id FROM doc")}
     doc_of.update(conn.execute("SELECT id, doc_id FROM entity").fetchall())
-    info = {i: (c, s) for i, c, s in conn.execute("SELECT id, collection, sensitivity FROM doc")}
+    info = {i: (c, s, p) for i, c, s, p in conn.execute("SELECT id, collection, sensitivity, path FROM doc")}
     subjects: dict[str, set[str]] = {}
     for doc_id, entity_id in conn.execute("SELECT doc_id, entity_id FROM doc_subject WHERE entity_id IS NOT NULL"):
         subjects.setdefault(doc_id, set()).add(entity_id)
@@ -712,16 +755,20 @@ def report(
         doc = doc_of.get(node_id)
         if doc not in info or (collection is not None and info[doc][0] != collection):
             return False
+        if scope is not None and not info[doc][2].startswith(scope):
+            return False
         return (
             entities is None or node_id in entities or doc in entity_docs or bool(subjects.get(doc, set()) & entities)
         )
 
-    result: dict = {check: {"count": 0} for check in CHECKS}
+    checks = [c for c in CHECKS if scope is not None or c not in VALIDITY_CHECKS]
+    result: dict = {check: {"count": 0} for check in checks}
     for check in LISTED:
-        result[check]["violations"] = []
+        if check in result:
+            result[check]["violations"] = []
     for rule, node_ids, detail in conn.execute("SELECT rule, node_ids, detail FROM violation ORDER BY id"):
         nodes = json.loads(node_ids)
-        if not any(in_scope(n) for n in nodes):
+        if rule not in result or not any(in_scope(n) for n in nodes):
             continue
         if not allow_private and any(info[doc_of[n]][1] == "private" for n in nodes if doc_of.get(n) in info):
             continue
