@@ -223,3 +223,10 @@ def test_each_mcp_config_is_written_once_before_the_runs(vault, tmp_path, monkey
     monkeypatch.setattr(agent_eval, "mcp_config", spy)
     fake_run(vault, tmp_path, monkeypatch, questions, ["mcp-kb"], 2, seen=seen)
     assert written == [("mcp-kb", "q1", 0)]  # once, and before the first run started
+
+
+def test_the_new_prompt_asks_for_the_answer_entities_for_both_agents(tmp_path):
+    for agent in ("mcp-kb", "mcp-base"):
+        prompt = agent_eval.command(agent, "q", 8, "sonnet", tmp_path / "mcp.json", ["Work"], new_prompt=True)[2]
+        assert "the entities that are the answer: for a list question each item of the list" in prompt
+        assert "an empty list when the route is none; an ID or a name" in prompt

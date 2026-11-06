@@ -64,7 +64,9 @@ JSON object and nothing after it:
 {{"notes": ["<note path relative to the current directory>", ...], "entities": ["<entity id>", ...], \
 "route": "kb|skill|none", "answer": "<your answer>"}}
 Use the route "kb" when the notes hold the answer, "skill" when the answer needs a live value from a system \
-of record, and "none" when no note answers. List at most 10 notes, the best first."""
+of record, and "none" when no note answers. List at most 10 notes, the best first. \
+In "entities" list the entities that are the answer: for a list question each item of the list, else the one \
+entity that the answer is about, and an empty list when the route is none; an ID or a name."""
 
 # a runner gives the raw stdout of `claude -p ... --output-format stream-json --verbose`, its stderr and its exit code
 Runner = Callable[[list[str], Path, dict], tuple[str, str, int]]
