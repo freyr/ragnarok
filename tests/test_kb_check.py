@@ -63,6 +63,20 @@ def test_link_in_a_code_block_is_not_m1(cfg):
     assert sorted(d for _, d in violations(conn, "M1")) == ["both", "missing-prose"]
 
 
+def test_table_pipe_escape_and_attachment_are_not_m1(cfg):
+    put(cfg, "Plan 2026.11.md", "# Plan\nText.\n")
+    body = (
+        "| Note | Use |\n|---|---|\n| [[Plan 2026.11\\|the plan]] | x |\n\n"
+        "![[floor.svg]] and [[photo.PNG]] and [[Plan 2026.11]] and [[missing\\|label]].\n"
+    )
+    put(cfg, "a.md", f"# A\n{body}")
+    conn, _ = build(cfg)
+    targets = {t for (t,) in conn.execute("SELECT target_text FROM link")}
+    # the escape of a pipe in a table is not part of the target; an attachment is not a note link
+    assert targets == {"Plan 2026.11", "missing"}
+    assert [d for _, d in violations(conn, "M1")] == ["missing"]
+
+
 def test_two_active_state_docs_with_one_key_give_m3(cfg):
     put(cfg, "one.md", howto("'[[Sys A]]'", "Deploy"))
     put(cfg, "two.md", howto("'[[Alpha]]'", "deploy"))

@@ -30,12 +30,18 @@ MIGRATE = "Run `ragnarok migrate`."
 WIKI_LINK = re.compile(r"!?\[\[([^\]|#^]+)")
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`).+?(?<!`)\1(?!`)")
+# a link to a file that is not a note; the index holds notes only, so such a link never resolves
+ATTACHMENT = re.compile(
+    r"\.(png|jpe?g|gif|svg|webp|bmp|heic|pdf|base|canvas|mp4|mov|webm|mp3|m4a|wav|ogg|zip|csv|xlsx?|docx?|pptx?)$",
+    re.IGNORECASE,
+)
 
 
 def wiki_links(body: str) -> list[tuple[str, int]]:
     """The wiki-link targets of a body, sorted, each with in_code: 1 when no occurrence is in prose.
 
-    An occurrence is in code when it is inside a fenced code block or an inline code span.
+    An occurrence is in code when it is inside a fenced code block or an inline code span. In a table, the pipe of
+    `[[target\\|label]]` is escaped; the backslash is not part of the target. A link to an attachment is skipped.
     """
     prose: dict[str, bool] = {}
     fence = None
@@ -48,7 +54,9 @@ def wiki_links(body: str) -> list[tuple[str, int]]:
         spans = [m.span() for m in CODE_SPAN.finditer(line)] if fence is None else []
         for m in WIKI_LINK.finditer(line):
             in_code = fence is not None or any(a <= m.start() < b for a, b in spans)
-            target = m.group(1).strip()
+            target = m.group(1).strip().removesuffix("\\").strip()
+            if not target or ATTACHMENT.search(target):
+                continue
             prose[target] = prose.get(target, False) or not in_code
     return [(target, int(not in_prose)) for target, in_prose in sorted(prose.items())]
 
