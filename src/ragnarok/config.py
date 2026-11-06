@@ -154,7 +154,7 @@ def _when_factors() -> dict[str, dict[str, float]]:
     return {
         "state_current": dict(same),
         "state_superseded": dict(stale),
-        "proposal_open": {"now": 0.9, "future": 1.15, "history": 1.0},
+        "proposal_open": {"now": 0.9, "future": 1.0, "history": 1.0},
         "proposal_accepted": {"now": 0.9, "future": 0.95, "history": 1.0},
         "proposal_rejected": dict(stale),
         "proposal_superseded": dict(stale),

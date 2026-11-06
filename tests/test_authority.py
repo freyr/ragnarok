@@ -264,14 +264,16 @@ def test_relevance_on_rrf_alone_puts_the_state_note_first(wkb):
     assert order.index(STATE) < order.index(PROPOSAL) < order.index(RECORD)
 
 
-def test_an_open_proposal_ranks_above_the_state_note_only_for_future(wkb):
+def test_an_open_proposal_gets_no_boost_for_future(wkb):
+    # the state note ranks above the open proposal with no factor; a future question keeps that order, because a
+    # boost of the open proposal moved the future questions of the bench both ways with no gain
+    assert ranked(wkb).index(STATE) < ranked(wkb).index(PROPOSAL)
     future, now = ranked(wkb, when="future"), ranked(wkb, when="now")
-    assert future.index(PROPOSAL) < future.index(STATE)
+    assert future.index(STATE) < future.index(PROPOSAL)
     assert now.index(STATE) < now.index(PROPOSAL)
     # with no `when`, a future word in the query decides the same way
     upgrade = ranked(wkb, WQ + " next")
-    assert upgrade.index(PROPOSAL) < upgrade.index(STATE)
-    assert ranked(wkb).index(STATE) < ranked(wkb).index(PROPOSAL)
+    assert upgrade.index(STATE) < upgrade.index(PROPOSAL)
 
 
 def test_a_record_ranks_first_for_history(wkb):
@@ -320,7 +322,7 @@ def traced(cfg, trace_id):
     [
         ("", STATE, (1.0, 1.0, 1.0)),
         ("validity: superseded\n", STATE, (0.8, 0.8, 1.0)),
-        ("", PROPOSAL, (0.9, 1.15, 1.0)),
+        ("", PROPOSAL, (0.9, 1.0, 1.0)),
         ("validity: accepted\n", PROPOSAL, (0.9, 0.95, 1.0)),
         ("validity: rejected\n", PROPOSAL, (0.8, 0.8, 1.0)),
         ("validity: superseded\n", PROPOSAL, (0.8, 0.8, 1.0)),

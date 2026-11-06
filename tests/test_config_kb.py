@@ -106,7 +106,7 @@ def test_kb_tables_load_with_defaults(tmp_path):
     assert cfg.kb.when_factors == {
         "state_current": {"now": 1.0, "future": 1.0, "history": 1.0},
         "state_superseded": {"now": 0.8, "future": 0.8, "history": 1.0},
-        "proposal_open": {"now": 0.9, "future": 1.15, "history": 1.0},
+        "proposal_open": {"now": 0.9, "future": 1.0, "history": 1.0},
         "proposal_accepted": {"now": 0.9, "future": 0.95, "history": 1.0},
         "proposal_rejected": {"now": 0.8, "future": 0.8, "history": 1.0},
         "proposal_superseded": {"now": 0.8, "future": 0.8, "history": 1.0},
