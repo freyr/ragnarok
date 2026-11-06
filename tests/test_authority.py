@@ -108,7 +108,7 @@ def test_stale_state_document_gets_a_warning(kb):
 
 def test_superseded_record_gives_its_successor(kb):
     old = "Kb/decisions/old-choice.md"
-    on, off = hits(kb), hits(kb, authority=False)
+    on, off = hits(kb, when="now"), hits(kb, authority=False)
     assert on[old].successor["path"] == DEPLOY
     # no superseded factor: a record gets the record factor of a `now` question (spec C2), 0.95
     assert on[old].score == pytest.approx(off[old].score * 0.95, abs=1e-5)
@@ -127,7 +127,7 @@ def test_a_superseded_state_note_gets_its_validity_factor_and_a_note_with_no_kin
     classes = dict(conn.execute("SELECT path, class FROM doc WHERE path LIKE '%old-%'").fetchall())
     assert sorted(classes.values()) == ["none", "record", "state"]
     query = "retire billing service"
-    on, off = hits(kb, query), hits(kb, query, authority=False)
+    on, off = hits(kb, query, when="now"), hits(kb, query, authority=False)
     state, note = "Kb/howto/old-state.md", "Kb/notes/old-note.md"
     assert on[state].score == pytest.approx(off[state].score * 0.8, abs=1e-5)  # state, superseded: 0.8 for now
     assert on[note].score == pytest.approx(off[note].score, abs=1e-5)  # kind none: 1.0
@@ -135,6 +135,9 @@ def test_a_superseded_state_note_gets_its_validity_factor_and_a_note_with_no_kin
         assert on[path].successor["path"] == DEPLOY
     history = hits(kb, query, when="history")
     assert history[state].score == pytest.approx(off[state].score, abs=1e-5)  # 1.0 for history
+    # with no `when` and no rule word, the kind is unknown: no `when` factor
+    unknown = hits(kb, query)
+    assert unknown[state].score == pytest.approx(off[state].score, abs=1e-5)
 
 
 def test_an_archived_document_gets_no_factor(kb):
@@ -160,7 +163,7 @@ def test_subjects_in_the_query_text_count_only_when_the_knob_is_on(kb):
 
 def test_the_trace_records_each_factor_of_each_candidate(kb):
     cfg, conn, emb = kb
-    trace_id = Tools(cfg, conn, emb).search(Q, subject="Billing")["trace_id"]
+    trace_id = Tools(cfg, conn, emb).search(Q, subject="Billing", when="now")["trace_id"]
     lines = [json.loads(x) for f in trace_dir(cfg).glob("*.jsonl") for x in f.read_text().splitlines()]
     (entry,) = [x for x in lines if x["trace_id"] == trace_id]
     factors = {c["path"]: c["authority"] for c in entry["ragnarok.candidates"]}
@@ -168,7 +171,7 @@ def test_the_trace_records_each_factor_of_each_candidate(kb):
     assert factors[COPY] == {"duplicate_identity": 0.5, "when": 1.0}
     assert factors["Kb/decisions/old-choice.md"] == {"when": 0.95}
     assert factors["Kb/howto/restart-billing.md"] == {"review_overdue": 0.8, "when": 1.0}
-    assert entry["ragnarok.when"] == {"kind": "now", "source": "rule", "matched": None}
+    assert entry["ragnarok.when"] == {"kind": "now", "source": "parameter", "matched": None}
 
 
 # the kind of question (spec C2): synthetic notes of each kind with near relevance to one query
@@ -220,8 +223,8 @@ def ranked(wkb, query=WQ, **kwargs):
     + [(f"{w} rotate keys", "history") for w in ("why did we", "when did we", "what was the")]
     + [(f"rotate keys {w}", "history") for w in ("before", "previously", "history", "decided", "originally")]
     + [
-        ("rotate the vault keys", "now"),
-        ("the planner rotates keys", "now"),  # a word inside another word is no match
+        ("rotate the vault keys", "unknown"),
+        ("the planner rotates keys", "unknown"),  # a word inside another word is no match
         ("what was the plan", "history"),  # both lists match: history wins
     ],
 )
@@ -245,7 +248,7 @@ def test_the_rule_list_is_configuration():
 
     cfg = replace(Config(), kb=replace(Config().kb, when_rules={"future": ["roadmap"], "history": []}))
     assert question_kind(cfg, "the roadmap of keys") == ("future", "rule", "roadmap")
-    assert question_kind(cfg, "why did we plan this") == ("now", "rule", None)
+    assert question_kind(cfg, "why did we plan this") == ("unknown", "rule", None)
 
 
 def test_the_factor_table_is_configuration(wkb):

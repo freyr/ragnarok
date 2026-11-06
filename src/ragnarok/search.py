@@ -212,9 +212,11 @@ def resolve_subjects(conn, names: Values, allow_private: bool, trace: Trace | No
 
 
 def question_kind(cfg: Config, query: str, when: str | None = None) -> tuple[str, str, str | None]:
-    """The kind of question (now, future or history), its source (parameter or rule) and the rule word that
-    matched. With no `when`, a word or phrase of `kb.when_rules` in the query text decides (whole words, any
-    case); history goes before future, so that "what was the plan" is a history question. Else `now`."""
+    """The kind of question (now, future, history or unknown), its source (parameter or rule) and the rule word
+    that matched. With no `when`, a word or phrase of `kb.when_rules` in the query text decides (whole words, any
+    case); history goes before future, so that "what was the plan" is a history question. Else `unknown`: no
+    `when` factor, no canonical factor and no entity-first, so that a question of no known kind keeps the
+    relevance order."""
     if when is not None:
         if when not in WHEN_KINDS:
             raise ValueError(f"when must be one of {', '.join(WHEN_KINDS)}, not {when!r}")
@@ -223,7 +225,7 @@ def question_kind(cfg: Config, query: str, when: str | None = None) -> tuple[str
         for word in cfg.kb.when_rules.get(kind, []):
             if re.search(rf"\b{r'\s+'.join(map(re.escape, word.split()))}\b", query, re.IGNORECASE):
                 return kind, "rule", word
-    return "now", "rule", None
+    return "unknown", "rule", None
 
 
 def _dense(conn, vector, filters: Filters) -> tuple[list[int], int]:
@@ -296,8 +298,9 @@ def search(
     """The ranked hits. `subject` is an entity ID or a name, or a list of them (any of them matches); `resolved`
     gets the entity of each name. The score is the RRF score times the authority factors; `authority=False` turns
     them off. `when` is the kind of question (now, future or history; None: the rule list of `kb.when_rules`
-    decides); it selects the factor of each note in `kb.when_factors`. The entity documents of the query subjects
-    go first when `entity_first` (None: `kb.entity_first`) and `authority` are true and the question is `now`."""
+    decides, else the kind is unknown); it selects the factor of each note in `kb.when_factors` (1.0 for
+    unknown). The entity documents of the query subjects go first when `entity_first` (None: `kb.entity_first`)
+    and `authority` are true and the question is `now` or unknown."""
     if include_private and not cfg.allow_private:
         raise PrivateNotAllowed("include_private needs allow_private = true in the configuration")
     kind, kind_source, kind_word = question_kind(cfg, query, when)
@@ -354,7 +357,9 @@ def search(
         factors = _authority(cfg, conn, query, list(scores), subject_ids or (), kind) if authority else {}
         final = {n: scores[n] * math.prod(factors.get(n, {}).values()) for n in scores}
         order = sorted(scores, key=lambda n: -final[n])
-        on = authority and kind == "now" and (cfg.kb.entity_first if entity_first is None else entity_first)
+        on = (
+            authority and kind in ("now", "unknown") and (cfg.kb.entity_first if entity_first is None else entity_first)
+        )
         first = _entity_first(cfg, conn, query, subject_ids or (), filters) if on else None
         ahead = [e["doc_id"] for e in first or []]
         order = ahead + [n for n in order if n not in ahead]
@@ -520,16 +525,16 @@ def _authority(
     always `when`, the factor of `kb.when_factors` for the kind and validity of the document and the kind of
     question (1.0 for a document with no row).
 
-    The canonical factor applies only to a `now` question. The subjects of the query are the resolved `subject`
-    values, and with `subject_from_text` also the entities whose alias is in the query text. The first document
-    of an identity key is the canonical one, else the one with the latest `as_of`, else the one with the latest
-    file time; only active documents count.
+    The canonical factor applies only to a `now` question or a question of unknown kind. The subjects of the
+    query are the resolved `subject` values, and with `subject_from_text` also the entities whose alias is in the
+    query text. The first document of an identity key is the canonical one, else the one with the latest `as_of`,
+    else the one with the latest file time; only active documents count.
     """
     if not doc_ids:
         return {}
     a = cfg.kb.authority
-    subjects = set(subject_ids) if kind == "now" else set()
-    if a.subject_from_text and kind == "now":
+    subjects = set(subject_ids) if kind in ("now", "unknown") else set()
+    if a.subject_from_text and kind in ("now", "unknown"):
         subjects |= set(_text_subjects(conn, query, cfg.allow_private))
     marks = ",".join("?" * len(doc_ids))
     docs = conn.execute(

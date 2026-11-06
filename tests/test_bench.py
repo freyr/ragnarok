@@ -211,7 +211,7 @@ def test_bench_run_writes_the_diagnostics_of_each_query_form(home, monkeypatch, 
     rows = json.loads((run / "diagnostics.json").read_text())
     first = [r for r in rows if r["id"] == "nw-01"]
     assert [r["form"] for r in first] == [NOW["question"], NOW["question_alt"]]
-    assert first[0]["kind"] == "now" and first[0]["word"] is None
+    assert first[0]["kind"] == "unknown" and first[0]["word"] is None
     assert first[0]["plain"] == {"path": GOLD, "type": "note", "class": "none", "validity": None, "gold_rank": 1}
     assert first[1]["plain"] == {
         "path": OTHER,
@@ -222,10 +222,10 @@ def test_bench_run_writes_the_diagnostics_of_each_query_form(home, monkeypatch, 
     }
     assert first[1]["when"]["path"] == GOLD and first[1]["when"]["gold_rank"] == 1
     # the summaries: the forms of each rule kind, and the non-gold rank-1 notes by type/class/validity
-    assert "| now | now 4 |" in out
+    assert "| now | unknown 4 |" in out
     assert "| note/proposal/open | 2 | 0 |" in out
     # nw-01 loses against A on answer-first: its non-gold rank-1 row
-    assert f"| nw-01 | {NOW['question_alt']} | now | {OTHER} | note/proposal/open | - | {GOLD} | 1 |" in out
+    assert f"| nw-01 | {NOW['question_alt']} | unknown | {OTHER} | note/proposal/open | - | {GOLD} | 1 |" in out
 
 
 def test_a_decider_with_b_fails_when_the_baseline_gives_an_error(home, monkeypatch, capsys):

@@ -201,10 +201,11 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
         error with the candidate IDs. Each result has id, class, subjects, canonical, as_of, review_warning,
         successor and dispute; "subjects" gives the entity of each subject name.
 
-        when is the kind of question: now (how it is today, the default), future (a change, an improvement or a
-        plan) or history (what was before, why it changed). Give when=future for a question about a change or a
-        plan, and when=history for a question about the past; without it, words of the query decide. For future
-        and history, proposals or records rank higher and the entity documents do not go first.
+        when is the kind of question: now (how it is today), future (a change, an improvement or a plan) or
+        history (what was before, why it changed). Give when=now for a question about the current state,
+        when=future for a question about a change or a plan, and when=history for a question about the past.
+        Without it, a rule word of the query decides, else no kind applies and current notes get no preference.
+        For future and history, proposals or records rank higher and the entity documents do not go first.
         """
         return get().search(
             query,

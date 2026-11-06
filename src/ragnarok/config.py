@@ -135,7 +135,7 @@ class AuthorityConfig:
     subject_from_text: bool = False
 
 
-WHEN_KINDS = ("now", "future", "history")  # the kinds of question; `now` is the default
+WHEN_KINDS = ("now", "future", "history")  # the kinds of question; with no `when` and no rule word: unknown
 
 
 def _when_rules() -> dict[str, list[str]]:
