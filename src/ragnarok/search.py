@@ -481,10 +481,12 @@ def _fact_match(conn, entity_id: str, query: str) -> bool:
     asked = _content_words(query) - named
     if not asked:
         return False
+    today = date.today().isoformat()  # an expired or future fact does not count, as in `kb.get`
     rows = conn.execute(
         "SELECT attribute, value FROM fact WHERE entity_id = ? AND status = 'active'"
+        " AND (valid_from IS NULL OR valid_from <= ?) AND (valid_until IS NULL OR valid_until >= ?)"
         " UNION ALL SELECT aspect, NULL FROM entity_canonical WHERE entity_id = ?",
-        (entity_id, entity_id),
+        (entity_id, today, today, entity_id),
     )
     for attribute, value in rows:
         words = _content_words(attribute)

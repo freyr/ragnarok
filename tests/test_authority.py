@@ -345,7 +345,11 @@ FACT_NOTES = {
         "sys-heating", "Heating", "CH, Pump Room", "facts:\n  - attribute: pump_off_delay_min\n    value: 5\n"
     ),
     "Kb/entities/Boiler.md": entity(
-        "dev-boiler", "Boiler", "Neodens", "facts:\n  - attribute: max_flow_temperature\n    value: 65 C\n"
+        "dev-boiler",
+        "Boiler",
+        "Neodens",
+        "facts:\n  - attribute: max_flow_temperature\n    value: 65 C\n"
+        "  - attribute: burner_model\n    value: X1\n    valid_until: 2020-01-01\n",
     ),
     "Kb/howto/heating-sensor.md": howto("Heating", "sensor", "", "The outdoor sensor model of the heating."),
 }
@@ -381,6 +385,8 @@ def fkb(tmp_path):
         ("is the CH pump delayed", ["Kb/entities/Heating.md"]),
         # a value word of a fact matches too
         ("is the Neodens at 65", ["Kb/entities/Boiler.md"]),
+        # an expired fact does not count
+        ("the Neodens burner model", []),
     ],
 )
 def test_an_entity_goes_first_only_when_a_fact_of_it_matches_the_query(fkb, query, first):
