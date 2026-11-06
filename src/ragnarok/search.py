@@ -11,7 +11,7 @@ from datetime import date
 
 import numpy as np
 
-from .config import Config
+from .config import WHEN_KINDS, Config
 from .trace import TOP, Trace, gold_paths, safely
 
 RRF_K = 60
@@ -211,6 +211,21 @@ def resolve_subjects(conn, names: Values, allow_private: bool, trace: Trace | No
     return resolved
 
 
+def question_kind(cfg: Config, query: str, when: str | None = None) -> tuple[str, str, str | None]:
+    """The kind of question (now, future or history), its source (parameter or rule) and the rule word that
+    matched. With no `when`, a word or phrase of `kb.when_rules` in the query text decides (whole words, any
+    case); history goes before future, so that "what was the plan" is a history question. Else `now`."""
+    if when is not None:
+        if when not in WHEN_KINDS:
+            raise ValueError(f"when must be one of {', '.join(WHEN_KINDS)}, not {when!r}")
+        return when, "parameter", None
+    for kind in ("history", "future"):
+        for word in cfg.kb.when_rules.get(kind, []):
+            if re.search(rf"\b{r'\s+'.join(map(re.escape, word.split()))}\b", query, re.IGNORECASE):
+                return kind, "rule", word
+    return "now", "rule", None
+
+
 def _dense(conn, vector, filters: Filters) -> tuple[list[int], int]:
     """The CANDIDATES eligible units nearest to the vector (equal scores sort by unit_id), and the eligible count."""
     predicate, params = eligibility(filters)
@@ -276,13 +291,16 @@ def search(
     trace: Trace | None = None,
     authority: bool = True,
     entity_first: bool | None = None,
+    when: str | None = None,
 ) -> list[Hit]:
     """The ranked hits. `subject` is an entity ID or a name, or a list of them (any of them matches); `resolved`
     gets the entity of each name. The score is the RRF score times the authority factors; `authority=False` turns
-    them off. The entity documents of the query subjects go first when `entity_first` (None: `kb.entity_first`)
-    and `authority` are true."""
+    them off. `when` is the kind of question (now, future or history; None: the rule list of `kb.when_rules`
+    decides); it selects the factor of each note in `kb.when_factors`. The entity documents of the query subjects
+    go first when `entity_first` (None: `kb.entity_first`) and `authority` are true and the question is `now`."""
     if include_private and not cfg.allow_private:
         raise PrivateNotAllowed("include_private needs allow_private = true in the configuration")
+    kind, kind_source, kind_word = question_kind(cfg, query, when)
     # an empty list is no filter, not a filter that nothing passes
     type, collection, class_, subject, status = (
         None if isinstance(v, (list, tuple)) and not v else v for v in (type, collection, class_, subject, status)
@@ -333,10 +351,10 @@ def search(
                 ranks.setdefault(nid, [None, None])[li] = rank
                 if nid not in best or rank < best[nid][0]:
                     best[nid] = (rank, cid)
-        factors = _authority(cfg, conn, query, list(scores), subject_ids or ()) if authority else {}
+        factors = _authority(cfg, conn, query, list(scores), subject_ids or (), kind) if authority else {}
         final = {n: scores[n] * math.prod(factors.get(n, {}).values()) for n in scores}
         order = sorted(scores, key=lambda n: -final[n])
-        on = authority and (cfg.kb.entity_first if entity_first is None else entity_first)
+        on = authority and kind == "now" and (cfg.kb.entity_first if entity_first is None else entity_first)
         first = _entity_first(cfg, conn, query, subject_ids or (), filters) if on else None
         ahead = [e["doc_id"] for e in first or []]
         order = ahead + [n for n in order if n not in ahead]
@@ -372,6 +390,7 @@ def search(
                 )
             )
     if trace:
+        trace.set("ragnarok.when", {"kind": kind, "source": kind_source, "matched": kind_word})
         if first is not None:
             trace.set("ragnarok.entity_first", first)
         if plan is not None:
@@ -436,29 +455,34 @@ def _entity_first(cfg: Config, conn, query: str, subject_ids: tuple[str, ...], f
     return admitted[:ENTITY_FIRST]
 
 
-def _authority(cfg: Config, conn, query: str, doc_ids: list[str], subject_ids: tuple[str, ...]) -> dict[str, dict]:
-    """The authority factors of each document: only the factors that apply, by their name in `kb.authority`.
+def _authority(
+    cfg: Config, conn, query: str, doc_ids: list[str], subject_ids: tuple[str, ...], kind: str = "now"
+) -> dict[str, dict]:
+    """The authority factors of each document: the factors that apply, by their name in `kb.authority`, and
+    always `when`, the factor of `kb.when_factors` for the kind and validity of the document and the kind of
+    question (1.0 for a document with no row).
 
-    The subjects of the query are the resolved `subject` values, and with `subject_from_text` also the entities
-    whose alias is in the query text. The first document of an identity key is the canonical one, else the one
-    with the latest `as_of`, else the one with the latest file time; only active documents count.
+    The canonical factor applies only to a `now` question. The subjects of the query are the resolved `subject`
+    values, and with `subject_from_text` also the entities whose alias is in the query text. The first document
+    of an identity key is the canonical one, else the one with the latest `as_of`, else the one with the latest
+    file time; only active documents count.
     """
     if not doc_ids:
         return {}
     a = cfg.kb.authority
-    subjects = set(subject_ids)
-    if a.subject_from_text:
+    subjects = set(subject_ids) if kind == "now" else set()
+    if a.subject_from_text and kind == "now":
         subjects |= set(_text_subjects(conn, query, cfg.allow_private))
     marks = ",".join("?" * len(doc_ids))
     docs = conn.execute(
-        f"SELECT id, class, status, review_by, superseded_by, identity_key FROM doc WHERE id IN ({marks})", doc_ids
+        f"SELECT id, class, validity, status, review_by, identity_key FROM doc WHERE id IN ({marks})", doc_ids
     ).fetchall()
     canonical: set[str] = set()
     if subjects:
         smarks = ",".join("?" * len(subjects))
         sql = f"SELECT DISTINCT doc_id FROM entity_canonical WHERE doc_id IN ({marks}) AND entity_id IN ({smarks})"
         canonical = {r[0] for r in conn.execute(sql, [*doc_ids, *subjects])}
-    keys = sorted({d[5] for d in docs if d[5] is not None and d[2] == "active"})
+    keys = sorted({d[5] for d in docs if d[5] is not None and d[3] == "active"})
     first: dict[str, tuple] = {}
     if keys:
         kmarks = ",".join("?" * len(keys))
@@ -471,15 +495,15 @@ def _authority(cfg: Config, conn, query: str, doc_ids: list[str], subject_ids: t
             if key not in first or (flag, as_of, mtime, id_) > first[key][1:]:
                 first[key] = (id_, flag, as_of, mtime, id_)
     out: dict[str, dict] = {}
-    for id_, class_, status, review_by, successor, key in docs:
+    for id_, class_, validity, status, review_by, key in docs:
+        row = cfg.kb.when_factors.get(f"{class_}_{validity}" if validity else class_, {})
         applied = {
             "canonical": a.canonical if id_ in canonical else None,
             "review_overdue": a.review_overdue if _review_warning(class_, review_by) else None,
-            "archived": a.archived if status == "archived" else None,
-            "superseded": a.superseded if class_ == "record" and successor is not None else None,
             "duplicate_identity": a.duplicate_identity
             if key in first and first[key][0] != id_ and status == "active"
             else None,
+            "when": row.get(kind, 1.0),
         }
         out[id_] = {name: factor for name, factor in applied.items() if factor is not None}
     return out

@@ -110,10 +110,11 @@ def test_superseded_record_gives_its_successor(kb):
     old = "Kb/decisions/old-choice.md"
     on, off = hits(kb), hits(kb, authority=False)
     assert on[old].successor["path"] == DEPLOY
-    assert on[old].score == pytest.approx(off[old].score * 0.5, abs=1e-5)
+    # no superseded factor: a record gets the record factor of a `now` question (spec C2), 0.95
+    assert on[old].score == pytest.approx(off[old].score * 0.95, abs=1e-5)
 
 
-def test_superseded_factor_applies_only_to_a_record(kb):
+def test_a_superseded_state_note_gets_its_validity_factor_and_a_note_with_no_kind_none(kb):
     cfg, conn, emb = kb
     (cfg.root / "Kb/howto/old-state.md").write_text(
         howto("Billing", "retire", "superseded_by: '[[deploy-billing]]'\n", "Retire the billing service.")
@@ -127,19 +128,19 @@ def test_superseded_factor_applies_only_to_a_record(kb):
     assert sorted(classes.values()) == ["none", "record", "state"]
     query = "retire billing service"
     on, off = hits(kb, query), hits(kb, query, authority=False)
-    for path in ("Kb/howto/old-state.md", "Kb/notes/old-note.md"):
-        assert on[path].score == pytest.approx(off[path].score, abs=1e-5)
+    state, note = "Kb/howto/old-state.md", "Kb/notes/old-note.md"
+    assert on[state].score == pytest.approx(off[state].score * 0.8, abs=1e-5)  # state, superseded: 0.8 for now
+    assert on[note].score == pytest.approx(off[note].score, abs=1e-5)  # kind none: 1.0
+    for path in (state, note):
         assert on[path].successor["path"] == DEPLOY
-    record = "Kb/decisions/old-choice.md"
-    assert hits(kb, "restart billing service")[record].score == pytest.approx(
-        hits(kb, "restart billing service", authority=False)[record].score * 0.5, abs=1e-5
-    )
+    history = hits(kb, query, when="history")
+    assert history[state].score == pytest.approx(off[state].score, abs=1e-5)  # 1.0 for history
 
 
-def test_an_archived_document_is_halved(kb):
+def test_an_archived_document_gets_no_factor(kb):
     archived = "Kb/howto/archive-billing.md"
     on, off = hits(kb), hits(kb, authority=False)
-    assert on[archived].score == pytest.approx(off[archived].score * 0.5, abs=1e-5)
+    assert on[archived].score == pytest.approx(off[archived].score, abs=1e-5)
 
 
 def test_subjects_in_the_query_text_count_only_when_the_knob_is_on(kb):
@@ -163,7 +164,177 @@ def test_the_trace_records_each_factor_of_each_candidate(kb):
     lines = [json.loads(x) for f in trace_dir(cfg).glob("*.jsonl") for x in f.read_text().splitlines()]
     (entry,) = [x for x in lines if x["trace_id"] == trace_id]
     factors = {c["path"]: c["authority"] for c in entry["ragnarok.candidates"]}
-    assert factors[DEPLOY] == {"canonical": 1.5}
-    assert factors[COPY] == {"duplicate_identity": 0.5}
-    assert factors["Kb/decisions/old-choice.md"] == {"superseded": 0.5}
-    assert factors["Kb/howto/restart-billing.md"] == {"review_overdue": 0.8}
+    assert factors[DEPLOY] == {"canonical": 1.5, "when": 1.0}
+    assert factors[COPY] == {"duplicate_identity": 0.5, "when": 1.0}
+    assert factors["Kb/decisions/old-choice.md"] == {"when": 0.95}
+    assert factors["Kb/howto/restart-billing.md"] == {"review_overdue": 0.8, "when": 1.0}
+    assert entry["ragnarok.when"] == {"kind": "now", "source": "rule", "matched": None}
+
+
+# the kind of question (spec C2): synthetic notes of each kind with near relevance to one query
+def spec(name, extra, body):
+    return f"---\ntype: spec\n{extra}---\n# {name}\n{body}\n"
+
+
+WHEN_NOTES = {
+    "Kb/entities/Vault.md": entity("sys-vault", "Vault", "Key Vault", "canonical:\n  rotate: '[[rotate-keys]]'\n"),
+    # the state note matches best; the proposal and the record are a little longer, so a little weaker
+    "Kb/howto/rotate-keys.md": howto("Key Vault", "rotate", "", "Rotate the vault keys."),
+    "Kb/specs/rotate-keys-spec.md": spec("Rotation", "", "Rotate the vault keys with a new tool."),
+    "Kb/decisions/rotate-keys-record.md": (
+        "---\ntype: decision\n---\n# Rotation record\nRotate the vault keys with a new tool and a list of steps.\n"
+    ),
+    "Kb/howto/archived-rotate.md": howto("Key Vault", "rotate-old", "status: archived\n", "Rotate vault keys by hand."),
+}
+STATE, PROPOSAL, RECORD = (
+    "Kb/howto/rotate-keys.md",
+    "Kb/specs/rotate-keys-spec.md",
+    "Kb/decisions/rotate-keys-record.md",
+)
+VAULT_DOC, ARCHIVED = "Kb/entities/Vault.md", "Kb/howto/archived-rotate.md"
+WQ = "rotate the vault keys"
+
+
+@pytest.fixture
+def wkb(tmp_path):
+    cfg = Config(root=tmp_path, index_path=tmp_path / "index.db", vaults=["Kb"], dimension=len(TopicEmbedder.TOPICS))
+    for rel, text in WHEN_NOTES.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    conn = connect(cfg)
+    emb = TopicEmbedder()
+    update(cfg, conn, emb)
+    return cfg, conn, emb
+
+
+def ranked(wkb, query=WQ, **kwargs):
+    cfg, conn, emb = wkb
+    return [h.path for h in search(cfg, conn, emb, query, limit=50, mode="fts", entity_first=False, **kwargs)]
+
+
+@pytest.mark.parametrize(
+    "query, kind",
+    [(f"how do we {w} rotate keys", "future") for w in ("improve", "better", "plan", "next", "upgrade")]
+    + [(f"rotate keys {w}", "future") for w in ("should", "could", "proposal", "would", "IMPROVE")]
+    + [(f"{w} rotate keys", "history") for w in ("why did we", "when did we", "what was the")]
+    + [(f"rotate keys {w}", "history") for w in ("before", "previously", "history", "decided", "originally")]
+    + [
+        ("rotate the vault keys", "now"),
+        ("the planner rotates keys", "now"),  # a word inside another word is no match
+        ("what was the plan", "history"),  # both lists match: history wins
+    ],
+)
+def test_each_rule_word_gives_its_kind_of_question(query, kind):
+    from ragnarok.search import question_kind
+
+    assert question_kind(Config(), query)[:2] == (kind, "rule")
+
+
+def test_the_when_parameter_overrides_the_rule():
+    from ragnarok.search import question_kind
+
+    assert question_kind(Config(), "why did we plan this", "now") == ("now", "parameter", None)
+    assert question_kind(Config(), "rotate keys", "future") == ("future", "parameter", None)
+    with pytest.raises(ValueError):
+        question_kind(Config(), "rotate keys", "later")
+
+
+def test_the_rule_list_is_configuration():
+    from ragnarok.search import question_kind
+
+    cfg = replace(Config(), kb=replace(Config().kb, when_rules={"future": ["roadmap"], "history": []}))
+    assert question_kind(cfg, "the roadmap of keys") == ("future", "rule", "roadmap")
+    assert question_kind(cfg, "why did we plan this") == ("now", "rule", None)
+
+
+def test_the_factor_table_is_configuration(wkb):
+    cfg, conn, emb = wkb
+    table = {"proposal_open": {"now": 1.0, "future": 1.0, "history": 1.0}}
+    flat = replace(cfg, kb=replace(cfg.kb, when_factors=table))
+    found = [h.path for h in search(flat, conn, emb, WQ, limit=50, mode="fts", entity_first=False, when="future")]
+    assert found.index(STATE) < found.index(PROPOSAL)
+
+
+def test_relevance_on_rrf_alone_puts_the_state_note_first(wkb):
+    order = ranked(wkb, authority=False)
+    assert order.index(STATE) < order.index(PROPOSAL) < order.index(RECORD)
+
+
+def test_an_open_proposal_ranks_above_the_state_note_only_for_future(wkb):
+    future, now = ranked(wkb, when="future"), ranked(wkb, when="now")
+    assert future.index(PROPOSAL) < future.index(STATE)
+    assert now.index(STATE) < now.index(PROPOSAL)
+    # with no `when`, a future word in the query decides the same way
+    upgrade = ranked(wkb, WQ + " next")
+    assert upgrade.index(PROPOSAL) < upgrade.index(STATE)
+    assert ranked(wkb).index(STATE) < ranked(wkb).index(PROPOSAL)
+
+
+def test_a_record_ranks_first_for_history(wkb):
+    assert ranked(wkb, when="history")[0] == RECORD
+    now = ranked(wkb, when="now")
+    assert now.index(STATE) < now.index(RECORD)
+
+
+def test_the_entity_document_goes_first_only_for_now(wkb):
+    cfg, conn, emb = wkb
+    for when, first in (("now", True), ("future", False), ("history", False)):
+        found = search(cfg, conn, emb, WQ, limit=50, mode="fts", when=when)
+        assert any(h.entity_first for h in found) is first
+        assert (found[0].path == VAULT_DOC) is first
+
+
+def test_the_canonical_factor_applies_only_for_now(wkb):
+    cfg, conn, emb = wkb
+    off = {h.path: h.score for h in search(cfg, conn, emb, WQ, limit=50, mode="fts", authority=False)}
+    for when, factor in (("now", 1.5), ("future", 1.0), ("history", 1.0)):
+        found = {
+            h.path: h.score
+            for h in search(
+                cfg, conn, emb, WQ, limit=50, mode="fts", subject="Key Vault", entity_first=False, when=when
+            )
+        }
+        assert found[STATE] == pytest.approx(off[STATE] * factor, abs=1e-5)
+
+
+def test_an_archived_note_gets_no_factor_of_its_own(wkb):
+    cfg, conn, emb = wkb
+    off = {h.path: h.score for h in search(cfg, conn, emb, WQ, limit=50, mode="fts", authority=False)}
+    for when in ("now", "future", "history"):  # an archived state note, current: 1.0 in each column
+        found = {h.path: h.score for h in search(cfg, conn, emb, WQ, limit=50, mode="fts", when=when)}
+        assert found[ARCHIVED] == pytest.approx(off[ARCHIVED], abs=1e-5)
+
+
+def traced(cfg, trace_id):
+    lines = [json.loads(x) for f in trace_dir(cfg).glob("*.jsonl") for x in f.read_text().splitlines()]
+    (entry,) = [x for x in lines if x["trace_id"] == trace_id]
+    return entry
+
+
+@pytest.mark.parametrize(
+    "extra, path, factors",
+    [
+        ("", STATE, (1.0, 1.0, 1.0)),
+        ("validity: superseded\n", STATE, (0.8, 0.8, 1.0)),
+        ("", PROPOSAL, (0.9, 1.15, 1.0)),
+        ("validity: accepted\n", PROPOSAL, (0.9, 0.95, 1.0)),
+        ("validity: rejected\n", PROPOSAL, (0.8, 0.8, 1.0)),
+        ("validity: superseded\n", PROPOSAL, (0.8, 0.8, 1.0)),
+        ("", RECORD, (0.95, 0.95, 1.15)),
+        ("class: none\n", RECORD, (1.0, 1.0, 1.0)),
+    ],
+)
+def test_the_trace_records_the_kind_of_question_and_the_factor_of_each_result(wkb, extra, path, factors):
+    cfg, conn, emb = wkb
+    text = (cfg.root / path).read_text()
+    (cfg.root / path).write_text(text.replace("---\n", "---\n" + extra, 1))
+    update(cfg, conn, emb)
+    tools = Tools(cfg, conn, emb)
+    for when, factor in zip(("now", "future", "history"), factors, strict=True):
+        entry = traced(cfg, tools.search(WQ, when=when)["trace_id"])
+        assert entry["ragnarok.when"] == {"kind": when, "source": "parameter", "matched": None}
+        assert {c["path"]: c["authority"] for c in entry["ragnarok.candidates"]}[path]["when"] == factor
+    # with no `when`, the source is the rule and the trace gives the rule word
+    entry = traced(cfg, tools.search(WQ + " previously")["trace_id"])
+    assert entry["ragnarok.when"] == {"kind": "history", "source": "rule", "matched": "previously"}

@@ -128,13 +128,39 @@ def _relation_types() -> dict[str, RelationType]:
 class AuthorityConfig:
     """The factors that multiply the RRF score of a document in the rank stage."""
 
-    canonical: float = 1.5  # the canonical document of a subject in the query
+    canonical: float = 1.5  # the canonical document of a subject in the query, only for a `now` question
     review_overdue: float = 0.8  # a state document with review_by in the past
-    archived: float = 0.5
-    superseded: float = 0.5  # a record with superseded_by
     duplicate_identity: float = 0.5  # the second document of one identity key
     # also take the entities whose alias occurs as a phrase in the query text as subjects (ablation of P2)
     subject_from_text: bool = False
+
+
+WHEN_KINDS = ("now", "future", "history")  # the kinds of question; `now` is the default
+
+
+def _when_rules() -> dict[str, list[str]]:
+    """The words and phrases of the query text that give a kind of question other than `now`."""
+    return {
+        "future": ["improve", "better", "plan", "next", "upgrade", "should", "could", "proposal", "would"],
+        "history": ["why did", "when did", "what was", "before", "previously", "history", "decided", "originally"],
+    }
+
+
+def _when_factors() -> dict[str, dict[str, float]]:
+    """The factor of a note by its kind and validity (`<kind>_<validity>`, or `<kind>` with no validity) and the
+    kind of question. A note with no row gets 1.0."""
+    same = {"now": 1.0, "future": 1.0, "history": 1.0}
+    stale = {"now": 0.8, "future": 0.8, "history": 1.0}
+    return {
+        "state_current": dict(same),
+        "state_superseded": dict(stale),
+        "proposal_open": {"now": 0.9, "future": 1.15, "history": 1.0},
+        "proposal_accepted": {"now": 0.9, "future": 0.95, "history": 1.0},
+        "proposal_rejected": dict(stale),
+        "proposal_superseded": dict(stale),
+        "record": {"now": 0.95, "future": 0.95, "history": 1.15},
+        "none": dict(same),
+    }
 
 
 @dataclass
@@ -150,6 +176,8 @@ class KbConfig:
     relation_types: dict[str, RelationType] = field(default_factory=_relation_types)
     attributes: dict[str, dict[str, AttributeDef]] = field(default_factory=dict)  # kind -> name -> definition
     authority: AuthorityConfig = field(default_factory=AuthorityConfig)
+    when_rules: dict[str, list[str]] = field(default_factory=_when_rules)  # kind of question -> words
+    when_factors: dict[str, dict[str, float]] = field(default_factory=_when_factors)  # note -> kind -> factor
 
 
 @dataclass
@@ -357,4 +385,10 @@ def _dump_kb(kb: KbConfig) -> list[str]:
             lines += [f"{k} = {json.dumps(v)}" for k, v in asdict(attribute).items()]
     lines.append("\n[kb.authority]")
     lines += [f"{k} = {json.dumps(v)}" for k, v in asdict(kb.authority).items()]
+    lines.append("\n[kb.when_rules]")
+    lines += [f"{json.dumps(kind)} = {json.dumps(words)}" for kind, words in kb.when_rules.items()]
+    lines.append("\n[kb.when_factors]")
+    for note, row in kb.when_factors.items():
+        cells = ", ".join(f"{json.dumps(kind)} = {json.dumps(factor)}" for kind, factor in row.items())
+        lines.append(f"{json.dumps(note)} = {{ {cells} }}")
     return lines

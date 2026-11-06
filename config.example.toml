@@ -134,12 +134,30 @@ followed_by = {src_kinds = ["doc"], dst_kinds = [], inverse = "follows", standar
 
 # The factors that multiply the RRF score of a document in the rank stage.
 [kb.authority]
-canonical = 1.5           # the canonical document of a subject in the query
+canonical = 1.5           # the canonical document of a subject in the query, only for a `now` question
 review_overdue = 0.8      # a state document with review_by in the past
-archived = 0.5
-superseded = 0.5          # a record with superseded_by
 duplicate_identity = 0.5  # the second document of one identity key
 subject_from_text = false # also take the entities whose alias is a phrase of the query text as subjects
+
+# The kind of question: now (the default), future or history. The `when` parameter of search sets it; with no
+# `when`, a word or phrase of this list in the query sets it (whole words, any case). When both lists match,
+# history wins. A table here replaces the default table.
+[kb.when_rules]
+future = ["improve", "better", "plan", "next", "upgrade", "should", "could", "proposal", "would"]
+history = ["why did", "when did", "what was", "before", "previously", "history", "decided", "originally"]
+
+# The factor of a note by its kind and validity (<kind>_<validity>, or <kind> with no validity) and the kind of
+# question. A note with no row gets 1.0. For future and history, the entity documents do not go first and the
+# canonical factor does not apply. A table here replaces the default table.
+[kb.when_factors]
+state_current = { now = 1.0, future = 1.0, history = 1.0 }
+state_superseded = { now = 0.8, future = 0.8, history = 1.0 }
+proposal_open = { now = 0.9, future = 1.15, history = 1.0 }
+proposal_accepted = { now = 0.9, future = 0.95, history = 1.0 }
+proposal_rejected = { now = 0.8, future = 0.8, history = 1.0 }
+proposal_superseded = { now = 0.8, future = 0.8, history = 1.0 }
+record = { now = 0.95, future = 0.95, history = 1.15 }
+none = { now = 1.0, future = 1.0, history = 1.0 }
 
 # Each call appends a trace line; files older than retention_days are removed.
 [trace]

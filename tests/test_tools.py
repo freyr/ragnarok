@@ -186,6 +186,10 @@ def test_server_lists_the_tools(tools):
     search_input = next(t for t in asyncio.run(server.list_tools()) if t.name == "search").input_schema
     assert {"collection", "class", "subject", "status", "type"} <= set(search_input["properties"])
     assert "class_" not in search_input["properties"]
+    assert "future" in json.dumps(search_input["properties"]["when"]) and "history" in json.dumps(search_input)
+    search_tool = next(t for t in asyncio.run(server.list_tools()) if t.name == "search")
+    assert "when=future for a question about a change or a" in search_tool.description
+    assert "when=history for a question about the past" in search_tool.description
     for rule in ("resolve the entities first", "live value", "subject and type"):
         assert rule in server.instructions
 
@@ -200,6 +204,11 @@ def test_server_search_takes_class_and_subject(tmp_path):
     assert [r["path"] for r in payload["results"]] == ["Kb/entities/Loyalty Tiers.md", "Kb/howto/deploy-tiers.md"]
     assert [r["entity_first"] for r in payload["results"]] == [True, False]
     assert payload["subjects"][0]["id"] == "feat-tiers"
+    # a future question: the entity document does not go first
+    result = asyncio.run(server.call_tool("search", {**arguments, "when": "future"}))
+    assert [r["entity_first"] for r in json.loads(result.content[0].text)["results"]] == [False, False]
+    with pytest.raises(ToolError):
+        asyncio.run(server.call_tool("search", {**arguments, "when": "later"}))
     with pytest.raises(ToolError, match="ambiguous: feat-tiers, sys-billing"):
         asyncio.run(server.call_tool("search", {"query": "deploy", "subject": "Core"}))
 

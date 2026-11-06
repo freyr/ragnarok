@@ -8,7 +8,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -185,6 +185,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
         class_: Annotated[str | None, Field(alias="class")] = None,
         subject: str | list[str] | None = None,
         status: str | list[str] | None = None,
+        when: Literal["now", "future", "history"] | None = None,
         limit: int = 8,
         ctx: Context | None = None,
     ) -> dict:
@@ -199,6 +200,11 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
         value comes from the skill that get_entity names, not from a note. An unknown or ambiguous subject is an
         error with the candidate IDs. Each result has id, class, subjects, canonical, as_of, review_warning,
         successor and dispute; "subjects" gives the entity of each subject name.
+
+        when is the kind of question: now (how it is today, the default), future (a change, an improvement or a
+        plan) or history (what was before, why it changed). Give when=future for a question about a change or a
+        plan, and when=history for a question about the past; without it, words of the query decide. For future
+        and history, proposals or records rank higher and the entity documents do not go first.
         """
         return get().search(
             query,
@@ -212,6 +218,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
             class_=class_,
             subject=subject,
             status=status,
+            when=when,
             limit=limit,
         )
 

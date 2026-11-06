@@ -71,6 +71,13 @@ scoped = false
 [kb.authority]
 canonical = 2.0
 
+[kb.when_rules]
+future = ["roadmap"]
+history = ["back then", "last year"]
+
+[kb.when_factors]
+record = { now = 0.9, future = 0.9, history = 1.3 }
+
 [trace]
 retention_days = 7
 
@@ -89,7 +96,23 @@ def test_kb_tables_load_with_defaults(tmp_path):
     assert cfg.kb.attributes == {}
     assert cfg.kb.exact_limit == 25000
     a = cfg.kb.authority
-    assert (a.canonical, a.review_overdue, a.archived, a.superseded, a.duplicate_identity) == (1.5, 0.8, 0.5, 0.5, 0.5)
+    assert (a.canonical, a.review_overdue, a.duplicate_identity) == (1.5, 0.8, 0.5)
+    assert not hasattr(a, "archived") and not hasattr(a, "superseded")
+    # the kind of question: the rule words and the factor of each note kind (spec C2)
+    assert cfg.kb.when_rules == {
+        "future": ["improve", "better", "plan", "next", "upgrade", "should", "could", "proposal", "would"],
+        "history": ["why did", "when did", "what was", "before", "previously", "history", "decided", "originally"],
+    }
+    assert cfg.kb.when_factors == {
+        "state_current": {"now": 1.0, "future": 1.0, "history": 1.0},
+        "state_superseded": {"now": 0.8, "future": 0.8, "history": 1.0},
+        "proposal_open": {"now": 0.9, "future": 1.15, "history": 1.0},
+        "proposal_accepted": {"now": 0.9, "future": 0.95, "history": 1.0},
+        "proposal_rejected": {"now": 0.8, "future": 0.8, "history": 1.0},
+        "proposal_superseded": {"now": 0.8, "future": 0.8, "history": 1.0},
+        "record": {"now": 0.95, "future": 0.95, "history": 1.15},
+        "none": {"now": 1.0, "future": 1.0, "history": 1.0},
+    }
     assert cfg.trace.retention_days == 90
     w0 = cfg.w0
     assert (w0.summary_chars, w0.private_paths, w0.cost_ratio, list(w0.band)) == (2000, [], 10, [0.03, 0.30])
@@ -106,7 +129,9 @@ def test_kb_tables_load_with_defaults(tmp_path):
     assert (loaded.kb.doc_types["runbook"].class_, loaded.kb.doc_types["runbook"].review_months) == ("state", 6)
     assert loaded.kb.relation_types["runs"].inverse == "runBy"
     assert loaded.kb.attributes["team"]["channel"].value_type == "string"
-    assert (loaded.kb.authority.canonical, loaded.kb.authority.archived) == (2.0, 0.5)
+    assert (loaded.kb.authority.canonical, loaded.kb.authority.review_overdue) == (2.0, 0.8)
+    assert loaded.kb.when_rules == {"future": ["roadmap"], "history": ["back then", "last year"]}
+    assert loaded.kb.when_factors == {"record": {"now": 0.9, "future": 0.9, "history": 1.3}}  # replaces the default
     assert loaded.trace.retention_days == 7
     assert (loaded.w0.summary_chars, loaded.w0.private_paths, loaded.w0.cost_ratio) == (500, ["Notes/Private"], 10)
 
@@ -116,6 +141,8 @@ def test_kb_tables_load_with_defaults(tmp_path):
     [
         "[kb]\nexact_limt = 1\n",
         "[kb.authority]\ncanonicl = 2.0\n",
+        "[kb.authority]\narchived = 0.5\n",
+        "[kb.authority]\nsuperseded = 0.5\n",
         "[kb.doc_types.x]\nclass = 'state'\none_per = 'none'\nwhat = 1\n",
         "[kb.relation_types.x]\ninvers = 'y'\n",
         "[kb.attributes.k.a]\nvalue_typ = 'string'\n",
@@ -153,6 +180,7 @@ def test_dump_config_round_trips_kb_tables(tmp_path):
     assert (copy.kb, copy.trace, copy.w0) == (cfg.kb, cfg.trace, cfg.w0)
     assert copy.kb.attributes["team"]["channel"].live is True
     assert copy.kb.doc_types["runbook"].required_sections == ["Steps"]
+    assert (copy.kb.when_rules, copy.kb.when_factors) == (cfg.kb.when_rules, cfg.kb.when_factors)
     # the defaults round trip as well
     out.write_text(dump_config(Config(), root="vaults", data_dir="data"))
     assert load_config(out).kb == Config().kb
