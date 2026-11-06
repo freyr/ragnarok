@@ -226,3 +226,45 @@ def test_bench_run_writes_the_diagnostics_of_each_query_form(home, monkeypatch, 
     assert "| note/proposal/open | 2 | 0 |" in out
     # nw-01 loses against A on answer-first: its non-gold rank-1 row
     assert f"| nw-01 | {NOW['question_alt']} | now | {OTHER} | note/proposal/open | - | {GOLD} | 1 |" in out
+
+
+def test_a_decider_with_b_fails_when_the_baseline_gives_an_error(home, monkeypatch, capsys):
+    Fakes(monkeypatch)
+    base = kb_eval.mcp_caller(None, None)
+
+    def errors(batch):
+        return [{"error": "boom"} if t == "search" else r for (t, _), r in zip(batch, base(batch), strict=True)]
+
+    monkeypatch.setattr(kb_eval, "mcp_caller", lambda checkout, home: errors)
+    text = (home / "bench.toml").read_text().split("[[decider]]")[0]
+    decider = '[[decider]]\nset = "now"\nmeasure = "answer_first"\nfirst = "C"\nsecond = "B"\nlower = -1.0\n'
+    (home / "bench.toml").write_text(text + decider)
+    bench_cli(home, "index", "--record-only")
+    capsys.readouterr()
+    assert bench_cli(home, "run") == 0
+    out = capsys.readouterr().out
+    # B is 0 on each question after the error, so the gain +0.25 [+0.00, +0.50] is above -1, but B is no measurement
+    assert "| now answer-first C-B | +0.25 [+0.00, +0.50] | > -1.00 | fail (B has errors) |" in out
+    assert "**Verdict: no-go**" in out
+
+
+def test_bench_run_stops_on_a_bad_decider_before_the_run(home, monkeypatch, capsys):
+    Fakes(monkeypatch)
+    toml = home / "bench.toml"
+    toml.write_text(toml.read_text().replace('measure = "wrong"', 'measure = "wrng"', 1))
+    bench_cli(home, "index", "--record-only")
+    capsys.readouterr()
+    assert bench_cli(home, "run") == 1
+    assert "decider 2" in capsys.readouterr().err
+    assert not (home / "bench" / "runs").exists()
+
+
+def test_a_run_folder_with_no_report_is_not_the_last_run(home, monkeypatch, capsys):
+    Fakes(monkeypatch)
+    bench_cli(home, "index", "--record-only")
+    assert bench_cli(home, "run", "--label", "first") == 0
+    (first,) = runs(home)
+    (first / "report.md").unlink()
+    capsys.readouterr()
+    assert bench_cli(home, "run", "--label", "second") == 0
+    assert "No earlier run." in capsys.readouterr().out

@@ -75,7 +75,28 @@ def read_config(home: Path) -> dict:
         if key not in conf:
             raise BenchError(f"{path} has no key {key}")
         conf[key] = home / Path(conf[key]).expanduser()
+    for i, d in enumerate(conf.get("decider", []), start=1):
+        if problem := _decider_problem(d):
+            raise BenchError(f"{path}: decider {i} {problem}")
     return conf
+
+
+def _decider_problem(d: dict) -> str | None:
+    """What is wrong with one [[decider]] entry, or None."""
+    if d.get("kind") == "filtered":
+        return None if isinstance(d.get("max_regressed"), int) else "needs an integer max_regressed"
+    if "kind" in d:
+        return f"has the unknown kind {d['kind']!r}"
+    if not isinstance(d.get("set"), str):
+        return "needs a set"
+    if d.get("measure") not in kb_eval.MECHANICAL:
+        return f"has the measure {d.get('measure')!r}; the measures are {', '.join(kb_eval.MECHANICAL)}"
+    for side in ("first", "second"):
+        if d.get(side) not in NAMES:
+            return f"has the {side} system {d.get(side)!r}; the systems are {', '.join(NAMES)}"
+    if not isinstance(d.get("lower"), int | float) or isinstance(d.get("lower"), bool):
+        return "needs a number lower"
+    return None
 
 
 def fixture_hash(cfg: Config) -> str:
@@ -113,10 +134,15 @@ def build_index(cfg: Config, home: Path) -> str:
 
 
 def _commit() -> str:
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=Path(__file__).parent, capture_output=True, text=True, check=False
-    )
-    return result.stdout.strip() or "unknown"
+    """The commit of the code, with the suffix -dirty when a tracked file has an uncommitted change."""
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=Path(__file__).parent, capture_output=True, text=True, check=False
+        ).stdout.strip()
+
+    head = git("rev-parse", "HEAD") or "unknown"
+    return f"{head}-dirty" if git("status", "--porcelain", "--untracked-files=no") else head
 
 
 def _mechanical(ecfg, conn, embedder, sets_dir: Path, base_call, systems, collect=None) -> tuple[dict, list[str]]:
@@ -232,8 +258,10 @@ def report(
     last: dict | None,
     diag: list[dict],
     notes: list[str],
+    failed: frozenset[str] = frozenset(),
 ) -> str:
-    """The text of report.md."""
+    """The text of report.md. A decider that uses a system of failed (a run with an ERROR line) fails: its rows
+    are no measurement."""
     keyed = {n: _keyed(rows) for n, rows in systems.items()}
     order = [(r["set"], r["id"]) for r in systems["C"] or []]
     sets = list(dict.fromkeys(s for s, _ in order))
@@ -296,9 +324,11 @@ def report(
         else:
             keys = [k for k in order if k[0] == d["set"]]
             g = gain(keyed[d["first"]], keyed[d["second"]], keys, d["measure"])
-            ok = g is not None and g[1] > d["lower"]  # no pair is no measurement: it cannot pass
+            broken = sorted({d["first"], d["second"]} & failed)
+            ok = g is not None and g[1] > d["lower"] and not broken  # no pair is no measurement: it cannot pass
             name = f"{d['set']} {kb_eval.MECHANICAL[d['measure']][0]} {d['first']}-{d['second']}"
-            out.append(f"| {name} | {_interval(g)} | > {d['lower']:+.2f} | {'pass' if ok else 'fail'} |")
+            result = f"fail ({', '.join(broken)} has errors)" if broken else ("pass" if ok else "fail")
+            out.append(f"| {name} | {_interval(g)} | > {d['lower']:+.2f} | {result} |")
             n = 0 if g is None else len(g[3])
             power.append(f"- {name}: smallest detectable difference {'n/a' if g is None else detectable(g[3])} (n={n})")
         verdict = verdict and ok
@@ -376,7 +406,7 @@ def run(cfg: Config, home: Path, label: str, base_call, embedder) -> str:
     kind_hashes = {p.name: _sha(p) for p in sorted(sets_dir.glob("*.json"))}
     set_hashes = {**kind_hashes, regression.name: _sha(regression)}
     runs_dir = home / "bench" / "runs"
-    earlier = sorted(p for p in runs_dir.glob("*") if (p / "per-question.json").exists())
+    earlier = sorted(p for p in runs_dir.glob("*") if (p / "report.md").exists())  # a run with no report failed
     last = json.loads((earlier[-1] / "per-question.json").read_text()) if earlier else None
     stamp = _stamp()
     run_dir = runs_dir / f"{stamp}-{label}"
@@ -391,6 +421,11 @@ def run(cfg: Config, home: Path, label: str, base_call, embedder) -> str:
         diag = diagnostics(ecfg, conn, sets_dir, collect)
     finally:
         conn.close()
+    failed = frozenset(
+        name
+        for name, lines in (("B", notes), ("C", new_notes), ("Cwhen", new_notes))
+        if any(x.startswith("ERROR") for x in lines)
+    )
     notes = [*notes, *new_notes, *(x for x in f_lines if x.startswith(("ERROR", "MAP")))]
     a_rows = json.loads(conf["a_file"].read_text())["systems"]["base"]
     systems = {
@@ -412,7 +447,18 @@ def run(cfg: Config, home: Path, label: str, base_call, embedder) -> str:
     kb_eval.write_per_question(run_dir / "per-question.json", "mechanical", kb_eval.MECHANICAL, values, extra)
     (run_dir / "diagnostics.json").write_text(json.dumps(diag, indent=1, ensure_ascii=False))
     text = report(
-        label, stamp, commit, fixture, set_hashes, systems, conf.get("decider", []), regressed, last, diag, notes
+        label,
+        stamp,
+        commit,
+        fixture,
+        set_hashes,
+        systems,
+        conf.get("decider", []),
+        regressed,
+        last,
+        diag,
+        notes,
+        failed,
     )
     (run_dir / "report.md").write_text(text)
     return text
