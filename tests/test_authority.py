@@ -338,3 +338,52 @@ def test_the_trace_records_the_kind_of_question_and_the_factor_of_each_result(wk
     # with no `when`, the source is the rule and the trace gives the rule word
     entry = traced(cfg, tools.search(WQ + " previously")["trace_id"])
     assert entry["ragnarok.when"] == {"kind": "history", "source": "rule", "matched": "previously"}
+
+
+FACT_NOTES = {
+    "Kb/entities/Heating.md": entity(
+        "sys-heating", "Heating", "CH, Pump Room", "facts:\n  - attribute: pump_off_delay_min\n    value: 5\n"
+    ),
+    "Kb/entities/Boiler.md": entity(
+        "dev-boiler", "Boiler", "Neodens", "facts:\n  - attribute: max_flow_temperature\n    value: 65 C\n"
+    ),
+    "Kb/howto/heating-sensor.md": howto("Heating", "sensor", "", "The outdoor sensor model of the heating."),
+}
+
+
+@pytest.fixture
+def fkb(tmp_path):
+    cfg = Config(root=tmp_path, index_path=tmp_path / "index.db", vaults=["Kb"], dimension=len(TopicEmbedder.TOPICS))
+    for rel, text in FACT_NOTES.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    conn = connect(cfg)
+    emb = TopicEmbedder()
+    update(cfg, conn, emb)
+    return cfg, conn, emb
+
+
+@pytest.mark.parametrize(
+    "query, first",
+    [
+        ("what is the pump delay of the heating", ["Kb/entities/Heating.md"]),
+        ("the CH pump off delay", ["Kb/entities/Heating.md"]),
+        # the entity is named, but no fact of it matches the query
+        ("which outdoor sensor model does the heating use", []),
+        ("the max flow temperature of the CH", []),
+        # one shared word of a longer attribute is not enough: two words, or all words, of it are
+        ("the heating delay", []),
+        ("the heating off delay", ["Kb/entities/Heating.md"]),
+        # only the alias phrase that the query holds is removed: `pump` of the alias `pump room` stays
+        ("the pump off time of the CH", ["Kb/entities/Heating.md"]),
+        # a light stem: `delayed` matches `delay`
+        ("is the CH pump delayed", ["Kb/entities/Heating.md"]),
+        # a value word of a fact matches too
+        ("is the Neodens at 65", ["Kb/entities/Boiler.md"]),
+    ],
+)
+def test_an_entity_goes_first_only_when_a_fact_of_it_matches_the_query(fkb, query, first):
+    cfg, conn, emb = fkb
+    found = search(cfg, conn, emb, query, limit=50, mode="fts", when="now")
+    assert [h.path for h in found if h.entity_first] == first

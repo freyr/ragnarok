@@ -439,12 +439,68 @@ def _text_subjects(conn, query: str, allow_private: bool) -> list[str]:
     return sorted(position, key=lambda e: (position[e], e))
 
 
+_FUNCTION_WORDS = frozenset(
+    "the and for with what which who whom how does did are was were this that these those from into when where why"
+    " our your their its not can has have had use uses used".split()
+)
+
+
+def _stem(word: str) -> str:
+    """A light stem, so that `modes` and `mode`, `imaging` and `image`, `delayed` and `delay` match."""
+    if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+        word = word[:-1]
+    for suffix in ("ing", "ed"):
+        if len(word) > len(suffix) + 2 and word.endswith(suffix):
+            word = word[: -len(suffix)]
+            break
+    return word[:-1] if len(word) > 3 and word.endswith("e") else word
+
+
+def _content_words(text: str) -> set[str]:
+    """The words of a text that can match a fact: three characters or more (or a number), no function word, with
+    a plural `s` removed; an attribute name splits at its underscores."""
+    from . import kb
+
+    words = re.findall(r"[^\W_]+", kb.normalize_alias(text))
+    return {_stem(w) for w in words if (len(w) >= 3 or w.isdigit()) and w not in _FUNCTION_WORDS}
+
+
+def _fact_match(conn, entity_id: str, query: str) -> bool:
+    """True when the content words of the query, other than the words of the aliases of the entity that the query
+    holds as a phrase, hold all words of an attribute or a canonical aspect of the entity, or two of them at least,
+    or a word of a value. One shared word of a longer attribute (`temperature` of `outdoor_temperature`) is weak
+    evidence, so it is not enough."""
+    from . import kb
+
+    words = lambda text: " ".join(re.findall(r"\w+", kb.normalize_alias(text)))  # noqa: E731
+    padded = f" {words(query)} "
+    named = set()
+    for (alias,) in conn.execute("SELECT alias_norm FROM entity_alias WHERE entity_id = ?", (entity_id,)):
+        if (w := words(alias)) and f" {w} " in padded:
+            named |= _content_words(alias)
+    asked = _content_words(query) - named
+    if not asked:
+        return False
+    rows = conn.execute(
+        "SELECT attribute, value FROM fact WHERE entity_id = ? AND status = 'active'"
+        " UNION ALL SELECT aspect, NULL FROM entity_canonical WHERE entity_id = ?",
+        (entity_id, entity_id),
+    )
+    for attribute, value in rows:
+        words = _content_words(attribute)
+        if (words and len(asked & words) >= min(2, len(words))) or asked & _content_words(value or ""):
+            return True
+    return False
+
+
 def _entity_first(cfg: Config, conn, query: str, subject_ids: tuple[str, ...], filters: Filters) -> list[dict]:
     """The entity documents that go before the ranked results: those of the `subject` entities, then those of the
-    entities in the query text, each only when the filters admit it, at most ENTITY_FIRST."""
+    entities in the query text that hold a fact the query asks for (`_fact_match`), each only when the filters
+    admit it, at most ENTITY_FIRST."""
     reasons = dict.fromkeys(subject_ids, "subject")
     for entity_id in _text_subjects(conn, query, cfg.allow_private):
-        reasons.setdefault(entity_id, "text")
+        if entity_id not in reasons and _fact_match(conn, entity_id, query):
+            reasons[entity_id] = "fact"
     if not reasons:
         return []
     predicate, params = eligibility(filters)

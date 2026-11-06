@@ -93,13 +93,17 @@ def test_hit_has_ranks_and_snippet(index):
 
 # The knowledge-base filters and the scent fields, on a synthetic Kb vault.
 
+# an entity fact that a query with the word deploy asks for, so that entity-first applies
+DEPLOY_FACT = "facts:\n  - attribute: deploy\n    value: main\n"
 KB_NOTES = {
     "Kb/entities/Billing System.md": (
-        "---\nid: sys-billing\ntype: entity\nkind: system\naliases: [Billing, Core]\n---\n"
+        "---\nid: sys-billing\ntype: entity\nkind: system\naliases: [Billing, Core]\n" + DEPLOY_FACT + "---\n"
         "# Billing System\nIt sends the invoice.\n"
     ),
     "Kb/entities/Loyalty Tiers.md": (
-        "---\nid: feat-tiers\ntype: entity\nkind: feature\naliases: [Tiers, Core]\n---\n# Loyalty Tiers\nThe ladder.\n"
+        "---\nid: feat-tiers\ntype: entity\nkind: feature\naliases: [Tiers, Core]\n"
+        + DEPLOY_FACT
+        + "---\n# Loyalty Tiers\nThe ladder.\n"
     ),
     "Kb/howto/deploy-billing.md": (
         "---\ntype: how-to\nsubject: '[[Billing]]'\ntask: deploy\ncanonical: true\nas_of: 2020-01-01\n"
@@ -375,8 +379,8 @@ def test_an_alias_in_the_query_puts_its_entity_document_first(kb_index):
     assert first(hits) == [TIERS_DOC]
     assert paths(hits).count(TIERS_DOC) == 1
     # the entities of the text go first in the order of their first position in the query
-    assert first(search(cfg, conn, emb, "billing then tiers", limit=50)) == [BILLING_DOC, TIERS_DOC]
-    assert first(search(cfg, conn, emb, "tiers then billing", limit=50)) == [TIERS_DOC, BILLING_DOC]
+    assert first(search(cfg, conn, emb, "deploy billing then tiers", limit=50)) == [BILLING_DOC, TIERS_DOC]
+    assert first(search(cfg, conn, emb, "deploy tiers then billing", limit=50)) == [TIERS_DOC, BILLING_DOC]
 
 
 def test_the_subject_filter_admits_the_entity_document_of_the_subject(kb_index):
@@ -408,10 +412,12 @@ def test_at_most_three_entity_documents_go_first_and_the_limit_counts_them(kb_in
     cfg, conn, emb = kb_index
     for name, alias in (("Ledger", "GL"), ("Payroll", "Pay Run")):
         (cfg.root / f"Kb/entities/{name}.md").write_text(
-            f"---\nid: sys-{name.lower()}\ntype: entity\nkind: system\naliases: [{alias}]\n---\n# {name}\nA book.\n"
+            f"---\nid: sys-{name.lower()}\ntype: entity\nkind: system\naliases: [{alias}]\n"
+            + DEPLOY_FACT
+            + "---\n# {name}\nA book.\n"
         )
     update(cfg, conn, emb)
-    query = "pay run billing gl tiers"
+    query = "deploy pay run billing gl tiers"
     hits = search(cfg, conn, emb, query, limit=50)
     assert first(hits) == ["Kb/entities/Payroll.md", BILLING_DOC, LEDGER_DOC]
     assert paths(hits)[:3] == first(hits)
@@ -436,7 +442,7 @@ def test_the_trace_records_the_entity_first_documents_at_their_final_rank(kb_ind
 
     cfg, conn, emb = kb_index
     (cfg.root / LEDGER_DOC).write_text(
-        "---\nid: sys-ledger\ntype: entity\nkind: system\naliases: [GL]\n---\n# Ledger\nA book.\n"
+        "---\nid: sys-ledger\ntype: entity\nkind: system\naliases: [GL]\n" + DEPLOY_FACT + "---\n# Ledger\nA book.\n"
     )
     update(cfg, conn, emb)
     # fts mode: the ledger document has no word of the query, so it is outside the RRF list
@@ -447,8 +453,8 @@ def test_the_trace_records_the_entity_first_documents_at_their_final_rank(kb_ind
     assert (ledger.dense_rank, ledger.fts_rank, ledger.score, ledger.heading) == (None, None, None, "Ledger > Ledger")
     f = trace.fields
     assert f["ragnarok.entity_first"] == [
-        {"id": "feat-tiers", "doc_id": doc_id(conn, TIERS_DOC), "reason": "text"},
-        {"id": "sys-ledger", "doc_id": doc_id(conn, LEDGER_DOC), "reason": "text"},
+        {"id": "feat-tiers", "doc_id": doc_id(conn, TIERS_DOC), "reason": "fact"},
+        {"id": "sys-ledger", "doc_id": doc_id(conn, LEDGER_DOC), "reason": "fact"},
     ]
     documents = f["gen_ai.retrieval.documents"]
     assert [d["path"] for d in documents] == paths(hits)
