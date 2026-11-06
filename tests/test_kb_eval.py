@@ -246,6 +246,7 @@ def test_failed_run_gets_the_worst_value_of_each_measure(vault):
         "no_answer": 0.0,
         "answer_first": 0.0,
         "wrong": 1.0,
+        "wrong_first": 1.0,
         "run": True,
     }
     crashed = run([GOLD], route="kb", error=True)
@@ -657,6 +658,15 @@ def test_answer_first_and_wrong_citation_of_an_agent_run():
     assert (worst["answer_first"], worst["wrong"], worst["run"]) == (0.0, 1.0, True)
 
 
+def test_wrong_first_citation_of_an_agent_run_looks_at_the_first_note_only():
+    assert kb_eval.score_run(NOW, run([WRONG, GOLD]), ids)["wrong_first"] == 1.0
+    assert kb_eval.score_run(NOW, run([GOLD, WRONG]), ids)["wrong_first"] == 0.0  # a context note after the answer
+    assert kb_eval.score_run(NOW, run([]), ids)["wrong_first"] == 0.0
+    assert kb_eval.score_run(NOW, run([GOLD], error=True), ids)["wrong_first"] == 1.0
+    assert ("wrong_first", "Wrong first citation", -1) in kb_eval.ROWS["now"]
+    assert kb_eval.AGENT["wrong_first"] == ("Wrong first citation", -1)
+
+
 def test_a_question_with_empty_gold_stays_with_answer_first_0_and_wrong_from_its_list():
     assert kb_eval.score_ranked(NOW_EMPTY, [GOLD, STALE]) == {"answer_first": 0.0, "wrong": 1.0}
     assert kb_eval.score_ranked(NOW_EMPTY, [OTHER]) == {"answer_first": 0.0, "wrong": 0.0}
@@ -786,17 +796,20 @@ def test_agent_report_has_rows_for_the_kinds_of_question_and_writes_the_per_ques
     data = json.loads(out.read_text())
     assert data["runner"] == "agent"
     assert data["systems"]["mcp-base"] == [
-        {"id": "nw-01", "set": "now", "class": "now", "answer_first": 0.0, "wrong": 1.0},
-        {"id": "nw-02", "set": "now", "class": "now", "answer_first": 0.0, "wrong": 1.0},
+        {"id": "nw-01", "set": "now", "class": "now", "answer_first": 0.0, "wrong": 1.0, "wrong_first": 1.0},
+        {"id": "nw-02", "set": "now", "class": "now", "answer_first": 0.0, "wrong": 1.0, "wrong_first": 1.0},
     ]
     assert data["measures"]["answer_first"] == ["Answer-first", 1]
     assert data["measures"]["wrong"] == ["Wrong citation", -1]
+    assert data["measures"]["wrong_first"] == ["Wrong first citation", -1]
 
     # one agent (tasks 15 A and C): no paired row, but the file holds the values, the mean over the runs
     one = {"now": {"nw-01": {"mcp-kb": [run([GOLD]), run([OTHER])]}}}
     agent_eval.report(vault, {"now": [NOW]}, one, [], ["mcp-kb"], match=ids, per_question=out)
     rows = json.loads(out.read_text())["systems"]["mcp-kb"]
-    assert rows == [{"id": "nw-01", "set": "now", "class": "now", "answer_first": 0.5, "wrong": 0.0}]
+    assert rows == [
+        {"id": "nw-01", "set": "now", "class": "now", "answer_first": 0.5, "wrong": 0.0, "wrong_first": 0.0}
+    ]
 
 
 def test_agent_evaluate_writes_the_per_question_file_in_the_output_folder(vault, tmp_path, monkeypatch):

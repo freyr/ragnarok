@@ -32,7 +32,7 @@ from .evaluate import bootstrap, score_draft
 from .search import CANDIDATES, search
 from .trace import find_lines
 
-MEASURES = ("canonical_first", "stale", "f1", "route", "no_answer", "answer_first", "wrong")
+MEASURES = ("canonical_first", "stale", "f1", "route", "no_answer", "answer_first", "wrong", "wrong_first")
 WORST = {
     "canonical_first": 0.0,
     "stale": 1.0,
@@ -41,6 +41,7 @@ WORST = {
     "no_answer": 0.0,
     "answer_first": 0.0,
     "wrong": 1.0,
+    "wrong_first": 1.0,
     "run": True,
 }
 STALE_TOP = 5  # the mechanical stale citation: a stale distractor in the top 5
@@ -124,6 +125,8 @@ def score_run(q: dict, run: dict, match) -> dict:
         "no_answer": float(not notes and not entities),
         "answer_first": float(bool(notes) and notes[0] in top_gold(q)),
         "wrong": float(bool(wrong_paths(q) & set(notes))),
+        # the first cited note only: the agent cites the notes it read for context after its answer note
+        "wrong_first": float(bool(notes) and notes[0] in wrong_paths(q)),
         "run": False,
     }
 
@@ -155,7 +158,14 @@ ROWS = {
     "join": [("f1", "Set F1", 1)],
     "live": [("route", "Correct route", 1)],
     "negative": [("route", "Correct route", 1), ("no_answer", "No-answer accuracy", 1)],
-    **{kind: [("answer_first", "Answer-first", 1), ("wrong", "Wrong citation", -1)] for kind in KINDS},
+    **{
+        kind: [
+            ("answer_first", "Answer-first", 1),
+            ("wrong", "Wrong citation", -1),
+            ("wrong_first", "Wrong first citation", -1),
+        ]
+        for kind in KINDS
+    },
 }
 AGENT = {measure: (title, sign) for rows in ROWS.values() for measure, title, sign in rows}
 
