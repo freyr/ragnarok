@@ -453,8 +453,8 @@ def test_attribute_labels_a_join_entity_removed_by_a_filter_as_s5(lab):
 
 
 def test_attribute_needs_an_evidence_field_for_s7_and_s8(lab):
-    q7, q8, q8e = ({**SINGLE, "id": i} for i in ("st-07", "st-08", "st-09"))
-    lab.questions("single-truth", q7, q8, q8e)
+    ids = ("st-07", "st-08", "st-09", "st-10", "st-11")
+    lab.questions("single-truth", *({**SINGLE, "id": i} for i in ids))
     # S7: the trace shows the gold in the returned documents, and the agent did not cite it
     lab.run("single-truth", "st-07", 1, [search_call("t7")], answer([DUP]))
     lab.trace(line("t7", candidates=[gold(dense=1, final=2)], returned=[DUP, GOLD]))
@@ -465,14 +465,22 @@ def test_attribute_needs_an_evidence_field_for_s7_and_s8(lab):
     opened = ("mcp__ragnarok__open_note", {"path": GOLD}, {"path": GOLD, "trace_id": "t9b"})
     lab.run("single-truth", "st-09", 1, [search_call("t9"), opened], answer([DUP]))
     lab.trace(line("t9", candidates=[gold(dense=1, final=2)], returned=[DUP, GOLD]))
+    # S8 with evidence: the agent cited the gold and a stale note, and the gold ranks first (no S6)
+    lab.run("single-truth", "st-10", 1, [search_call("t10")], answer([GOLD, STALE]))
+    lab.trace(line("t10", candidates=[gold(dense=1, final=1)], returned=[GOLD, STALE]))
+    # the same, with no search result that holds the gold
+    lab.run("single-truth", "st-11", 1, [search_call("t11")], answer([GOLD, STALE]))
+    lab.trace(line("t11", candidates=[gold(dense=1, final=1)], returned=[OTHER]))
     result = lab.attribute()
     got = {i: (r["label"], r["evidence"], r["counts"]) for i, r in result["questions"].items()}
     assert got == {
         "st-07": ("S7", "gen_ai.retrieval.documents", True),
         "st-08": ("S8", None, False),
         "st-09": ("S8", "open_note", True),
+        "st-10": ("S8", "notes", True),
+        "st-11": ("S8", "notes", True),
     }
-    assert (result["counted"], result["n"]) == (2, 3)
+    assert (result["counted"], result["n"]) == (4, 5)
 
 
 def test_question_with_no_first_stage_is_unlabeled(lab):

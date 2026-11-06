@@ -362,9 +362,9 @@ def _single_truth(q: dict, run: dict, records: list[dict]) -> tuple[str, str | N
             return "S6", "gen_ai.retrieval.documents"
         if not gold & set(run["notes"]):
             return "S7", "gen_ai.retrieval.documents"
-        return "S8", None
+        return "S8", "notes" if stale & set(run["notes"]) else None
     if gold & set(run["notes"]):
-        return "S8", None
+        return "S8", "notes" if stale & set(run["notes"]) else None
     if not any(_name(t) in ("search", "find_projects") for t in run["tools"]):
         return "S3", "gen_ai.tool.name"
     best = None
