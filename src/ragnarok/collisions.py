@@ -7,6 +7,8 @@ The candidate sources:
 - links_to_supersedes: each target of `supersedes`, and the notes that link to it.
 
 Each candidate has its labels, its reasons, its search rank and the cosine distance of its best chunk to the query.
+The output (at most LIMIT) has three tiers: first the identity candidates and the supersedes targets; last up to
+LINK_PLACES candidates of the links only; the search candidates fill the places between them.
 """
 
 from __future__ import annotations
@@ -22,6 +24,8 @@ from .search import PrivateNotAllowed, search
 from .validate import _Context, body_links, frontmatter_links
 
 LIMIT = 10
+LINK_PLACES = 3  # the places kept for the candidates of the links only
+SOURCES = ("identity", "search", "links_out", "links_to_supersedes")
 QUERY_CHARS = 1000
 HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.M)
 
@@ -72,9 +76,11 @@ def find_collisions(
 ) -> list[dict]:
     """The collision candidates of a draft (with its intended key draft_path) or of the indexed note at path.
 
-    The order: identity candidates (by search rank, then distance), search candidates (by rank), then the
-    candidates of the links only (by distance); at most LIMIT. The note at path is not a candidate. A private
-    note is a candidate only with allow_private, which needs allow_private = true in the configuration."""
+    The order: tier 1, the identity candidates and the supersedes targets (by search rank, then distance); tier 2,
+    the search candidates (by rank); tier 3, up to LINK_PLACES candidates of the links only (by distance). Tier 3
+    keeps its places (only as many as it has candidates); tier 2 fills the rest of the LIMIT places. The note at
+    path is not a candidate. A private note is a candidate only with allow_private, which needs
+    allow_private = true in the configuration."""
     if allow_private and not cfg.allow_private:
         raise PrivateNotAllowed("allow_private needs allow_private = true in the configuration")
     if draft is not None:
@@ -92,15 +98,30 @@ def find_collisions(
     fm, body = parse_note(text)
     query = query_text(note.meta.title if key else _first_heading(body), note.meta.description, body)
     one = _OneQuery(embedder)
-    reasons: dict[int, list[str]] = {}
+    reasons: dict[int, set[str]] = {}
+    first: set[int] = set()  # tier 1
 
     def add(nid: int | None, reason: str) -> None:
-        if nid is not None and nid != exclude and reason not in reasons.setdefault(nid, []):
-            reasons[nid].append(reason)
+        if nid is not None and nid != exclude:
+            reasons.setdefault(nid, set()).add(reason)
 
     if note.identity is not None:
         for nid, _, _ in ctx.identity_notes(note.identity, current_only=False):
             add(nid, "identity")
+            first.add(nid)
+    for target in note.meta.supersedes:
+        to = ctx.resolver.note(target, note.note_id, note.path)
+        if to is None:
+            continue
+        add(to, "links_to_supersedes")
+        first.add(to)
+        for (nid,) in conn.execute("SELECT DISTINCT from_note FROM links WHERE to_note = ?", (to,)):
+            add(nid, "links_to_supersedes")
+    for target in [*frontmatter_links(fm), *body_links(body)]:
+        if target:
+            add(ctx.resolver.paths.find(target, note.note_id, None, note.path), "links_out")
+    first.discard(exclude)
+    # the pool fills tier 2 when all tier 1 notes and the input note are in it
     hits = search(
         cfg,
         conn,
@@ -108,7 +129,7 @@ def find_collisions(
         query,
         include_superseded=True,
         include_private=allow_private,
-        limit=LIMIT + (exclude is not None),
+        limit=LIMIT + len(first) + (exclude is not None),
     )
     ranks: dict[int, int] = {}
     for rank, hit in enumerate(hits, start=1):
@@ -116,16 +137,6 @@ def find_collisions(
         if nid is not None and nid != exclude:
             ranks[nid] = rank
             add(nid, "search")
-    for target in [*frontmatter_links(fm), *body_links(body)]:
-        if target:
-            add(ctx.resolver.paths.find(target, note.note_id, None, note.path), "links_out")
-    for target in note.meta.supersedes:
-        to = ctx.resolver.note(target, note.note_id, note.path)
-        if to is None:
-            continue
-        add(to, "links_to_supersedes")
-        for (nid,) in conn.execute("SELECT DISTINCT from_note FROM links WHERE to_note = ?", (to,)):
-            add(nid, "links_to_supersedes")
 
     if not reasons:
         return []
@@ -143,6 +154,7 @@ def find_collisions(
             continue
         candidates.append(
             {
+                "id": nid,
                 "path": npath,
                 "title": title,
                 "type": type_,
@@ -152,7 +164,7 @@ def find_collisions(
                 "as_of": as_of,
                 "subject": subject.split("\n") if subject else None,
                 "superseded_by": successor,
-                "reasons": reasons[nid],
+                "reasons": [r for r in SOURCES if r in reasons[nid]],
                 "rank": ranks.get(nid),
                 "distance": distances.get(nid),
             }
@@ -161,14 +173,23 @@ def find_collisions(
     def distance(c: dict) -> tuple:
         return (c["distance"] is None, c["distance"] or 0.0, c["path"])
 
-    def order(c: dict) -> tuple:
-        if "identity" in c["reasons"]:
-            return (0, c["rank"] is None, c["rank"] or 0, *distance(c))
-        if c["rank"] is not None:
-            return (1, False, c["rank"], *distance(c))
-        return (2, True, 0, *distance(c))
-
-    return sorted(candidates, key=order)[:LIMIT]
+    tier1 = sorted(
+        (c for c in candidates if c["id"] in first), key=lambda c: (c["rank"] is None, c["rank"] or 0, *distance(c))
+    )[:LIMIT]
+    rest = [c for c in candidates if c["id"] not in first]
+    found = sorted((c for c in rest if c["rank"] is not None), key=lambda c: c["rank"])
+    links = sorted((c for c in rest if set(c["reasons"]) - {"search"}), key=distance)
+    room = LIMIT - len(tier1)
+    # tier 3: the link candidates that tier 2 does not list; keep as many places as there are, up to LINK_PLACES
+    for places in range(min(LINK_PLACES, room), -1, -1):
+        tier2 = found[: room - places]
+        tier3 = [c for c in links if c not in tier2][:places]
+        if len(tier3) == places:
+            break
+    out = tier1 + tier2 + tier3
+    for c in out:
+        del c["id"]
+    return out
 
 
 def format_text(candidates: list[dict]) -> str:

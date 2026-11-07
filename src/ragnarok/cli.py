@@ -70,6 +70,10 @@ def build_parser() -> argparse.ArgumentParser:
     vp.add_argument("--json", action="store_true", help="print one JSON object")
     fp = parsers["find-collisions"]
     fp.add_argument("path", help="a note path, relative to the vault root or absolute; - reads a draft from stdin")
+    fp.description = (
+        "At most 10 candidates: first the identity candidates and the supersedes targets, then the search results"
+        " by rank, last up to 3 candidates that only the links give, by distance."
+    )
     fp.add_argument("--json", action="store_true", help="print one JSON object")
     return parser
 

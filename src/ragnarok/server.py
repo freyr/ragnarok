@@ -262,8 +262,10 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
         description and the start of the body, superseded notes included), links_out (the notes the draft links to),
         links_to_supersedes (each supersedes target and the notes that link to it). Each candidate has path, title,
         type, status, class, validity, as_of, subject, superseded_by, reasons, rank (the search rank or null) and
-        distance (the cosine distance of its best chunk to the query, or null). The order: identity candidates, then
-        the search rank, then the link candidates by distance. allow_private works only when the user allows it.
+        distance (the cosine distance of its best chunk to the query, or null). The order: first the identity
+        candidates and the supersedes targets (by search rank, then distance); then the search candidates by rank;
+        last up to 3 candidates that only the links give (by distance), which keep their places.
+        allow_private works only when the user allows it.
         """
         return get().find_collisions(draft=draft, path=path, allow_private=allow_private)
 

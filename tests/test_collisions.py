@@ -179,13 +179,14 @@ def test_one_query_embedding(cfg, conn):
 
 @pytest.fixture
 def fake_search(monkeypatch):
+    """A search that gives these paths in this order, cut at the limit of the call."""
     calls = []
 
     def install(paths):
         def fake(cfg, conn, embedder, query, **kwargs):
             embedder.embed_query(query)
             calls.append(kwargs)
-            return [SimpleNamespace(path=p) for p in paths]
+            return [SimpleNamespace(path=p) for p in paths[: kwargs["limit"]]]
 
         monkeypatch.setattr(collisions, "search", fake)
         return calls
@@ -193,14 +194,22 @@ def fake_search(monkeypatch):
     return install
 
 
-def test_identity_first_then_search_rank_then_link_only_by_distance(cfg, conn, fake_search):
+@pytest.fixture
+def fillers(cfg, conn):
+    paths = [f"V/Fill/f{i:02}.md" for i in range(20)]
+    write(cfg, {p: f"# F\nThe filler {p[-6:-3]}.\n" for p in paths})
+    update(cfg, conn, TopicEmbedder())
+    return paths
+
+
+def test_tier_one_then_search_rank_then_link_only_by_distance(cfg, conn, fake_search):
     calls = fake_search([BOILER, OTHER_TASK, IDENT_RECORD, LINKER])
     result = run(cfg, conn, draft=DRAFT)
-    # identity: rank 3, then no rank; search: ranks 1, 2, 4; link only: wiring (boiler, 0.29) before old (1.0)
-    assert [c["path"] for c in result] == [IDENT_RECORD, IDENT_STATE, BOILER, OTHER_TASK, LINKER, WIRING, OLD]
-    assert [c["rank"] for c in result] == [3, None, 1, 2, 4, None, None]
-    assert result[5]["distance"] == pytest.approx(1 - 2**-0.5, abs=1e-6)
-    assert result[6]["distance"] == pytest.approx(1.0, abs=1e-6)
+    # tier 1 (identity and the supersedes target): rank 3, then no rank by distance (1.0) and path;
+    # search: ranks 1, 2, 4 (linker is a search candidate); link only: wiring
+    assert [c["path"] for c in result] == [IDENT_RECORD, IDENT_STATE, OLD, BOILER, OTHER_TASK, LINKER, WIRING]
+    assert [c["rank"] for c in result] == [3, None, None, 1, 2, 4, None]
+    assert result[6]["distance"] == pytest.approx(1 - 2**-0.5, abs=1e-6)  # boiler of boiler and incident
     assert calls[0]["include_superseded"] is True
     assert calls[0]["include_private"] is False
 
@@ -209,16 +218,48 @@ def test_a_link_only_candidate_with_no_distance_is_last(cfg, conn, fake_search):
     fake_search([])
     drop_vectors(conn, WIRING)
     result = run(cfg, conn, draft=DRAFT)
-    assert [c["path"] for c in result][-3:] == [OLD, LINKER, WIRING]
+    assert [c["path"] for c in result][-2:] == [LINKER, WIRING]
 
 
-def test_at_most_ten_candidates(cfg, conn, fake_search):
-    fillers = [f"V/Fill/f{i:02}.md" for i in range(12)]
-    write(cfg, {p: f"# F\nThe filler {p[-6:-3]}.\n" for p in fillers})
-    update(cfg, conn, TopicEmbedder())
-    fake_search(fillers)
+def test_at_most_ten_candidates(cfg, conn, fake_search, fillers):
+    calls = fake_search(fillers)
     result = run(cfg, conn, draft=DRAFT)
-    assert [c["path"] for c in result] == [IDENT_STATE, IDENT_RECORD, *fillers[:8]]
+    # tier 1: 3; link only: wiring (0.29), linker (1.0); search: the other 5 places
+    assert [c["path"] for c in result] == [IDENT_STATE, IDENT_RECORD, OLD, *fillers[:5], WIRING, LINKER]
+    assert calls[0]["limit"] >= 10 + 3
+
+
+def test_a_supersedes_target_beyond_the_search_pool_is_first(cfg, conn, fake_search, fillers):
+    draft = "---\ntype: guide\nsupersedes: ['[[old-plan]]']\n---\n# D\nThe boiler text.\n"
+    calls = fake_search([*fillers, OLD])  # the target at rank 21, outside any pool of the call
+    result = run(cfg, conn, draft=draft)
+    assert result[0]["path"] == OLD
+    assert result[0]["rank"] is None
+    assert result[-1]["path"] == LINKER  # it links to the target: link only
+    assert [c["path"] for c in result[1:-1]] == fillers[:8]
+    assert calls[0]["limit"] >= 11
+
+
+def test_a_links_out_note_outside_the_search_results_is_kept(cfg, conn, fake_search, fillers):
+    fake_search(fillers)
+    result = run(cfg, conn, draft="---\ntype: guide\n---\n# D\nSee [[wiring]].\n")
+    assert [c["path"] for c in result] == [*fillers[:9], WIRING]
+    assert result[-1]["reasons"] == ["links_out"]
+
+
+def test_at_most_three_link_only_candidates_by_distance(cfg, conn, fake_search, fillers):
+    fake_search(fillers)
+    draft = "---\ntype: guide\n---\n# D\nThe queue. [[wiring]] [[linker]] [[boiler]] [[defrost-c]] [[old-plan]]\n"
+    result = run(cfg, conn, draft=draft)
+    # the query has boiler and queue: boiler 0.29, defrost-c (queue) 0.29, wiring 0.5, linker and old-plan 1.0
+    assert [c["path"] for c in result] == [*fillers[:7], BOILER, OTHER_TASK, WIRING]
+
+
+def test_with_no_link_candidates_the_search_fills_the_places(cfg, conn, fake_search, fillers):
+    fake_search(fillers)
+    assert [c["path"] for c in run(cfg, conn, draft="# D\nThe text.\n")] == fillers[:10]
+    subject = "---\ntype: guide\nsubject: ['[[Heat pump]]']\ntask: defrost\n---\n# D\nThe text.\n"
+    assert [c["path"] for c in run(cfg, conn, draft=subject)] == [IDENT_STATE, IDENT_RECORD, *fillers[:8]]
 
 
 # --- the input note, a copy and privacy --------------------------------------------------------------------------

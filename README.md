@@ -114,7 +114,7 @@ The server gives ten tools:
 | `find_by_jira` | The notes that contain a ticket key, for example `ABC-123`. |
 | `find_entities` | The entity notes (`type: entity`), with kind and aliases. |
 | `validate` | Checks notes, or a draft before a write, against the knowledge-base frontmatter model: the values, the required keys, the links, the reference targets and the identity keys. |
-| `find_collisions` | The notes that a draft (or a note) can collide with, before a write: at most 10 candidates from the identity key, the hybrid search, the links of the draft and the notes that link to its `supersedes` targets. Each candidate has its labels, its reasons, its search rank and the cosine distance of its best chunk. |
+| `find_collisions` | The notes that a draft (or a note) can collide with, before a write: at most 10 candidates from the identity key, the hybrid search, the links of the draft and the notes that link to its `supersedes` targets. Each candidate has its labels, its reasons, its search rank and the cosine distance of its best chunk. The identity candidates and the `supersedes` targets come first, then the search results; the last places (up to 3) go to the candidates that only the links give. |
 | `vault_rules` | The path rules of each vault and the local `[write]` table: the known keys and the systems of record. |
 
 The plugin adds the guidance below to each session itself, with the plugin tool names
