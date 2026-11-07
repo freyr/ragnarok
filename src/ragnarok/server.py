@@ -191,7 +191,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
     @server.tool()
     @timed
     def list_project(project: str, vault: str | None = None) -> dict:
-        """All notes of a project in any folder, with type, status, description and class and validity when given."""
+        """All notes of a project, any folder: type, status, description, class, validity; stage, state, next action."""
         return get().list_project(project, vault=vault)
 
     @server.tool()
