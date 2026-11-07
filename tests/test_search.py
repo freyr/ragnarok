@@ -3,6 +3,7 @@ from dataclasses import replace
 
 import pytest
 
+from ragnarok import search as search_module
 from ragnarok.index import connect, update
 from ragnarok.search import PrivateNotAllowed, fts_query, search
 
@@ -183,10 +184,11 @@ def test_subject_filter_with_an_unknown_entity_gives_no_results(subjects, value)
     assert search(cfg, conn, emb, "boiler", subject=value, limit=50) == []
 
 
-@pytest.mark.parametrize("mode", ["hybrid", "dense", "fts"])
-def test_subject_filter_keeps_the_order_of_the_notes(subjects, mode):
+def test_subject_filter_finds_a_note_below_the_unfiltered_depth(subjects, monkeypatch):
     cfg, conn, emb = subjects
-    kept = {BOILER, PUMP_2025, MOUNT}
-    every = [p for p in paths(search(cfg, conn, emb, "boiler pump", include_superseded=True, limit=50, mode=mode))]
-    found = paths(search(cfg, conn, emb, "boiler pump", subject="pump", include_superseded=True, limit=50, mode=mode))
-    assert found == [p for p in every if p in kept]
+    monkeypatch.setattr(search_module, "CANDIDATES", 1)
+    monkeypatch.setattr(search_module, "FILTERED_CANDIDATES", 1)
+    query = dict(query="boiler swap heat pump", include_superseded=True, mode="fts")
+    assert paths(search(cfg, conn, emb, **query)) == ["Home/Heating/notes/boiler-heat-pump.md"]
+    found = paths(search(cfg, conn, emb, subject="pump", **query))  # the depth applies to the notes about pump
+    assert len(found) == 1 and found[0] in {BOILER, PUMP_2025, MOUNT}

@@ -69,9 +69,12 @@ def fts_query(query: str) -> str:
 
 
 def _note_filters(
-    vault, project, area, type_, include_archived, include_private, include_superseded=True
+    vault, project, area, type_, include_archived, include_private, include_superseded=True, entity=None
 ) -> tuple[str, list]:
     where, params = [], []
+    if entity is not None:
+        where.append("n.id IN (SELECT note_id FROM refs WHERE key = 'subject' AND to_note = ?)")
+        params.append(entity)
     for column, value in (("vault", vault), ("project", project), ("area", area), ("type", type_)):
         if value is not None:
             where.append(f"n.{column} = ?")
@@ -145,18 +148,16 @@ def search(
     """Hybrid search. Notes with validity superseded or rejected are left out unless include_superseded.
 
     subject (an entity name, alias or path) keeps the notes with a subject that resolves to that entity note; an
-    unknown entity gives no results. It applies after the fusion, so the notes that remain keep their order."""
+    unknown entity gives no results."""
     if include_private and not cfg.allow_private:
         raise PrivateNotAllowed("include_private needs allow_private = true in the configuration")
-    about = None
+    entity = None
     if subject is not None:
         entity = find_entity(conn, subject)
         if entity is None:
             return []
-        rows = conn.execute("SELECT note_id FROM refs WHERE key = 'subject' AND to_note = ?", (entity,))
-        about = {nid for (nid,) in rows}
     note_where, note_params = _note_filters(
-        vault, project, area, type, include_archived, include_private, include_superseded
+        vault, project, area, type, include_archived, include_private, include_superseded, entity
     )
     lists: list[list[tuple[int, int]]] = []
     if mode in ("hybrid", "dense"):
@@ -166,9 +167,7 @@ def search(
     else:
         lists.append([])
     if mode in ("hybrid", "fts"):
-        # deeper lists for a subject: the ranks of the first candidates do not change
-        k = FILTERED_CANDIDATES if subject else CANDIDATES
-        lists.append(_by_note(conn, _fts(conn, query, k, note_where, note_params), note_where, note_params))
+        lists.append(_by_note(conn, _fts(conn, query, CANDIDATES, note_where, note_params), note_where, note_params))
     else:
         lists.append([])
 
@@ -181,7 +180,7 @@ def search(
             ranks.setdefault(nid, [None, None])[li] = rank
             if nid not in best or rank < best[nid][0]:
                 best[nid] = (rank, cid)
-    top = sorted((n for n in scores if about is None or n in about), key=lambda n: -scores[n])[:limit]
+    top = sorted(scores, key=lambda n: -scores[n])[:limit]
     hits = []
     for nid in top:
         n = conn.execute(
