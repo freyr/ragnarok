@@ -112,6 +112,7 @@ def cfg(tmp_path, monkeypatch):
         index_path=home / "data" / "index.db",
         vaults=["V"],
         dimension=len(TopicEmbedder.TOPICS),
+        min_words=3,  # the least body words of a duplicate group; each test note has one section
     )
 
 
@@ -213,6 +214,16 @@ def test_equal_body_notes_across_the_mirror_are_one_duplicate_case(cfg, conn):
     assert [o["expected"] for o in group["old"]] == ["same", "same"]
     assert group["start_state"] == {"exclude": "V/Zed/tpl-c.md", "remove_keys": {tpl[0]: [], tpl[1]: []}}
     assert parse_note(group["drafts"]["typed"])[0] == {"type": "guide"}
+
+
+def test_an_equal_body_below_min_words_is_no_duplicate_case(cfg, conn):
+    stubs = {"V/People/ann.md": "---\ntype: person\n---\n# Ann\n", "V/People/bob.md": "---\ntype: x\n---\n#  Ann\n"}
+    for rel, text in stubs.items():
+        (cfg.root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (cfg.root / rel).write_text(text)
+    update(cfg, conn, TopicEmbedder())
+    dups = cases_of(replay.build(cfg, conn), "duplicate")
+    assert [c["newer"] for c in dups] == [NEW_D, NEW_E]  # the 2-word stub pair gives no case
 
 
 def test_moved_copy_or_content_change_by_the_similarity(cfg, conn, built):

@@ -3,9 +3,9 @@
 `build` makes the cases from the index and its mirror (the configured vaults):
 - a positive case is one newer note with the old notes that it replaces, from the resolved `superseded_by` refs
   and the resolved wiki-links of `supersedes` (a free-text entry adds no pair);
-- each group of notes with an equal normalized body (layer D0, the whole mirror) is a duplicate case: the draft is
-  the note with the last path, the expected action is `same` for each other note. A supersession pair with an
-  equal body is a duplicate case only;
+- each group of notes with an equal normalized body of at least `min_words` words (layer D0, the whole mirror)
+  is a duplicate case: the draft is the note with the last path, the expected action is `same` for each other
+  note. A supersession pair in such a group is a duplicate case only;
 - a negative case (expected action `new`) is a sampled note in no case, with no shared `subject`, no resolved
   wiki-link in or out, and a best chunk distance to the chunks of the other notes above a frozen limit.
 Each case has two draft forms (`bare`: the body only; `typed`: the body with the newer note's own `type`,
@@ -176,12 +176,13 @@ def _pairs(notes: _Notes, conn: sqlite3.Connection, counts: dict) -> dict[str, l
     return {newer: sorted(olds) for newer, olds in groups.items()}
 
 
-def _equal_bodies(notes: _Notes) -> list[list[str]]:
-    """The groups (sorted paths) of two or more notes with an equal, not empty, normalized body."""
+def _equal_bodies(notes: _Notes, min_words: int) -> list[list[str]]:
+    """The groups (sorted paths) of two or more notes with an equal normalized body of at least min_words words.
+    A shorter body (a stub) does not show that two notes are the same."""
     groups: dict[str, list[str]] = {}
     for path in sorted(notes.ctx.ids):
         body = notes.get(path)[1]
-        if normalize(body):
+        if len(normalize(body).split()) >= min_words:
             groups.setdefault(body_hash(body), []).append(path)
     return [g for g in groups.values() if len(g) > 1]
 
@@ -201,7 +202,8 @@ def build(
     notes = _Notes(cfg, conn)
     counts: dict = {}
     groups = _pairs(notes, conn, counts)
-    equal = _equal_bodies(notes)
+    equal = _equal_bodies(notes, cfg.min_words)
+    same = {path: set(g) for g in equal for path in g}
     duplicates = [
         _case(notes, "duplicate", g[-1], [{"path": old, "expected": "same", "similarity": 1.0} for old in g[:-1]])
         for g in equal
@@ -211,7 +213,7 @@ def build(
         new_body = notes.get(newer)[1]
         kept = []
         for old in groups[newer]:
-            if body_hash(notes.get(old)[1]) == body_hash(new_body):
+            if old in same.get(newer, ()):
                 continue  # a duplicate case only
             ratio = round(similarity(notes.get(old)[1], new_body), 4)
             kept.append({"path": old, "expected": _expected(notes, newer, old), "similarity": ratio})
