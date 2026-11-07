@@ -41,9 +41,23 @@ class Hit:
     score: float
     dense_rank: int | None
     fts_rank: int | None
+    note_class: str | None = None
+    validity: str | None = None
+    as_of: str | None = None
+    superseded_by: str | None = None
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        """The hit as a dict. The knowledge-base labels appear only when the note has them; note_class is `class`."""
+        d = asdict(self)
+        for key in KB_LABELS:
+            value = d.pop(key)
+            if value is not None:
+                d["class" if key == "note_class" else key] = value
+        return d
+
+
+KB_LABELS = ("note_class", "validity", "as_of", "superseded_by")
+HIDDEN_VALIDITY = ("superseded", "rejected")
 
 
 def fts_query(query: str) -> str:
@@ -52,7 +66,9 @@ def fts_query(query: str) -> str:
     return " OR ".join(f'"{w}"' for w in dict.fromkeys(words))
 
 
-def _note_filters(vault, project, area, type_, include_archived, include_private) -> tuple[str, list]:
+def _note_filters(
+    vault, project, area, type_, include_archived, include_private, include_superseded=True
+) -> tuple[str, list]:
     where, params = [], []
     for column, value in (("vault", vault), ("project", project), ("area", area), ("type", type_)):
         if value is not None:
@@ -60,6 +76,9 @@ def _note_filters(vault, project, area, type_, include_archived, include_private
             params.append(value)
     if not include_archived:
         where.append("n.status = 'active'")
+    if not include_superseded:
+        where.append(f"(n.validity IS NULL OR n.validity NOT IN ({', '.join('?' * len(HIDDEN_VALIDITY))}))")
+        params.extend(HIDDEN_VALIDITY)
     if not include_private:
         where.append("n.sensitivity = 'normal'")
     return (" AND " + " AND ".join(where)) if where else "", params
@@ -116,12 +135,16 @@ def search(
     type: str | None = None,
     include_archived: bool = True,
     include_private: bool = False,
+    include_superseded: bool = False,
     limit: int = 8,
     mode: str = "hybrid",
 ) -> list[Hit]:
+    """Hybrid search. Notes with validity superseded or rejected are left out unless include_superseded."""
     if include_private and not cfg.allow_private:
         raise PrivateNotAllowed("include_private needs allow_private = true in the configuration")
-    note_where, note_params = _note_filters(vault, project, area, type, include_archived, include_private)
+    note_where, note_params = _note_filters(
+        vault, project, area, type, include_archived, include_private, include_superseded
+    )
     lists: list[list[tuple[int, int]]] = []
     if mode in ("hybrid", "dense"):
         k = FILTERED_CANDIDATES if (project or area or type) else CANDIDATES
@@ -147,10 +170,12 @@ def search(
     hits = []
     for nid in top:
         n = conn.execute(
-            "SELECT path, vault, title, project, area, type, status, description FROM notes WHERE id = ?", (nid,)
+            "SELECT path, vault, title, project, area, type, status, description, note_class, validity, as_of,"
+            " superseded_by FROM notes WHERE id = ?",
+            (nid,),
         ).fetchone()
         heading, text = conn.execute("SELECT heading, text FROM chunks WHERE id = ?", (best[nid][1],)).fetchone()
         words = text.split()
         snippet = " ".join(words[:SNIPPET_WORDS]) + (" …" if len(words) > SNIPPET_WORDS else "")
-        hits.append(Hit(*n, heading, snippet, round(scores[nid], 5), *ranks[nid]))
+        hits.append(Hit(*n[:8], heading, snippet, round(scores[nid], 5), *ranks[nid], *n[8:]))
     return hits

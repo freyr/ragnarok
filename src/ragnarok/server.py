@@ -155,12 +155,16 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
         type: str | None = None,
         include_archived: bool = True,
         include_private: bool = False,
+        include_superseded: bool = False,
         limit: int = 8,
     ) -> dict:
         """Hybrid search (meaning and keywords) over the vault notes. Returns notes, each with its best section.
 
         Filters: vault (the name of a vault folder), project (folder slug), area, type (research,
         spec, plan, summary, drivers, guide, note, ...). include_private works only when the user allows it.
+        A note that has them also shows class (state, proposal, record), validity (current, superseded, open,
+        accepted, rejected), as_of and superseded_by (the note that replaces it). Notes with validity superseded
+        or rejected are left out; include_superseded=true shows them, for a question about the past.
         """
         return get().search(
             query,
@@ -170,6 +174,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
             type=type,
             include_archived=include_archived,
             include_private=include_private,
+            include_superseded=include_superseded,
             limit=limit,
         )
 

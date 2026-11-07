@@ -244,6 +244,22 @@ def test_done_project_under_archive_folder_is_archived_by_path(vault):
     assert (m.status, m.sources["status"]) == ("archived", "path")
 
 
+def test_kb_labels_come_from_frontmatter(vault):
+    fm = {"class": "State", "validity": "current", "as_of": "2026-11-01"}
+    m = resolve(vault, "Home/Heating/notes/boiler.md", fm)
+    assert (m.note_class, m.validity, m.as_of, m.superseded_by) == ("state", "current", "2026-11-01", None)
+
+
+def test_a_successor_link_makes_the_note_superseded(vault):
+    m = resolve(vault, "Home/Heating/notes/boiler.md", {"class": "state", "superseded_by": "[[boiler-2026|new]]"})
+    assert (m.validity, m.superseded_by) == ("superseded", "boiler-2026")
+
+
+def test_a_note_without_kb_keys_has_no_labels(vault):
+    m = resolve(vault, "Home/Heating/notes/boiler.md", {})
+    assert (m.note_class, m.validity, m.as_of, m.superseded_by) == (None, None, None, None)
+
+
 def test_summary_stage_does_not_reach_notes_outside_the_project(vault):
     (vault.root / "Home/Heating/SUMMARY.md").write_text("---\nstage: DONE\n---\n# Heating\n")
     assert meta(vault, "Home/Astro/Theory/Field Stop.md").status == "active"
