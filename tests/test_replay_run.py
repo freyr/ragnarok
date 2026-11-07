@@ -331,10 +331,20 @@ def test_a_created_entity_note_needs_the_note_texts_and_type_entity():
     notes = texts({}, {"V/other.md": note(type="guide")})
     s = rr.score(DUPLICATE, rec("same", ["V/dup.md"]), diff(["V/other.md"]), notes)
     assert s["extra_writes"] == ["created V/other.md"] and s["entity_notes"] == []
-    # the only created note of a new is an entity (the draft is an entity): it is the new note
+    # the only created note of a new is an entity and the draft is an entity: it is the new note
     notes = texts({}, {ENTITY: ENTITY_TEXT})
-    s = rr.score(NEGATIVE, rec("new", [], written=True), diff([ENTITY]), notes)
+    entity_case = {**NEGATIVE, "drafts": {"bare": "# Heat pump\n", "typed": note("# Heat pump\n", type="entity")}}
+    s = rr.score(entity_case, rec("new", [], written=True), diff([ENTITY]), notes)
     assert s["correct"] and s["entity_notes"] == []
+    # the draft is not an entity (or has no type): a run that writes only the entity note misses the draft
+    for drafts in ({"bare": "# G\n", "typed": note("# G\n", type="guide")}, None):
+        case = {**NEGATIVE, "drafts": drafts} if drafts else NEGATIVE
+        s = rr.score(case, rec("new", [], written=True), diff([ENTITY]), notes)
+        assert not s["correct"] and s["entity_notes"] == [ENTITY] and s["missing_writes"] == ["no created note"]
+    # supersede with a guide draft: the entity note is listed, the draft note is missing
+    case = {**POSITIVE, "drafts": {"bare": "# G\n", "typed": note("# G\n", type="guide")}}
+    s = rr.score(case, rec("supersede", OLDS, written=True), diff([ENTITY], OLDS), notes)
+    assert not s["correct"] and s["entity_notes"] == [ENTITY] and "no created note" in s["missing_writes"]
 
 
 def test_open_conflicts_are_reported_and_do_not_change_the_score():

@@ -230,6 +230,9 @@ def test_a_wiki_link_compares_by_its_display_text():
     assert replay.normalize("See [[Docs/Old/pump.md|the pump]] and ![[img/a.png]].") == "See the pump and a.png."
     assert replay.normalize("See [[V/Entities/Pump#Valves]], [[pump^b1]], [[#Top]]") == "See Pump, pump, Top"
     assert replay.normalize("A [[x]]\n\n  [[a/b|c]]") == "A x c"
+    # the text after | of an embed is a size, not an alias
+    assert replay.normalize("![[img/p.png|300]] ![[q.png|300x200]] ![[Docs/note.md|x]]") == "p.png q.png note"
+    assert replay.body_hash("![[p.png|300]]") != replay.body_hash("![[q.png|300]]")
     assert replay.body_hash("See [[Area/Old/pump]].") == replay.body_hash("See [[New/Place/pump.md]].")
     assert replay.body_hash("See [[pump]].") != replay.body_hash("See [[pump|the pump]].")
     assert replay.similarity("one [[A/x]] two", "one [[B/x|x]] two") == 1.0

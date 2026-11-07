@@ -830,21 +830,23 @@ def merge_target_of(action: str | None, targets: set[str], notes: NoteTexts | No
     return heads[0] if len(heads) == 1 else None
 
 
-def entity_notes_of(action: str | None, diff: dict, notes: NoteTexts | None) -> list[str]:
+def _is_entity(text: str | None) -> bool:
+    kind = parse_note(text)[0].get("type") if text else None
+    return str(kind or "").strip().lower() == "entity"
+
+
+def entity_notes_of(
+    action: str | None, diff: dict, notes: NoteTexts | None, draft_is_entity: bool = False
+) -> list[str]:
     """The created notes with `type: entity` that the skill adds for the main topic of the draft (at most one in a
-    run, but all are listed); they are no extra write of any action. The created note of a new or a supersede comes
-    first from the other created notes: when no other note is created, the first entity note is that note. Empty
-    without the note texts."""
+    run, but all are listed); they are no extra write of any action. When the draft is itself an entity, the created
+    note of a new or a supersede comes first from the other created notes: when no other note is created, the first
+    entity note is that note. Otherwise an entity note never stands for the draft. Empty without the note texts."""
     if notes is None:
         return []
     created = [p for p in diff["created"] if is_note(p)]
-    entities = []
-    for path in created:
-        text = notes.after(path)
-        kind = parse_note(text)[0].get("type") if text is not None else None
-        if str(kind or "").strip().lower() == "entity":
-            entities.append(path)
-    need = 1 if action in ("new", "supersede") else 0
+    entities = [p for p in created if _is_entity(notes.after(p))]
+    need = 1 if draft_is_entity and action in ("new", "supersede") else 0
     return sorted(entities[max(0, need - (len(created) - len(entities))) :])
 
 
@@ -868,7 +870,8 @@ def score(case: dict, record: dict | None, diff: dict, notes: NoteTexts | None =
     targets = set(record.get("targets") or []) if record else set()
     action_ok = record is not None and action == expected
     target_ok = record is not None and targets == set(expected_targets)
-    entities = entity_notes_of(action, diff, notes) if record else []
+    draft_is_entity = _is_entity((case.get("drafts") or {}).get("typed"))
+    entities = entity_notes_of(action, diff, notes, draft_is_entity) if record else []
     diff = {**diff, "created": [p for p in diff["created"] if p not in entities]}
     extra, missing = check_writes(action, targets, diff) if record else ([], [])
     flag_ok = record is not None and record.get("written") is (action in WRITE_ACTIONS or bool(entities))

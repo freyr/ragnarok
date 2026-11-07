@@ -50,10 +50,11 @@ REMOVED_KEYS = ("supersedes", "superseded_by", "validity")
 DISTANCES = (0.15, 0.20, 0.25, 0.30)
 SUBSETS = ("all", "no_leak", "moved_copy", "content_change")
 Z = 1.96  # the 95% interval
-WIKI_LINK = re.compile(r"!?\[\[([^\[\]\n]*)\]\]")
+WIKI_LINK = re.compile(r"(!?)\[\[([^\[\]\n]*)\]\]")
 NORMALIZATION = (
     "each wiki-link ([[t]], [[t|alias]], [[t#heading]], ![[t]]) replaced by its display text (the alias, else the"
-    " last path segment of the target without .md and #heading), then whitespace collapsed to single spaces"
+    " last path segment of the target without .md and #heading; an embed ignores the text after |), then"
+    " whitespace collapsed to single spaces"
 )
 SIMILARITY = (
     "difflib.SequenceMatcher ratio of the word lists of the normalized bodies (body_normalization), autojunk off"
@@ -72,11 +73,12 @@ class ReplaySet:
 
 def _display(match: re.Match) -> str:
     """The display text of a wiki-link: the alias, else the last path segment of the target, without .md, the
-    heading and the block id (a link to a heading of the same note shows the heading)."""
-    inner = match.group(1)
-    if "|" in inner:
+    heading and the block id (a link to a heading of the same note shows the heading). The text after | of an
+    embed (![[...]]) is a size, so an embed always shows the target."""
+    embed, inner = match.group(1), match.group(2)
+    if "|" in inner and not embed:
         return inner.split("|", 1)[1].strip()
-    target = re.split(r"[#^]", inner, maxsplit=1)[0].rstrip("\\").strip()
+    target = re.split(r"[#^|]", inner, maxsplit=1)[0].rstrip("\\").strip()
     if not target:
         return inner.lstrip("#^").strip()
     return target.rsplit("/", 1)[-1].removesuffix(".md")
