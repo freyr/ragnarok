@@ -21,7 +21,7 @@ COMMANDS = {
     "doctor": "Check the six parts of the setup and print the fix for each failure",
     "validate": "Check notes against the frontmatter model, the links and the identity keys",
     "find-collisions": "Print the notes that a note or a draft can collide with",
-    "replay": "Build the replay set of the write path, or score R1 on it",
+    "replay": "Build the replay set of the write path, score R1 on it, or run the kb-write skill on it",
 }
 
 
@@ -86,6 +86,21 @@ def build_parser() -> argparse.ArgumentParser:
     rs = actions.add_parser("score", help="run find_collisions on each positive case and print R1")
     rs.add_argument("--set", type=Path, required=True, dest="set_dir", help="the folder that replay build wrote")
     rs.add_argument("--json", action="store_true", help="print the result as one JSON object")
+    rr = actions.add_parser("run", help="run the kb-write skill on each case in fixture mode and score R2")
+    rr.description = (
+        "RAGNAROK_HOME must be a bench home (it holds .ragnarok-bench). Each case gets a home under"
+        " <set>/runs/<run id>/<case id>/ with a copy of the mirror in the start state and of the index."
+    )
+    rr.add_argument("--set", type=Path, required=True, dest="set_dir", help="the folder that replay build wrote")
+    rr.add_argument("--skill", type=Path, required=True, help="the SKILL.md of kb-write in its plugin folder")
+    rr.add_argument("--cases", help="comma-separated case ids (default all cases)")
+    rr.add_argument("--form", choices=["bare", "typed"], default="bare", help="the draft form (default bare)")
+    rr.add_argument("--parallel", type=int, default=1, help="the number of cases at the same time (default 1)")
+    rr.add_argument("--max-budget-usd", type=float, help="the cost limit of the agent of each case")
+    rr.add_argument("--timeout", type=float, default=1800, help="the time limit of each case in seconds")
+    rr.add_argument("--claude", default="claude", help="the Claude Code binary (default claude)")
+    rr.add_argument("--model", help="the model of the agent (default the Claude Code default)")
+    rr.add_argument("--out", type=Path, help="the run folder (default <set>/runs/<run id>), inside the home folder")
     return parser
 
 
@@ -419,6 +434,8 @@ def cmd_find_collisions(cfg, args) -> int:
 def cmd_replay(cfg, args) -> int:
     from .index import IndexMismatch, connect
 
+    if args.action == "run":
+        return _replay_run(cfg, args)  # it never opens the source index
     if not cfg.index_path.exists():
         print(f"No index at {cfg.index_path}. Run `ragnarok index`.", file=sys.stderr)
         return 1
@@ -489,6 +506,65 @@ def _replay_score(cfg, conn, args) -> int:
     path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
     print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else replay.format_summary(result["summary"]))
     print(f"written to {path}", file=sys.stderr)
+    return 0
+
+
+def _replay_run(cfg, args) -> int:
+    from . import replay, replay_run
+    from .config import home_dir
+
+    def fail(message: str) -> int:
+        print(f"ragnarok replay run: {message}", file=sys.stderr)
+        return 1
+
+    home = home_dir().resolve()
+    try:
+        replay_run.check_bench(home)
+    except ValueError as e:
+        return fail(str(e))
+    folder = args.set_dir.expanduser().resolve()
+    if not folder.is_relative_to(home) or folder == home:
+        return fail(f"--set must be a folder inside the home folder {home}")
+    if not (folder / "cases.jsonl").is_file() or not (folder / "manifest.json").is_file():
+        return fail(f"{folder} has no cases.jsonl and manifest.json")
+    out = args.out.expanduser().resolve() if args.out else None
+    if out is not None and (not out.is_relative_to(home) or out.exists()):
+        return fail(f"--out must be a new folder inside the home folder {home}")
+    skill = args.skill.expanduser().resolve()
+    if not skill.is_file():
+        return fail(f"no skill file {skill}")
+    _, cases = replay.read_set(folder)
+    if args.cases:
+        wanted = [c.strip() for c in args.cases.split(",") if c.strip()]
+        known = {c["id"]: c for c in cases}
+        if missing := [c for c in wanted if c not in known]:
+            return fail(f"no case {', '.join(missing)} in {folder}")
+        cases = [known[c] for c in wanted]
+    try:
+        rows, summary, run_dir = replay_run.run_cases(
+            cfg,
+            home,
+            folder,
+            cases,
+            skill=skill,
+            form=args.form,
+            parallel=args.parallel,
+            budget=args.max_budget_usd,
+            claude=args.claude,
+            model=args.model,
+            timeout=args.timeout,
+            out=out,
+        )
+    except (replay_run.SourceChanged, ValueError) as e:
+        return fail(str(e))
+    for row in rows:
+        s = row["score"]
+        print(
+            f"{row['case']:6} {row['kind']:9} expected {s['expected_action']:9} action {s['action'] or '-':9}"
+            f" {s['category']:20} cost {row['cost_usd'] or 0:.2f}{'  ' + row['error'] if row['error'] else ''}"
+        )
+    print(replay_run.format_summary(summary))
+    print(f"written to {run_dir}", file=sys.stderr)
     return 0
 
 
