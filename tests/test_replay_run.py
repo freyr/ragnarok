@@ -1,5 +1,9 @@
+import datetime
 import json
+import os
 import re
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -19,6 +23,7 @@ POSITIVE = {
     "positive_kind": "content_change",
     "old": [{"path": "V/old-1.md", "expected": "supersede"}, {"path": "V/old-2.md", "expected": "supersede"}],
 }
+OLDS = ["V/old-1.md", "V/old-2.md"]
 MERGE = {**POSITIVE, "id": "p002", "old": [{"path": "V/state.md", "expected": "merge"}]}
 DUPLICATE = {
     "id": "d001",
@@ -48,23 +53,46 @@ def diff(created=(), changed=(), deleted=()):
 
 
 def test_expected_action_of_each_kind():
-    assert rr.expected_of(POSITIVE) == ("supersede", ["V/old-1.md", "V/old-2.md"])
+    assert rr.expected_of(POSITIVE) == ("supersede", OLDS)
     assert rr.expected_of(MERGE) == ("merge", ["V/state.md"])
     assert rr.expected_of(DUPLICATE) == ("same", ["V/dup.md"])
     assert rr.expected_of(NEGATIVE) == ("new", [])
 
 
-def test_a_supersede_with_all_old_notes_and_the_change_on_disk_is_correct():
-    record = rec("supersede", ["V/old-2.md", "V/old-1.md", "V/other.md"], written=True)
-    s = rr.score(POSITIVE, record, diff(["V/new.md"], ["V/old-1.md", "V/old-2.md", "V/other.md"]))
+def test_a_supersede_with_the_old_notes_and_exactly_their_change_is_correct():
+    s = rr.score(POSITIVE, rec("supersede", OLDS[::-1], written=True), diff(["V/new.md"], OLDS))
     assert s["action_ok"] and s["target_ok"] and s["written_ok"] and s["correct"]
-    assert s["category"] == "correct"
+    assert s["category"] == "correct" and s["reasons"] == []
+
+
+def test_an_extra_target_is_wrong_and_reported():
+    record = rec("supersede", [*OLDS, "V/other.md"], written=True)
+    s = rr.score(POSITIVE, record, diff(["V/new.md"], [*OLDS, "V/other.md"]))
+    assert not s["target_ok"] and not s["correct"] and s["category"] == "wrong"
+    assert s["extra_targets"] == ["V/other.md"] and "extra-targets" in s["reasons"]
 
 
 def test_a_supersede_that_misses_an_old_note_is_wrong():
     s = rr.score(POSITIVE, rec("supersede", ["V/old-1.md"], written=True), diff(["V/new.md"], ["V/old-1.md"]))
     assert s["action_ok"] and not s["target_ok"] and not s["correct"]
-    assert s["category"] == "wrong"
+    assert s["category"] == "wrong" and "missing-targets" in s["reasons"]
+
+
+def test_extra_writes_are_wrong():
+    # an unrelated note changed
+    s = rr.score(POSITIVE, rec("supersede", OLDS, written=True), diff(["V/new.md"], [*OLDS, "V/unrelated.md"]))
+    assert s["target_ok"] and not s["written_ok"] and s["category"] == "wrong"
+    assert s["reasons"] == ["extra-writes"] and s["extra_writes"] == ["changed V/unrelated.md"]
+    # two created notes
+    s = rr.score(POSITIVE, rec("supersede", OLDS, written=True), diff(["V/new.md", "V/junk.md"], OLDS))
+    assert s["extra_writes"] == ["created V/junk.md"]
+    # a merge that also creates a note
+    s = rr.score(MERGE, rec("merge", ["V/state.md"], written=True), diff(["V/new.md"], ["V/state.md"]))
+    assert not s["correct"] and s["extra_writes"] == ["created V/new.md"]
+    # the only created file is not a note
+    s = rr.score(POSITIVE, rec("supersede", OLDS, written=True), diff(["V/.obsidian/workspace.json"], OLDS))
+    assert not s["correct"] and s["missing_writes"] == ["no created note"]
+    assert s["extra_writes"] == ["created V/.obsidian/workspace.json"]
 
 
 def test_a_merge_counts_when_the_expected_action_is_merge():
@@ -73,8 +101,7 @@ def test_a_merge_counts_when_the_expected_action_is_merge():
 
 
 def test_a_merge_for_a_supersede_is_its_own_category():
-    record = rec("merge", ["V/old-1.md", "V/old-2.md"], written=True)
-    s = rr.score(POSITIVE, record, diff(changed=["V/old-1.md", "V/old-2.md"]))
+    s = rr.score(POSITIVE, rec("merge", OLDS, written=True), diff(changed=OLDS))
     assert not s["action_ok"] and not s["correct"] and s["merge_for_supersede"]
     assert s["category"] == "merge-for-supersede"
 
@@ -82,11 +109,13 @@ def test_a_merge_for_a_supersede_is_its_own_category():
 def test_same_on_a_duplicate_with_nothing_written_is_correct():
     s = rr.score(DUPLICATE, rec("same", ["V/dup.md"]), EMPTY)
     assert s["correct"] and s["category"] == "correct"
+    assert not rr.score(DUPLICATE, rec("same", ["V/dup.md", "V/x.md"]), EMPTY)["correct"]
 
 
-def test_new_on_a_negative_needs_no_targets_and_a_created_file():
+def test_new_on_a_negative_needs_no_targets_and_one_created_note():
     assert rr.score(NEGATIVE, rec("new", [], written=True), diff(["V/fresh.md"]))["correct"]
     assert not rr.score(NEGATIVE, rec("new", ["V/x.md"], written=True), diff(["V/fresh.md"]))["target_ok"]
+    assert not rr.score(NEGATIVE, rec("new", [], written=True), diff(["fresh.md"]))["correct"]  # not in a vault
 
 
 def test_ask_is_neither_correct_nor_wrong():
@@ -106,16 +135,18 @@ def test_a_refused_run_is_refused():
 
 def test_the_written_flag_must_match_the_snapshot():
     # the record says written, the snapshot shows no change
-    s = rr.score(POSITIVE, rec("supersede", ["V/old-1.md", "V/old-2.md"], written=True), EMPTY)
+    s = rr.score(POSITIVE, rec("supersede", OLDS, written=True), EMPTY)
     assert s["action_ok"] and s["target_ok"] and not s["written_ok"] and not s["correct"]
+    assert "missing-writes" in s["reasons"]
     # same, but a file changed
     s = rr.score(DUPLICATE, rec("same", ["V/dup.md"]), diff(changed=["V/dup.md"]))
     assert not s["written_ok"] and s["category"] == "wrong"
     # supersede written, but an old note is unchanged on disk
-    s = rr.score(
-        POSITIVE, rec("supersede", ["V/old-1.md", "V/old-2.md"], written=True), diff(["V/n.md"], ["V/old-1.md"])
-    )
-    assert not s["written_ok"]
+    s = rr.score(POSITIVE, rec("supersede", OLDS, written=True), diff(["V/n.md"], ["V/old-1.md"]))
+    assert s["missing_writes"] == ["unchanged V/old-2.md"]
+    # the flag is false for a write action
+    s = rr.score(NEGATIVE, rec("new", [], written=False), diff(["V/fresh.md"]))
+    assert s["reasons"] == ["written-flag"]
     # a deleted file is never consistent
     s = rr.score(NEGATIVE, rec("new", [], written=True), diff(["V/fresh.md"], deleted=["V/gone.md"]))
     assert not s["written_ok"]
@@ -127,11 +158,7 @@ def test_the_summary_counts_the_categories_with_the_wilson_interval():
             "kind": "positive",
             "positive_kind": "content_change",
             "cost_usd": 1.5,
-            "score": rr.score(
-                POSITIVE,
-                rec("supersede", ["V/old-1.md", "V/old-2.md"], written=True),
-                diff(["V/n.md"], ["V/old-1.md", "V/old-2.md"]),
-            ),
+            "score": rr.score(POSITIVE, rec("supersede", OLDS, written=True), diff(["V/n.md"], OLDS)),
         },
         {
             "kind": "positive",
@@ -173,7 +200,18 @@ def test_a_malformed_or_absent_record_is_an_error():
     assert rr.parse_record(None)[0] is None
 
 
-def test_the_agent_output_gives_the_result_cost_and_turns():
+def test_a_record_with_a_wrong_shape_is_an_error():
+    def parsed(**fields):
+        return rr.parse_record("KB-WRITE-RECORD " + json.dumps({**rec("same", ["V/a.md"]), **fields}))
+
+    assert parsed()[1] is None
+    assert parsed(targets="V/a.md")[0] is None and "targets" in parsed(targets="V/a.md")[1]
+    assert parsed(targets=[{"path": "V/a.md"}])[0] is None
+    assert parsed(action=None)[0] is None
+    assert parsed(written="no")[0] is None
+
+
+def test_the_agent_output_gives_the_result_cost_turns_and_session():
     out = json.dumps(
         {
             "result": "ok",
@@ -184,14 +222,27 @@ def test_the_agent_output_gives_the_result_cost_and_turns():
         }
     )
     parsed = rr.parse_agent_output(out)
-    assert parsed == {
-        "result": "ok",
-        "cost_usd": 0.7,
-        "turns": 12,
-        "is_error": False,
-        "permission_denials": 1,
-        "error": None,
-    }
+    assert parsed["result"] == "ok" and parsed["cost_usd"] == 0.7 and parsed["turns"] == 12
+    assert parsed["permission_denials"] == 1 and parsed["error"] is None
+    stream = "\n".join(
+        json.dumps(e)
+        for e in [
+            {
+                "type": "system",
+                "subtype": "init",
+                "plugins": [{"name": "builtin-x"}],
+                "mcp_servers": [{"name": rr.SERVER, "status": "connected"}],
+                "tools": ["Read"],
+                "permissionMode": "dontAsk",
+            },  # fmt: skip
+            {"type": "assistant", "message": {}},
+            {"type": "result", "result": "done", "total_cost_usd": 0.1, "num_turns": 3, "permission_denials": []},
+        ]
+    )
+    parsed = rr.parse_agent_output(stream)
+    assert parsed["result"] == "done" and parsed["turns"] == 3
+    assert parsed["session"] == {"plugins": ["builtin-x"], "mcp_servers": [rr.SERVER], "tools": ["Read"],
+                                 "permission_mode": "dontAsk"}  # fmt: skip
     assert rr.parse_agent_output("crash")["error"]
 
 
@@ -217,6 +268,28 @@ def test_the_snapshot_diff_gives_created_changed_and_deleted_files(tmp_path):
     assert rr.diff_snapshots(after, after) == EMPTY
 
 
+def test_a_symbolic_link_to_a_folder_is_in_the_snapshot(tmp_path):
+    (tmp_path / "m").mkdir()
+    before = rr.snapshot(tmp_path / "m")
+    (tmp_path / "m" / "link").symlink_to(tmp_path)
+    after = rr.snapshot(tmp_path / "m")
+    assert after == {"link": f"link:{tmp_path}"}
+    assert rr.diff_snapshots(before, after)["created"] == ["link"]
+
+
+def test_changed_since_skips_the_named_folders_and_files(tmp_path):
+    (tmp_path / "old.md").write_text("o")
+    past = time.time_ns() - 10_000_000_000
+    os.utime(tmp_path / "old.md", ns=(past, past))
+    start = time.time_ns() - 1_000_000_000
+    for rel in ("new.md", "skip/x.md", "own.txt"):
+        (tmp_path / rel).parent.mkdir(exist_ok=True)
+        (tmp_path / rel).write_text("n")
+    found = rr.changed_since(tmp_path, start, {tmp_path / "skip"}, {tmp_path / "own.txt"})
+    assert found == [str(tmp_path / "new.md")]
+    assert rr.changed_since(tmp_path / "nothing", start, set(), set()) == []
+
+
 def test_strip_keys_removes_only_the_named_keys():
     text = (
         "---\ntitle: T\nsuperseded_by: '[[x]]'\nsupersedes:\n  - '[[a]]'\n  - '[[b]]'\nvalidity: superseded\n"
@@ -229,8 +302,6 @@ def test_strip_keys_removes_only_the_named_keys():
 
 
 def test_as_of_falls_back_to_updated_created_and_date():
-    import datetime
-
     assert rr.note_as_of({"as_of": "2026-01-02", "updated": "2025-01-01"}) == "2026-01-02"
     assert rr.note_as_of({"updated": datetime.date(2026, 3, 4), "created": "2020-01-01"}) == "2026-03-04"
     assert rr.note_as_of({"created": "2026-05-06"}) == "2026-05-06"
@@ -263,6 +334,22 @@ CASE = {
     "drafts": {"bare": "# Newer\nThe boiler runs in the morning.\n", "typed": "---\ntype: guide\n---\n# Newer\n"},
     "start_state": {"exclude": NEWER, "remove_keys": {OLD: ["superseded_by", "validity"]}},
 }
+CASE2 = {**CASE, "id": "p002"}
+
+
+@pytest.fixture
+def skill(tmp_path):
+    """A plugin folder with the skill file and the helper script."""
+    plugin = tmp_path / "plugin"
+    (plugin / "skills" / "kb-write").mkdir(parents=True)
+    (plugin / "scripts").mkdir()
+    (plugin / "scripts" / "kb-write.sh").write_text("#!/usr/bin/env bash\n")
+    path = plugin / "skills" / "kb-write" / "SKILL.md"
+    path.write_text("# skill\n")
+    past = time.time_ns() - 10_000_000_000
+    for p in (path, plugin / "scripts" / "kb-write.sh"):
+        os.utime(p, ns=(past, past))
+    return path
 
 
 @pytest.fixture
@@ -291,18 +378,23 @@ def bench(tmp_path, monkeypatch):
     conn.close()
     set_dir = home / "replay" / "set-v1"
     set_dir.mkdir(parents=True)
-    (set_dir / "cases.jsonl").write_text(json.dumps(CASE) + "\n")
+    (set_dir / "cases.jsonl").write_text(json.dumps(CASE) + "\n" + json.dumps(CASE2) + "\n")
     (set_dir / "manifest.json").write_text("{}\n")
+    # the files made before the run are older than its start
+    past = time.time_ns() - 10_000_000_000
+    for top, _, files in os.walk(tmp_path):
+        for name in files:
+            os.utime(Path(top) / name, ns=(past, past))
     return cfg, home, mirror, set_dir
 
 
-def test_the_case_home_has_the_start_state_the_marker_and_its_own_root(bench, tmp_path):
+def test_the_case_home_has_the_start_state_the_marker_and_its_own_root(bench, skill):
     cfg, home, mirror, set_dir = bench
     before = rr.snapshot(mirror)
-    case_home = rr.build_case_home(CASE, cfg, set_dir / "runs" / "r1", "bare")
+    case_home = rr.build_case_home(CASE, cfg, set_dir / "runs" / "r1", "bare", skill.parent.parent.parent)
     h = case_home.home
     assert h == set_dir / "runs" / "r1" / "p001"
-    assert (h / rr.MARKER).is_file()
+    assert (h / rr.MARKER).is_file() and case_home.tmp == h / "tmp" and case_home.tmp.is_dir()
     assert not (case_home.mirror / NEWER).exists()
     fm, body = parse_note((case_home.mirror / OLD).read_text())
     assert "superseded_by" not in fm and "validity" not in fm and fm["class"] == "state"
@@ -321,92 +413,168 @@ def test_the_case_home_has_the_start_state_the_marker_and_its_own_root(bench, tm
     config = json.loads(case_home.mcp_config.read_text())
     server = config["mcpServers"][rr.SERVER]
     assert server["env"] == {"RAGNAROK_HOME": str(h)}
-    assert server["args"][-1] == "serve"
+    assert server["command"] == sys.executable and server["args"] == ["-m", "ragnarok.cli", "serve"]
 
 
-def test_the_typed_form_writes_the_typed_draft(bench):
+def test_the_typed_form_writes_the_typed_draft(bench, skill):
     cfg, home, mirror, set_dir = bench
-    case_home = rr.build_case_home(CASE, cfg, set_dir / "runs" / "r1", "typed")
+    case_home = rr.build_case_home(CASE, cfg, set_dir / "runs" / "r1", "typed", skill.parent.parent.parent)
     assert case_home.draft.read_text() == CASE["drafts"]["typed"]
 
 
-def test_the_agent_command_allows_writes_only_under_the_case_mirror(bench):
+def test_the_agent_loads_no_setting_source_and_only_exact_rules(bench, skill, tmp_path):
     cfg, home, mirror, set_dir = bench
-    case_home = rr.build_case_home(CASE, cfg, set_dir / "runs" / "r1", "bare")
-    plugin = Path("/opt/plugin")
-    argv = rr.agent_command("claude", case_home, plugin, budget=2.0, model="opus")
-    allowed = argv[argv.index("--allowedTools") + 1 :]
-    writes = [a for a in allowed if a.startswith(("Write", "Edit"))]
-    assert writes == [f"Write(/{case_home.mirror}/**)", f"Edit(/{case_home.mirror}/**)"]
+    plugin = skill.parent.parent.parent
+    guard = tmp_path / "vaults"
+    case_home = rr.build_case_home(CASE, cfg, set_dir / "runs" / "r1", "bare", plugin, (guard, tmp_path))
+    argv = rr.agent_command("claude", case_home, budget=2.0, model="opus")
+    assert argv[argv.index("--setting-sources") + 1] == ""
+    assert argv[argv.index("--settings") + 1] == str(case_home.settings)
+    assert argv[argv.index("--tools") + 1] == "Bash,Read,Write,Edit,Glob,Grep,ToolSearch"
     assert "--strict-mcp-config" in argv and argv[argv.index("--max-budget-usd") + 1] == "2.0"
     assert argv[argv.index("--model") + 1] == "opus"
-    assert "--plugin-dir" not in argv
-    prompt = rr.agent_prompt(case_home, plugin / "skills" / "kb-write" / "SKILL.md", plugin)
-    assert f"mirror={case_home.mirror}" in prompt and "2026-08-16" in prompt and str(case_home.draft) in prompt
+    assert "--plugin-dir" not in argv and "--allowedTools" not in argv and "--add-dir" not in argv
+    settings = json.loads(case_home.settings.read_text())
+    allow = settings["permissions"]["allow"]
+    script = plugin / "scripts" / "kb-write.sh"
+    m = case_home.mirror
+    assert [a for a in allow if a.startswith("Bash(")] == [
+        f"Bash(bash {script} bench:*)",
+        f'Bash(bash "{script}" bench:*)',
+        f"Bash(KB_WRITE_WITHIN={m} bash {script}:*)",
+        f'Bash(KB_WRITE_WITHIN="{m}" bash "{script}":*)',
+        "Bash(test:*)",
+        "Bash(diff:*)",
+        "Bash(mktemp:*)",
+        "Bash(ls:*)",
+        "Bash(cat:*)",
+        "Bash(date:*)",
+    ]
+    assert [a for a in allow if a.startswith(("Write", "Edit"))] == [f"Write(/{m}/**)", f"Edit(/{m}/**)"]
+    sandbox = settings["sandbox"]
+    assert sandbox["enabled"] and sandbox["failIfUnavailable"] and not sandbox["allowUnsandboxedCommands"]
+    assert not sandbox["autoAllowBashIfSandboxed"]
+    assert sandbox["filesystem"]["allowWrite"] == [str(m), str(case_home.tmp)]
+    # a guard that holds the case home cannot be closed to reads; the other guard is closed
+    assert sandbox["filesystem"]["denyRead"] == [str(guard)]
+    assert settings["permissions"]["deny"] == [f"Read(/{guard}/**)"]
+    prompt = rr.agent_prompt(case_home, skill, plugin)
+    assert f"mirror={m}" in prompt and "2026-08-16" in prompt and str(case_home.draft) in prompt
+    assert f"TMPDIR is {case_home.tmp}" in prompt
+    env = rr.agent_env(case_home)
+    assert env["TMPDIR"] == str(case_home.tmp) and env["RAGNAROK_HOME"] == str(case_home.home)
+    assert set(env) <= set(rr.ENV_KEYS) | {"TMPDIR", "RAGNAROK_HOME"}
 
 
 # --- the run -----------------------------------------------------------------------------------------------------
 
 
-def fake_runner(action, write=True):
+def fake_runner(action, write=True, seen=None):
     """A runner that acts like the skill: it writes into the mirror of the prompt and prints a record."""
 
     def run(argv, prompt, cwd, env, timeout):
+        if seen is not None:
+            seen.append({"argv": argv, "cwd": cwd, "env": env})
         mirror = Path(re.search(r"mirror=(\S+)", prompt).group(1))
         targets, written = [], False
         if write:
             (mirror / "V" / "Docs" / "fresh.md").write_text("# Fresh\n")
-            (mirror / OLD).write_text(
-                (mirror / OLD).read_text().replace("class: state", "class: state\nvalidity: superseded")
-            )
+            old = (mirror / OLD).read_text()
+            (mirror / OLD).write_text(old.replace("class: state", "class: state\nvalidity: superseded"))
             targets, written = [OLD], True
         record = rec(action, targets, written=written)
-        out = json.dumps(
+        events = [
+            {"type": "system", "subtype": "init", "plugins": [], "mcp_servers": [{"name": rr.SERVER}]},
             {
+                "type": "result",
                 "result": f"done\nKB-WRITE-RECORD {json.dumps(record)}",
                 "total_cost_usd": 0.25,
                 "num_turns": 9,
                 "is_error": False,
                 "permission_denials": [],
-            }
-        )
+            },  # fmt: skip
+        ]
+        out = "\n".join(json.dumps(e) for e in events)
         return rr.AgentOutput(exit_code=0, stdout=out, stderr="", duration_s=1.0)
 
     return run
 
 
-def test_a_run_records_each_case_and_leaves_the_source_unchanged(bench, tmp_path):
+def test_a_run_records_each_case_and_leaves_the_source_unchanged(bench, skill):
     cfg, home, mirror, set_dir = bench
     before = rr.snapshot(mirror)
+    seen = []
     rows, summary, run_dir = rr.run_cases(
-        cfg, home, set_dir, [CASE], skill=tmp_path / "SKILL.md", runner=fake_runner("supersede"), parallel=2
+        cfg, home, set_dir, [CASE, CASE2], skill=skill, runner=fake_runner("supersede", seen=seen), parallel=2
     )
     assert rr.snapshot(mirror) == before
-    assert run_dir.parent == set_dir / "runs"
-    (row,) = rows
-    assert row["case"] == "p001" and row["form"] == "bare" and row["as_of"] == "2026-08-16"
+    assert run_dir.parent == (set_dir / "runs").resolve()
+    assert [r["case"] for r in rows] == ["p001", "p002"]
+    row = rows[0]
+    assert row["form"] == "bare" and row["as_of"] == "2026-08-16"
     assert row["diff"] == {"created": ["V/Docs/fresh.md"], "changed": [OLD], "deleted": []}
     assert row["record"]["action"] == "supersede" and row["record_error"] is None
     assert row["cost_usd"] == 0.25 and row["turns"] == 9 and row["exit_code"] == 0
-    assert row["score"]["correct"]
-    assert summary["all"]["correct"] == 1 and summary["source_unchanged"]
+    assert row["session"]["mcp_servers"] == [rr.SERVER] and row["session"]["plugins"] == []
+    assert row["score"]["correct"] and row["home_changes"] is None
+    assert summary["all"]["correct"] == 2 and summary["clean"] and summary["outside_changes"] == []
+    assert {s["cwd"] for s in seen} == {run_dir / "p001", run_dir / "p002"}
+    assert all(s["env"]["TMPDIR"] == str(s["cwd"] / "tmp") for s in seen)
+    assert not (run_dir / "p001" / "data").exists()  # the index copy is deleted after the case
     lines = (run_dir / "records.jsonl").read_text().splitlines()
-    assert json.loads(lines[0])["case"] == "p001"
-    assert json.loads((run_dir / "summary.json").read_text())["all"]["cases"] == 1
+    assert sorted(json.loads(line)["case"] for line in lines) == ["p001", "p002"]
+    assert json.loads((run_dir / "summary.json").read_text())["all"]["cases"] == 2
 
 
-def test_a_runner_error_gives_a_failed_record(bench, tmp_path):
+def test_keep_homes_keeps_the_index_copy(bench, skill):
+    cfg, home, mirror, set_dir = bench
+    _, _, run_dir = rr.run_cases(cfg, home, set_dir, [CASE], skill=skill, runner=fake_runner("same", False),
+                                 keep_homes=True)  # fmt: skip
+    assert (run_dir / "p001" / "data" / "index.db").is_file()
+
+
+def test_a_crash_in_one_case_keeps_the_others_and_the_summary(bench, skill):
+    cfg, home, mirror, set_dir = bench
+    good = fake_runner("supersede")
+
+    def runner(argv, prompt, cwd, env, timeout):
+        if cwd.name == "p001":
+            raise RuntimeError("boom")
+        return good(argv, prompt, cwd, env, timeout)
+
+    rows, summary, run_dir = rr.run_cases(cfg, home, set_dir, [CASE, CASE2], skill=skill, runner=runner, parallel=2)
+    assert rows[0]["error"] == "RuntimeError: boom" and rows[0]["score"]["category"] == "failed"
+    assert rows[1]["score"]["correct"]
+    assert summary["failed_cases"] == ["p001"] and summary["categories"] == {"failed": 1, "correct": 1}
+    assert len((run_dir / "records.jsonl").read_text().splitlines()) == 2
+    assert not (run_dir / "p001" / "data").exists()
+
+
+def test_a_bad_record_is_a_record_error(bench, skill):
     cfg, home, mirror, set_dir = bench
 
-    def crash(argv, prompt, cwd, env, timeout):
+    def runner(argv, prompt, cwd, env, timeout):
+        record = {**rec("same"), "targets": [{"path": OLD}]}
+        out = json.dumps({"result": f"KB-WRITE-RECORD {json.dumps(record)}", "total_cost_usd": 0.1})
+        return rr.AgentOutput(0, out, "", 1.0)
+
+    rows, summary, _ = rr.run_cases(cfg, home, set_dir, [CASE], skill=skill, runner=runner)
+    assert rows[0]["record"] is None and "targets" in rows[0]["record_error"]
+    assert rows[0]["score"]["category"] == "failed" and rows[0]["error"] is None
+
+
+def test_a_timeout_gives_a_failed_record(bench, skill):
+    cfg, home, mirror, set_dir = bench
+
+    def slow(argv, prompt, cwd, env, timeout):
         return rr.AgentOutput(exit_code=None, stdout="", stderr="", duration_s=5.0, timed_out=True)
 
-    rows, summary, _ = rr.run_cases(cfg, home, set_dir, [CASE], skill=tmp_path / "SKILL.md", runner=crash)
+    rows, summary, _ = rr.run_cases(cfg, home, set_dir, [CASE], skill=skill, runner=slow)
     assert rows[0]["timed_out"] and rows[0]["record"] is None and rows[0]["score"]["category"] == "failed"
-    assert summary["categories"] == {"failed": 1}
+    assert summary["categories"] == {"failed": 1} and summary["failed_cases"] == ["p001"]
 
 
-def test_a_changed_source_mirror_fails_the_run(bench, tmp_path):
+def test_a_changed_source_mirror_fails_the_run(bench, skill):
     cfg, home, mirror, set_dir = bench
 
     def vandal(argv, prompt, cwd, env, timeout):
@@ -414,22 +582,81 @@ def test_a_changed_source_mirror_fails_the_run(bench, tmp_path):
         return fake_runner("same", write=False)(argv, prompt, cwd, env, timeout)
 
     with pytest.raises(rr.SourceChanged, match="other.md"):
-        rr.run_cases(cfg, home, set_dir, [CASE], skill=tmp_path / "SKILL.md", runner=vandal)
+        rr.run_cases(cfg, home, set_dir, [CASE], skill=skill, runner=vandal)
 
 
-def test_the_run_refuses_a_home_with_no_bench_marker(bench, tmp_path, capsys):
+@pytest.mark.parametrize("where", ["home", "case", "sibling", "plugin", "guard"])
+def test_a_change_outside_the_case_mirror_fails_the_run(bench, skill, tmp_path, where):
+    cfg, home, mirror, set_dir = bench
+    guard = tmp_path / "vaults"
+    guard.mkdir()
+
+    def vandal(argv, prompt, cwd, env, timeout):
+        target = {
+            "home": home / "replay" / "note.txt",
+            "case": cwd / "config.toml",
+            "sibling": cwd / "evil.txt",
+            "plugin": skill.parent.parent.parent / "scripts" / "kb-write.sh",
+            "guard": guard / "x.md",
+        }[where]
+        target.write_text("changed\n")
+        return fake_runner("same", write=False)(argv, prompt, cwd, env, timeout)
+
+    with pytest.raises(rr.SourceChanged):
+        rr.run_cases(cfg, home, set_dir, [CASE], skill=skill, runner=vandal, guards=(guard,))
+    (run_dir,) = (set_dir / "runs").iterdir()
+    summary = json.loads((run_dir / "summary.json").read_text())
+    assert not summary["clean"] and summary["outside_changes"]
+
+
+def test_the_run_options_are_checked(bench, skill, tmp_path):
+    cfg, home, mirror, set_dir = bench
+    run = fake_runner("same", False)
+    for bad in ({"parallel": 0}, {"timeout": 0}, {"budget": -1}):
+        with pytest.raises(ValueError):
+            rr.run_cases(cfg, home, set_dir, [CASE], skill=skill, runner=run, **bad)
+    with pytest.raises(ValueError, match="repeated"):
+        rr.run_cases(cfg, home, set_dir, [CASE, CASE], skill=skill, runner=run)
+    loose = tmp_path / "SKILL.md"
+    loose.write_text("# copy\n")
+    with pytest.raises(ValueError, match="kb-write.sh"):
+        rr.run_cases(cfg, home, set_dir, [CASE], skill=loose, runner=run)
+    assert not (set_dir / "runs").exists()
+
+
+def test_the_subprocess_runner_kills_the_agent_and_its_children(tmp_path):
+    pid_file = tmp_path / "child.pid"
+    script = tmp_path / "agent.py"
+    script.write_text(
+        "import subprocess, sys, time\n"
+        f"child = subprocess.Popen(['sleep', '60'])\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(60)\n"
+    )
+    out = rr.subprocess_runner([sys.executable, str(script)], "", tmp_path, dict(os.environ), timeout=2)
+    assert out.timed_out and out.exit_code is None
+    pid = int(pid_file.read_text())
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("the child of the agent is still running")
+    done = rr.subprocess_runner([sys.executable, "-c", "import sys; print(sys.stdin.read())"], "hi", tmp_path,
+                                dict(os.environ), timeout=30)  # fmt: skip
+    assert done.exit_code == 0 and done.stdout.strip() == "hi" and not done.timed_out
+
+
+def test_the_run_refuses_a_home_with_no_bench_marker(bench, skill, capsys):
     cfg, home, mirror, set_dir = bench
     (home / rr.MARKER).unlink()
-    skill = tmp_path / "SKILL.md"
-    skill.write_text("# skill\n")
     assert main(["replay", "run", "--set", str(set_dir), "--skill", str(skill)]) == 1
     assert rr.MARKER in capsys.readouterr().err
 
 
-def test_the_run_refuses_a_set_outside_the_home(bench, tmp_path, capsys):
-    cfg, home, mirror, set_dir = bench
-    skill = tmp_path / "SKILL.md"
-    skill.write_text("# skill\n")
+def test_the_run_refuses_a_set_outside_the_home(bench, skill, tmp_path, capsys):
     outside = tmp_path / "set"
     outside.mkdir()
     (outside / "cases.jsonl").write_text(json.dumps(CASE) + "\n")
@@ -438,12 +665,26 @@ def test_the_run_refuses_a_set_outside_the_home(bench, tmp_path, capsys):
     assert "inside" in capsys.readouterr().err
 
 
-def test_the_cli_runs_the_chosen_cases(bench, tmp_path, monkeypatch, capsys):
+def test_the_cli_runs_the_chosen_cases(bench, skill, monkeypatch, capsys):
     cfg, home, mirror, set_dir = bench
-    skill = tmp_path / "SKILL.md"
-    skill.write_text("# skill\n")
     monkeypatch.setattr(rr, "subprocess_runner", fake_runner("supersede"))
-    assert main(["replay", "run", "--set", str(set_dir), "--skill", str(skill), "--cases", "p001"]) == 0
+    args = ["replay", "run", "--set", str(set_dir), "--skill", str(skill)]
+    assert main([*args, "--cases", "p001"]) == 0
     assert "correct" in capsys.readouterr().out
-    assert main(["replay", "run", "--set", str(set_dir), "--skill", str(skill), "--cases", "p999"]) == 1
+    assert main([*args, "--cases", "p999"]) == 1
     assert "p999" in capsys.readouterr().err
+    assert main([*args, "--cases", "p001,p001"]) == 1
+    assert "repeated" in capsys.readouterr().err
+    assert main([*args, "--cases", "p001", "--parallel", "0"]) == 1
+    assert "--parallel" in capsys.readouterr().err
+
+
+def test_the_cli_exits_non_zero_when_a_case_fails(bench, skill, monkeypatch, capsys):
+    cfg, home, mirror, set_dir = bench
+
+    def crash(argv, prompt, cwd, env, timeout):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(rr, "subprocess_runner", crash)
+    assert main(["replay", "run", "--set", str(set_dir), "--skill", str(skill), "--cases", "p001"]) == 1
+    assert "p001" in capsys.readouterr().err

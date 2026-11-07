@@ -101,6 +101,18 @@ def build_parser() -> argparse.ArgumentParser:
     rr.add_argument("--claude", default="claude", help="the Claude Code binary (default claude)")
     rr.add_argument("--model", help="the model of the agent (default the Claude Code default)")
     rr.add_argument("--out", type=Path, help="the run folder (default <set>/runs/<run id>), inside the home folder")
+    rr.add_argument(
+        "--guard",
+        type=Path,
+        action="append",
+        default=[],
+        help="a folder in which no file may change during the run, closed to the agent's reads (repeatable)",
+    )
+    rr.add_argument(
+        "--keep-homes",
+        action="store_true",
+        help="keep the index copy of each case home (one copy of index.db for each case; deleted by default)",
+    )
     return parser
 
 
@@ -537,6 +549,8 @@ def _replay_run(cfg, args) -> int:
     if args.cases:
         wanted = [c.strip() for c in args.cases.split(",") if c.strip()]
         known = {c["id"]: c for c in cases}
+        if repeated := sorted({c for c in wanted if wanted.count(c) > 1}):
+            return fail(f"a case id is repeated in --cases: {', '.join(repeated)}")
         if missing := [c for c in wanted if c not in known]:
             return fail(f"no case {', '.join(missing)} in {folder}")
         cases = [known[c] for c in wanted]
@@ -554,8 +568,10 @@ def _replay_run(cfg, args) -> int:
             model=args.model,
             timeout=args.timeout,
             out=out,
+            guards=tuple(g.expanduser() for g in args.guard),
+            keep_homes=args.keep_homes,
         )
-    except (replay_run.SourceChanged, ValueError) as e:
+    except (replay_run.SourceChanged, ValueError, OSError) as e:
         return fail(str(e))
     for row in rows:
         s = row["score"]
@@ -565,6 +581,8 @@ def _replay_run(cfg, args) -> int:
         )
     print(replay_run.format_summary(summary))
     print(f"written to {run_dir}", file=sys.stderr)
+    if summary["failed_cases"]:
+        return fail(f"{len(summary['failed_cases'])} cases failed: {', '.join(summary['failed_cases'])}")
     return 0
 
 
