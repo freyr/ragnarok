@@ -314,21 +314,32 @@ class _Context:
                 6, "no-matching-supersedes", f"superseded_by names {path}, which does not list this note in supersedes"
             )
 
-    def others(self, note: _Note) -> list[tuple[str, str]]:
-        """Check 7 against the index: (path, sensitivity) of the other current state notes of the identity key."""
-        note_type, primary, task = note.identity
+    def identity_notes(
+        self, identity: tuple[str, int, str], current_only: bool, exclude: int | None = None
+    ) -> list[tuple[int, str, str]]:
+        """(id, path, sensitivity) of the indexed notes with this identity key, except the note exclude.
+        current_only keeps the current state notes that are not archived."""
+        note_type, primary, task = identity
+        current = (
+            " AND n.note_class = 'state' AND (n.validity IS NULL OR n.validity = 'current') AND n.status != 'archived'"
+            if current_only
+            else ""
+        )
         rows = self.conn.execute(
-            "SELECT n.path, n.sensitivity FROM notes n JOIN refs r ON r.note_id = n.id"
-            " WHERE r.key = 'subject' AND r.to_note = ? AND n.type = ? AND n.note_class = 'state'"
-            " AND (n.validity IS NULL OR n.validity = 'current') AND n.status != 'archived' AND n.id IS NOT ?"
+            "SELECT n.id, n.path, n.sensitivity FROM notes n JOIN refs r ON r.note_id = n.id"
+            f" WHERE r.key = 'subject' AND r.to_note = ? AND n.type = ?{current} AND n.id IS NOT ?"
             " AND r.rowid = (SELECT min(rowid) FROM refs WHERE note_id = n.id AND key = 'subject')"
             " ORDER BY n.path",
-            (primary, note_type, note.note_id),
+            (primary, note_type, exclude),
         ).fetchall()
+        return [row for row in rows if _task(read_note(self.cfg.note_path(row[1]))[0]) == task]
+
+    def others(self, note: _Note) -> list[tuple[str, str]]:
+        """Check 7 against the index: (path, sensitivity) of the other current state notes of the identity key."""
         return [
             (path, sensitivity)
-            for path, sensitivity in rows
-            if path != note.path and _task(read_note(self.cfg.note_path(path))[0]) == task
+            for _, path, sensitivity in self.identity_notes(note.identity, True, note.note_id)
+            if path != note.path
         ]
 
 

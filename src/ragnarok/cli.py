@@ -20,6 +20,7 @@ COMMANDS = {
     "init": "Set up this computer: config, Ollama, model, index and the MCP server in Claude Code",
     "doctor": "Check the six parts of the setup and print the fix for each failure",
     "validate": "Check notes against the frontmatter model, the links and the identity keys",
+    "find-collisions": "Print the notes that a note or a draft can collide with",
 }
 
 
@@ -67,6 +68,9 @@ def build_parser() -> argparse.ArgumentParser:
     vp = parsers["validate"]
     vp.add_argument("paths", nargs="*", help="note paths, relative to the vault root or absolute (default all notes)")
     vp.add_argument("--json", action="store_true", help="print one JSON object")
+    fp = parsers["find-collisions"]
+    fp.add_argument("path", help="a note path, relative to the vault root or absolute; - reads a draft from stdin")
+    fp.add_argument("--json", action="store_true", help="print one JSON object")
     return parser
 
 
@@ -375,6 +379,28 @@ def cmd_validate(cfg, args) -> int:
     return 1 if report.errors else 0
 
 
+def cmd_find_collisions(cfg, args) -> int:
+    from .collisions import find_collisions, format_text
+    from .embed import EmbedError, OllamaEmbedder
+    from .index import IndexMismatch, connect
+
+    if not cfg.index_path.exists():
+        print(f"No index at {cfg.index_path}. Run `ragnarok index`.", file=sys.stderr)
+        return 1
+    try:
+        conn = connect(cfg)
+        embedder = OllamaEmbedder(cfg)
+        if args.path == "-":
+            found = find_collisions(cfg, conn, embedder, draft=sys.stdin.read())
+        else:
+            found = find_collisions(cfg, conn, embedder, path=cfg.note_key(args.path))
+    except (IndexMismatch, EmbedError, FileNotFoundError, ValueError) as e:
+        print(f"ragnarok find-collisions: {e}", file=sys.stderr)
+        return 1
+    print(json.dumps({"candidates": found}, ensure_ascii=False, indent=2) if args.json else format_text(found))
+    return 0
+
+
 def _config_file(args) -> Path:
     from .config import config_path
 
@@ -421,6 +447,7 @@ HANDLERS = {
     "status": cmd_status,
     "search": cmd_search,
     "validate": cmd_validate,
+    "find-collisions": cmd_find_collisions,
 }
 
 

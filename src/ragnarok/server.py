@@ -251,4 +251,31 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
         """
         return get().validate(paths=paths, draft=draft, path=path)
 
+    @server.tool()
+    @timed
+    def find_collisions(draft: str | None = None, path: str | None = None, allow_private: bool = False) -> dict:
+        """The notes that a draft can collide with, before a write: at most 10 candidates.
+
+        draft: the frontmatter and the body as one Markdown text; path is its intended note path. With no draft, path
+        is a note path (as in search results) and that note is not a candidate. The sources (reasons): identity (the
+        same type, primary subject and task, any class or validity), search (the hybrid search for the title, the
+        description and the start of the body, superseded notes included), links_out (the notes the draft links to),
+        links_to_supersedes (each supersedes target and the notes that link to it). Each candidate has path, title,
+        type, status, class, validity, as_of, subject, superseded_by, reasons, rank (the search rank or null) and
+        distance (the cosine distance of its best chunk to the query, or null). The order: identity candidates, then
+        the search rank, then the link candidates by distance. allow_private works only when the user allows it.
+        """
+        return get().find_collisions(draft=draft, path=path, allow_private=allow_private)
+
+    @server.tool()
+    @timed
+    def vault_rules() -> dict:
+        """The path rules of each vault and the local write rules, before a note is classified and placed.
+
+        Each vault: name, folder, the area and project rules, project markers, archive folder and the private
+        patterns that apply to it. write: known_keys (frontmatter keys outside the model that are allowed) and
+        systems_of_record (each with data, the kind of data; system, where it lives; skill, the skill that reads it).
+        """
+        return get().vault_rules()
+
     return server

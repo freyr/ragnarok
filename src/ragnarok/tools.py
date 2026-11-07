@@ -6,8 +6,9 @@ import datetime as dt
 import posixpath
 import re
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
+from .collisions import find_collisions
 from .config import Config
 from .index import SCAN_LIMIT, update
 from .metadata import normalize_alias, read_note
@@ -62,6 +63,12 @@ def _first_paragraph(body: str) -> str | None:
             words = text.split()
             return " ".join(words[:DESCRIPTION_WORDS]) + (" …" if len(words) > DESCRIPTION_WORDS else "")
     return None
+
+
+def _applies(pattern: str, vault: str) -> bool:
+    """True when a private pattern can match a note of the vault: its first segment is the vault or a glob."""
+    first = pattern.split("/", 1)[0]
+    return first == vault or any(c in first for c in "*?[")
 
 
 def _state(fm: dict, archived: bool) -> str:
@@ -275,6 +282,39 @@ class Tools:
         else:
             raise ValueError("Give paths or a draft.")
         return {**report.as_dict(), "warnings": warnings}
+
+    def find_collisions(self, draft: str | None = None, path: str | None = None, allow_private: bool = False) -> dict:
+        warnings = self.scan()
+        if draft is not None:
+            key = self._draft_key(path) if path else None
+            found = find_collisions(
+                self.cfg, self.conn, self.embedder, draft=draft, draft_path=key, allow_private=allow_private
+            )
+        elif path:
+            key = self.cfg.note_key(path)
+            row = self._note_row(key)
+            if row is None:
+                raise FileNotFoundError(f"{key} is not a note in the index. Use a path from a search result.")
+            self._check_private(row[7], key)
+            found = find_collisions(self.cfg, self.conn, self.embedder, path=key, allow_private=allow_private)
+        else:
+            raise ValueError("Give a draft or a path.")
+        return {"candidates": found, "warnings": warnings}
+
+    def vault_rules(self) -> dict:
+        vaults = []
+        for vault in self.cfg.vaults:
+            vaults.append(
+                {
+                    "name": vault,
+                    "folder": self.cfg.vault_dir(vault).name,
+                    **asdict(self.cfg.rules(vault)),
+                    "project_markers": list(self.cfg.project_markers),
+                    "archive_folder": self.cfg.archive_folder,
+                    "private_patterns": [p for p in self.cfg.private_patterns if _applies(p, vault)],
+                }
+            )
+        return {"vaults": vaults, "write": asdict(self.cfg.write)}
 
     def _draft_key(self, path: str) -> str:
         key = posixpath.normpath(self.cfg.note_key(path))

@@ -53,7 +53,14 @@ eval_exclude = []
 # jira_prefixes = []         # ticket prefixes found only in this vault
 
 # The local rules of the write path. known_keys: frontmatter keys outside the knowledge-base model that
-# `ragnarok validate` does not report as unknown keys. The default is an empty list.
+# `ragnarok validate` does not report as unknown keys. systems_of_record: the kinds of data that live outside the
+# vaults, each with data (the kind of data), system (where it lives) and an optional skill (the skill that reads it).
+# The MCP tool vault_rules gives both. The defaults are empty lists.
 #
 # [write]
 # known_keys = ["tags", "created"]
+#
+# [[write.systems_of_record]]
+# data = "customer tier"
+# system = "CRM"
+# skill = "crm-read"

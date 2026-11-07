@@ -60,11 +60,22 @@ class VaultRules:
 
 
 @dataclass
+class SystemOfRecord:
+    """A kind of data that lives outside the vaults: the system that holds it and the skill that reads it."""
+
+    data: str
+    system: str
+    skill: str | None = None
+
+
+@dataclass
 class WriteConfig:
     """The local rules of the write path: the [write] table."""
 
     # frontmatter keys outside the model that `validate` does not report as unknown
     known_keys: list[str] = field(default_factory=list)
+    # the [[write.systems_of_record]] tables
+    systems_of_record: list[SystemOfRecord] = field(default_factory=list)
 
 
 @dataclass
@@ -167,7 +178,8 @@ def load_config(path: Path | None = None) -> Config:
         elif key == "vault_rules":
             value = {vault: VaultRules(**rules) for vault, rules in value.items()}
         elif key == "write":
-            value = WriteConfig(**value)
+            systems = [SystemOfRecord(**entry) for entry in value.get("systems_of_record", [])]
+            value = WriteConfig(**{**value, "systems_of_record": systems})
         values[key] = value
     return Config(**values)
 
@@ -186,7 +198,10 @@ def dump_config(cfg: Config, **paths: Path | str) -> str:
     for vault, rules in cfg.vault_rules.items():
         lines.append(f"\n[vault_rules.{json.dumps(vault)}]")
         lines += [f"{key} = {json.dumps(value)}" for key, value in asdict(rules).items()]
-    if cfg.write.known_keys:
+    if cfg.write.known_keys or cfg.write.systems_of_record:
         lines.append("\n[write]")
         lines.append(f"known_keys = {json.dumps(cfg.write.known_keys)}")
+    for system in cfg.write.systems_of_record:
+        lines.append("\n[[write.systems_of_record]]")
+        lines += [f"{key} = {json.dumps(value)}" for key, value in asdict(system).items() if value is not None]
     return "\n".join(lines) + "\n"
