@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 from .config import Config
 from .index import SCAN_LIMIT, update
-from .metadata import is_private, normalize_alias, read_note
+from .metadata import normalize_alias, read_note
 from .redact import redact
 from .search import PrivateNotAllowed, search
 from .splitter import sections
@@ -262,16 +262,25 @@ class Tools:
         warnings = self.scan()
         show = self.cfg.allow_private
         if draft is not None:
-            report = check_draft(self.cfg, self.conn, draft, self.cfg.note_key(path) if path else None, show)
+            # the intended path gives only the link resolution and the identity key; its file is never read
+            report = check_draft(self.cfg, self.conn, draft, self._draft_key(path) if path else None, show)
         elif paths:
             keys = [self.cfg.note_key(p) for p in paths]
             for key in keys:
-                if is_private(self.cfg, key):
-                    self._check_private("private", key)
+                row = self._note_row(key)
+                if row is None:
+                    raise FileNotFoundError(f"{key} is not a note in the index. Use a path from a search result.")
+                self._check_private(row[7], key)
             report = check_paths(self.cfg, self.conn, keys, show)
         else:
             raise ValueError("Give paths or a draft.")
         return {**report.as_dict(), "warnings": warnings}
+
+    def _draft_key(self, path: str) -> str:
+        key = posixpath.normpath(self.cfg.note_key(path))
+        if key.startswith(("../", "/")) or key.split("/")[0] not in self.cfg.vaults:
+            raise ValueError(f"{path} is not a path in a vault.")
+        return key
 
     # --- project summary ---------------------------------------------------------------------------------------
 

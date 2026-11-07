@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import posixpath
 import re
 import sqlite3
 import time
@@ -465,6 +466,24 @@ class _Paths:
     ) -> int | None:
         """The note of a link target. from_path is the path of a note with the link that is not in the index."""
         key = _link_key(target).strip("/")
+        if from_note is None and from_path:
+            home, folders = from_path.split("/")[0], _link_key(from_path).split("/")[:-1]
+        else:
+            home = self.vault_of.get(from_note)
+            folders = self.path_of.get(from_note, "").split("/")[:-1]
+        if key.startswith(("./", "../")):
+            if home is None:
+                return None
+            # a relative link: the path from the folder of the note with the link, inside its vault
+            joined = posixpath.normpath(posixpath.join("/".join(folders[1:]), key))
+            return next(
+                (
+                    n[0]
+                    for n in self.by_name.get(joined.rsplit("/", 1)[-1], [])
+                    if n[1] == home and n[2] == f"{_link_key(home)}/{joined}" and (among is None or n[0] in among)
+                ),
+                None,
+            )
         candidates = [
             n
             for n in self.by_name.get(key.rsplit("/", 1)[-1], [])
@@ -472,11 +491,6 @@ class _Paths:
         ]
         if not candidates:
             return None
-        if from_note is None and from_path:
-            home, folders = from_path.split("/")[0], _link_key(from_path).split("/")[:-1]
-        else:
-            home = self.vault_of.get(from_note)
-            folders = self.path_of.get(from_note, "").split("/")[:-1]
         return min(candidates, key=lambda n: (n[1] != home, -_common_folders(folders, n[2]), len(n[2])))[0]
 
 

@@ -12,6 +12,7 @@ PUMP = "V/Entities/Heat pump.md"
 ANNA = "V/Entities/Anna.md"
 BOILER = "V/Heating/boiler.md"
 NOTE = "V/Heating/guide.md"
+DRAFT_LABEL = "(draft)"
 
 BASE = {
     PUMP: "---\ntype: entity\nkind: device\naliases: [HP]\nfacts: [a fact]\n---\n# Heat pump\n",
@@ -199,6 +200,21 @@ def test_links_in_code_and_attachments_are_not_checked(cfg):
         "Inline `[[Nowhere 3]]` and ``a [[Nowhere 4]] b``.\n![[diagram.png]]\n"
     )
     assert check_note(cfg, text).issues == []
+
+
+@pytest.mark.parametrize("target", ["../Heating/boiler", "./boiler", "../Entities/Anna"])
+def test_a_relative_link_resolves_from_the_folder_of_the_note(cfg, target):
+    report = check_note(cfg, f"---\nclass: record\n---\n# Note\nSee [[{target}]].\n")
+    assert report.issues == []
+    draft = validate.check_draft(cfg, index(cfg), f"---\nclass: record\n---\n# D\n[[{target}]]\n", "V/Heating/new.md")
+    assert draft.issues == []
+
+
+def test_a_relative_link_to_no_note_is_an_error(cfg):
+    report = check_note(cfg, "---\nclass: record\n---\n# Note\nSee [[../boiler]].\n")  # V/boiler.md is no note
+    assert found(report, 4) == [(NOTE, 4, "broken-link")]
+    draft = validate.check_draft(cfg, index(cfg), "---\nclass: record\n---\n# D\n[[./boiler]]\n")
+    assert found(draft, 4) == [(DRAFT_LABEL, 4, "broken-link")]  # no intended path: no folder
 
 
 # --- check 5: reference targets ------------------------------------------------------------------------------------
@@ -427,3 +443,42 @@ def test_mcp_tool_refuses_a_private_path_and_no_input(cfg):
         tools.validate(paths=[BOILER])
     with pytest.raises(ValueError):
         tools.validate()
+
+
+@pytest.fixture
+def secret(cfg):
+    write(cfg, {"V/Secret/s.md": "---\nclass: SECRETVALUE\n---\n# S\n[[secret-target]]\n"})
+    (cfg.root / "outside.md").write_text("---\nclass: OUTSIDE\n---\n# O\n")
+    cfg.private_patterns = ["V/Secret/**"]
+    return cfg
+
+
+@pytest.mark.parametrize("path", ["V/Heating/../Secret/s.md", "V/../outside.md", "outside.md", "V/Heating/none.md"])
+def test_mcp_tool_refuses_a_path_that_is_not_an_indexed_note(secret, path):
+    from ragnarok.tools import Tools
+
+    tools = Tools(secret, index(secret), FakeEmbedder())
+    with pytest.raises(FileNotFoundError, match="not a note in the index"):
+        tools.validate(paths=[path])
+
+
+def test_mcp_tool_refuses_an_indexed_private_note_and_reads_an_indexed_public_note(secret):
+    from ragnarok.search import PrivateNotAllowed
+    from ragnarok.tools import Tools
+
+    tools = Tools(secret, index(secret), FakeEmbedder())
+    with pytest.raises(PrivateNotAllowed):
+        tools.validate(paths=["V/Secret/s.md"])
+    with pytest.raises(PrivateNotAllowed):
+        tools.validate(paths=[str(secret.root / "V/Heating/../Secret/s.md")])
+    assert [i["kind"] for i in tools.validate(paths=[BOILER])["issues"]] == ["no-class"]
+
+
+def test_mcp_draft_never_reads_the_file_at_its_intended_path(secret):
+    from ragnarok.tools import Tools
+
+    tools = Tools(secret, index(secret), FakeEmbedder())
+    result = tools.validate(draft="---\nclass: record\n---\n# D\n", path="V/Secret/s.md")
+    assert result["issues"] == []
+    with pytest.raises(ValueError):
+        tools.validate(draft="---\nclass: record\n---\n# D\n", path="V/../outside.md")

@@ -166,6 +166,23 @@ def test_links_and_jira(cfg):
     assert keys == [("CORE-123",), ("OPS-77",), ("TS-9",)]
 
 
+def test_a_relative_link_resolves_from_the_folder_of_the_note(cfg):
+    (cfg.root / "Home/Heating/notes/boiler.md").write_text(
+        "# Boiler\nSee [[../SUMMARY]], [[./boiler|this note]], [[../../Astro/Theory/Field Stop]] and [[../Nothing]].\n"
+    )
+    conn, _, _ = build(cfg)
+    rows = conn.execute(
+        "SELECT l.target, n.path FROM links l JOIN notes f ON f.id = l.from_note LEFT JOIN notes n ON n.id = l.to_note"
+        " WHERE f.path = 'Home/Heating/notes/boiler.md' ORDER BY l.target"
+    ).fetchall()
+    assert rows == [
+        ("../../Astro/Theory/Field Stop", FIELD_STOP),
+        ("../Nothing", None),
+        ("../SUMMARY", "Home/Heating/SUMMARY.md"),
+        ("./boiler", "Home/Heating/notes/boiler.md"),
+    ]
+
+
 def test_model_mismatch_needs_rebuild(cfg):
     conn, _, _ = build(cfg)
     conn.close()
