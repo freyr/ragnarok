@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-07
+
+### Added
+
+- Search shows the knowledge-base labels of a note (`class`, `validity`, `as_of`, `superseded_by`) when it has
+  them, and leaves out notes with `validity: superseded` or `rejected` unless `include_superseded` is true.
+  `list_project` shows `subject` and `class`, with a default `class` from `type`.
+- Entity notes (`type: entity`): the `find_entities` tool, the resolution of `subject`, `owner`, `supersedes` and
+  `superseded_by`, and a `subject` filter of `search` that applies before the fusion.
+- `ragnarok validate [<path>...] [--json]` and the `validate` tool check notes, or a draft before a write,
+  against the knowledge-base frontmatter model: the values, the required keys, the links, the reference targets
+  and the identity keys. With no path, the command prints the counts of broken links, double identity and notes
+  with no error.
+- `ragnarok find-collisions <path>|-` and the `find_collisions` tool give at most 10 notes that a draft can
+  collide with, from the identity key, the hybrid search, the links of the draft and the `supersedes` targets.
+- The `vault_rules` tool gives the path rules of each vault and the new `[write]` table (`known_keys`,
+  `systems_of_record`). Both lists are empty by default.
+- `ragnarok replay build|score|run` build and score a replay set of the write path, for measurement.
+
+### Changed
+
+- With no filter, the search order is unchanged. An older index gets the new columns from the embedding cache,
+  with no new embeddings.
+
 ## [1.1.0] - 2026-11-05
 
 ### Added
@@ -39,5 +63,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 First public release.
 
+[1.2.0]: https://github.com/freyr/ragnarok/releases/tag/v1.2.0
 [1.1.0]: https://github.com/freyr/ragnarok/releases/tag/v1.1.0
 [1.0.0]: https://github.com/freyr/ragnarok/releases/tag/v1.0.0
