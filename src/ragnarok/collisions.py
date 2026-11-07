@@ -73,6 +73,7 @@ def find_collisions(
     draft_path: str | None = None,
     path: str | None = None,
     allow_private: bool = False,
+    exclude: str | None = None,
 ) -> list[dict]:
     """The collision candidates of a draft (with its intended key draft_path) or of the indexed note at path.
 
@@ -80,16 +81,24 @@ def find_collisions(
     the search candidates (by rank); tier 3, up to LINK_PLACES candidates of the links only (by distance). Tier 3
     keeps its places (only as many as it has candidates); tier 2 fills the rest of the LIMIT places. The note at
     path is not a candidate. A private note is a candidate only with allow_private, which needs
-    allow_private = true in the configuration."""
+    allow_private = true in the configuration. exclude (internal, not a parameter of the MCP tool) is the path of
+    an indexed note that is not a candidate either; like the note at path, it leaves the pool before the limit."""
     if allow_private and not cfg.allow_private:
         raise PrivateNotAllowed("allow_private needs allow_private = true in the configuration")
+    excluded: set[int] = set()
+    if exclude is not None:
+        row = conn.execute("SELECT id FROM notes WHERE path = ?", (exclude,)).fetchone()
+        if row is None:
+            raise FileNotFoundError(f"{exclude} is not a note in the index.")
+        excluded.add(row[0])
     if draft is not None:
-        text, key, exclude = draft, draft_path, None
+        text, key = draft, draft_path
     elif path is not None:
         row = conn.execute("SELECT id FROM notes WHERE path = ?", (path,)).fetchone()
         if row is None:
             raise FileNotFoundError(f"{path} is not a note in the index. Use a path from a search result.")
-        text, key, exclude = cfg.note_path(path).read_text(errors="replace"), path, row[0]
+        text, key = cfg.note_path(path).read_text(errors="replace"), path
+        excluded.add(row[0])
     else:
         raise ValueError("Give a draft or a path.")
 
@@ -102,7 +111,7 @@ def find_collisions(
     first: set[int] = set()  # tier 1
 
     def add(nid: int | None, reason: str) -> None:
-        if nid is not None and nid != exclude:
+        if nid is not None and nid not in excluded:
             reasons.setdefault(nid, set()).add(reason)
 
     if note.identity is not None:
@@ -120,8 +129,8 @@ def find_collisions(
     for target in [*frontmatter_links(fm), *body_links(body)]:
         if target:
             add(ctx.resolver.paths.find(target, note.note_id, None, note.path), "links_out")
-    first.discard(exclude)
-    # the pool fills tier 2 when all tier 1 notes and the input note are in it
+    first -= excluded
+    # the pool fills tier 2 when all tier 1 notes and the excluded notes are in it
     hits = search(
         cfg,
         conn,
@@ -129,12 +138,12 @@ def find_collisions(
         query,
         include_superseded=True,
         include_private=allow_private,
-        limit=LIMIT + len(first) + (exclude is not None),
+        limit=LIMIT + len(first) + len(excluded),
     )
     ranks: dict[int, int] = {}
     for rank, hit in enumerate(hits, start=1):
         nid = ctx.ids.get(hit.path)
-        if nid is not None and nid != exclude:
+        if nid is not None and nid not in excluded:
             ranks[nid] = rank
             add(nid, "search")
 

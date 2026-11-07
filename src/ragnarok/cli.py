@@ -21,6 +21,7 @@ COMMANDS = {
     "doctor": "Check the six parts of the setup and print the fix for each failure",
     "validate": "Check notes against the frontmatter model, the links and the identity keys",
     "find-collisions": "Print the notes that a note or a draft can collide with",
+    "replay": "Build the replay set of the write path, or score R1 on it",
 }
 
 
@@ -75,6 +76,16 @@ def build_parser() -> argparse.ArgumentParser:
         " by rank, last up to 3 candidates that only the links give, by distance."
     )
     fp.add_argument("--json", action="store_true", help="print one JSON object")
+    actions = parsers["replay"].add_subparsers(dest="action", required=True)
+    rb = actions.add_parser("build", help="write cases.jsonl and manifest.json from the index and its mirror")
+    rb.add_argument("--out", type=Path, required=True, help="the folder of the set, inside the home folder")
+    rb.add_argument("--neg-count", type=int, default=0, help="the number of negative cases (default 0)")
+    rb.add_argument("--neg-distance", type=float, help="the least best-chunk distance of a negative case")
+    rb.add_argument("--copy-similarity", type=float, default=0.9, help="the least similarity of a moved copy")
+    rb.add_argument("--seed", type=int, default=0, help="the seed of the negative sample (default 0)")
+    rs = actions.add_parser("score", help="run find_collisions on each positive case and print R1")
+    rs.add_argument("--set", type=Path, required=True, dest="set_dir", help="the folder that replay build wrote")
+    rs.add_argument("--json", action="store_true", help="print the result as one JSON object")
     return parser
 
 
@@ -405,6 +416,82 @@ def cmd_find_collisions(cfg, args) -> int:
     return 0
 
 
+def cmd_replay(cfg, args) -> int:
+    from .index import IndexMismatch, connect
+
+    if not cfg.index_path.exists():
+        print(f"No index at {cfg.index_path}. Run `ragnarok index`.", file=sys.stderr)
+        return 1
+    try:
+        conn = connect(cfg)
+    except IndexMismatch as e:
+        print(e, file=sys.stderr)
+        return 1
+    try:
+        return _replay_build(cfg, conn, args) if args.action == "build" else _replay_score(cfg, conn, args)
+    finally:
+        conn.close()
+
+
+def _replay_build(cfg, conn, args) -> int:
+    from . import replay
+    from .config import home_dir
+
+    home, out = home_dir().resolve(), args.out.expanduser().resolve()
+    if out == home or not out.is_relative_to(home):
+        print(f"ragnarok replay build: --out must be a folder inside the home folder {home}", file=sys.stderr)
+        return 1
+    if (out / "cases.jsonl").exists():
+        print(f"ragnarok replay build: {out} already holds cases.jsonl; use a new folder", file=sys.stderr)
+        return 1
+    try:
+        result = replay.build(
+            cfg,
+            conn,
+            neg_count=args.neg_count,
+            neg_distance=args.neg_distance,
+            copy_similarity=args.copy_similarity,
+            seed=args.seed,
+        )
+    except ValueError as e:
+        print(f"ragnarok replay build: {e}", file=sys.stderr)
+        return 1
+    (home / replay.MARKER).touch()
+    parameters = {
+        "neg_count": args.neg_count,
+        "neg_distance": args.neg_distance,
+        "copy_similarity": args.copy_similarity,
+        "seed": args.seed,
+    }
+    print(replay.format_build(replay.write_set(cfg, out, result, parameters)))
+    return 0
+
+
+def _replay_score(cfg, conn, args) -> int:
+    from datetime import UTC, datetime
+
+    from . import replay
+    from .embed import EmbedError, OllamaEmbedder
+
+    folder = args.set_dir.expanduser()
+    if not (folder / "cases.jsonl").is_file() or not (folder / "manifest.json").is_file():
+        print(f"ragnarok replay score: {folder} has no cases.jsonl and manifest.json", file=sys.stderr)
+        return 1
+    manifest, cases = replay.read_set(folder)
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    try:
+        records = replay.score_cases(cfg, conn, OllamaEmbedder(cfg), cases)
+    except (EmbedError, FileNotFoundError) as e:
+        print(f"ragnarok replay score: {e}", file=sys.stderr)
+        return 1
+    result = {"time": stamp, "manifest": manifest, "summary": replay.summarize(records), "cases": records}
+    path = folder / f"score-{stamp}.json"
+    path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else replay.format_summary(result["summary"]))
+    print(f"written to {path}", file=sys.stderr)
+    return 0
+
+
 def _config_file(args) -> Path:
     from .config import config_path
 
@@ -452,6 +539,7 @@ HANDLERS = {
     "search": cmd_search,
     "validate": cmd_validate,
     "find-collisions": cmd_find_collisions,
+    "replay": cmd_replay,
 }
 
 
