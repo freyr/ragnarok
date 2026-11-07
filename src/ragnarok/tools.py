@@ -110,7 +110,9 @@ class Tools:
 
     def find_projects(self, query: str, vault: str | None = None, limit: int = 5) -> dict:
         warnings = self.scan()
-        hits = search(self.cfg, self.conn, self.embedder, query, vault=vault, limit=PROJECT_POOL)
+        hits = search(
+            self.cfg, self.conn, self.embedder, query, vault=vault, include_superseded=True, limit=PROJECT_POOL
+        )
         groups: dict[tuple[str, str], dict] = {}
         for h in hits:
             if h.project == "none":

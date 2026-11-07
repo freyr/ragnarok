@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
+from datetime import date
 from fnmatch import fnmatchcase
 from functools import lru_cache
 from pathlib import Path
@@ -104,6 +105,11 @@ class NoteMeta:
     description: str | None = None
     jira: list[str] = field(default_factory=list)
     sources: dict[str, str] = field(default_factory=dict)
+    # the knowledge-base labels, from frontmatter only; None when the note does not give them
+    note_class: str | None = None  # state, proposal or record (the `class` key)
+    validity: str | None = None  # current, superseded, open, accepted or rejected
+    as_of: str | None = None
+    superseded_by: str | None = None  # the target of the `superseded_by` link
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -307,6 +313,7 @@ def resolve(
         sources["description"] = "frontmatter"
 
     jira = sorted(set(_as_list(fm.get("jira"))) | set(find_jira(cfg, vault, body)))
+    note_class, validity, as_of, superseded_by = kb_labels(fm)
 
     return NoteMeta(
         vault=vault,
@@ -320,7 +327,38 @@ def resolve(
         description=description,
         jira=jira,
         sources=sources,
+        note_class=note_class,
+        validity=validity,
+        as_of=as_of,
+        superseded_by=superseded_by,
     )
+
+
+def _label(fm: dict, key: str) -> str | None:
+    value = fm.get(key)
+    text = str(value).strip().lower() if value is not None else ""
+    return text or None
+
+
+def _link_target(value) -> str | None:
+    """The target of a wiki-link (or of the first one in a list), without alias, heading and .md."""
+    while isinstance(value, list):  # an unquoted [[x]] is a nested list in YAML
+        value = value[0] if value else None
+    text = str(value).strip() if value is not None else ""
+    if text.startswith("[[") and text.endswith("]]"):
+        text = text[2:-2]
+    text = text.split("|")[0].split("#")[0].strip().removesuffix(".md")
+    return text or None
+
+
+def kb_labels(fm: dict) -> tuple[str | None, str | None, str | None, str | None]:
+    """(class, validity, as_of, superseded_by) from frontmatter. A note with a successor and no validity is
+    superseded."""
+    successor = _link_target(fm.get("superseded_by"))
+    validity = _label(fm, "validity") or ("superseded" if successor else None)
+    as_of = fm.get("as_of")
+    as_of = (as_of.isoformat() if isinstance(as_of, date) else str(as_of).strip()) if as_of is not None else None
+    return _label(fm, "class"), validity, as_of or None, successor
 
 
 def resolve_file(cfg: Config, rel: str) -> NoteMeta:

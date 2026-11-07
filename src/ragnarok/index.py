@@ -40,7 +40,11 @@ CREATE TABLE IF NOT EXISTS notes (
     description TEXT,
     mtime_ns INTEGER NOT NULL,
     size INTEGER NOT NULL,
-    hash TEXT NOT NULL
+    hash TEXT NOT NULL,
+    note_class TEXT,
+    validity TEXT,
+    as_of TEXT,
+    superseded_by TEXT
 );
 CREATE INDEX IF NOT EXISTS notes_project ON notes (vault, project);
 CREATE TABLE IF NOT EXISTS chunks (
@@ -86,6 +90,7 @@ def connect(cfg: Config) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(_schema(cfg.dimension))
+    _add_kb_columns(conn)
     expected = {"model": cfg.model, "dimension": str(cfg.dimension), "schema_version": str(SCHEMA_VERSION)}
     stored = dict(conn.execute("SELECT key, value FROM meta").fetchall())
     if not stored:
@@ -100,6 +105,21 @@ def connect(cfg: Config) -> sqlite3.Connection:
             "Run `ragnarok index --rebuild`."
         )
     return conn
+
+
+KB_COLUMNS = ("note_class", "validity", "as_of", "superseded_by")
+
+
+def _add_kb_columns(conn: sqlite3.Connection) -> None:
+    """Add the knowledge-base label columns to an older index. The rules hash is removed, so the next update
+    derives the metadata of all notes again from the embedding cache, with no new embedding."""
+    have = {r[1] for r in conn.execute("PRAGMA table_info(notes)")}
+    missing = [c for c in KB_COLUMNS if c not in have]
+    for column in missing:
+        conn.execute(f"ALTER TABLE notes ADD COLUMN {column} TEXT")
+    if missing:
+        conn.execute("DELETE FROM meta WHERE key = 'rules_hash'")
+        conn.commit()
 
 
 def _hash_file(data: bytes) -> str:
@@ -151,9 +171,14 @@ class _Pending:
 def _same(cfg: Config, conn: sqlite3.Connection, note_id: int, m, chunks) -> bool:
     """True when the index already holds this metadata and these chunks for the note."""
     row = conn.execute(
-        "SELECT title, project, area, type, status, sensitivity, description FROM notes WHERE id = ?", (note_id,)
+        "SELECT title, project, area, type, status, sensitivity, description, note_class, validity, as_of,"
+        " superseded_by FROM notes WHERE id = ?",
+        (note_id,),
     ).fetchone()
-    if row != (m.title, m.project, m.area, m.type, m.status, m.sensitivity, m.description):
+    if row != (
+        m.title, m.project, m.area, m.type, m.status, m.sensitivity, m.description,
+        m.note_class, m.validity, m.as_of, m.superseded_by,
+    ):  # fmt: skip
         return False
     jira = [k for (k,) in conn.execute("SELECT key FROM jira WHERE note_id = ? ORDER BY key", (note_id,))]
     stored = [h for (h,) in conn.execute("SELECT text_hash FROM chunks WHERE note_id = ? ORDER BY ord", (note_id,))]
@@ -309,7 +334,8 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
             _delete_note(conn, other[0])
         cur = conn.execute(
             "INSERT INTO notes (vault, path, title, project, area, type, status, sensitivity, description,"
-            " mtime_ns, size, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " mtime_ns, size, hash, note_class, validity, as_of, superseded_by)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 m.vault,
                 p.rel,
@@ -323,6 +349,10 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
                 p.mtime_ns,
                 p.size,
                 p.hash,
+                m.note_class,
+                m.validity,
+                m.as_of,
+                m.superseded_by,
             ),
         )
         note_id = cur.lastrowid
