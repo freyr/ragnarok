@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS notes (
     note_class TEXT,
     validity TEXT,
     as_of TEXT,
-    superseded_by TEXT
+    superseded_by TEXT,
+    subject TEXT
 );
 CREATE INDEX IF NOT EXISTS notes_project ON notes (vault, project);
 CREATE TABLE IF NOT EXISTS chunks (
@@ -107,7 +108,7 @@ def connect(cfg: Config) -> sqlite3.Connection:
     return conn
 
 
-KB_COLUMNS = ("note_class", "validity", "as_of", "superseded_by")
+KB_COLUMNS = ("note_class", "validity", "as_of", "superseded_by", "subject")
 
 
 def _add_kb_columns(conn: sqlite3.Connection) -> None:
@@ -172,12 +173,12 @@ def _same(cfg: Config, conn: sqlite3.Connection, note_id: int, m, chunks) -> boo
     """True when the index already holds this metadata and these chunks for the note."""
     row = conn.execute(
         "SELECT title, project, area, type, status, sensitivity, description, note_class, validity, as_of,"
-        " superseded_by FROM notes WHERE id = ?",
+        " superseded_by, subject FROM notes WHERE id = ?",
         (note_id,),
     ).fetchone()
     if row != (
         m.title, m.project, m.area, m.type, m.status, m.sensitivity, m.description,
-        m.note_class, m.validity, m.as_of, m.superseded_by,
+        m.note_class, m.validity, m.as_of, m.superseded_by, "\n".join(m.subject) or None,
     ):  # fmt: skip
         return False
     jira = [k for (k,) in conn.execute("SELECT key FROM jira WHERE note_id = ? ORDER BY key", (note_id,))]
@@ -334,8 +335,8 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
             _delete_note(conn, other[0])
         cur = conn.execute(
             "INSERT INTO notes (vault, path, title, project, area, type, status, sensitivity, description,"
-            " mtime_ns, size, hash, note_class, validity, as_of, superseded_by)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " mtime_ns, size, hash, note_class, validity, as_of, superseded_by, subject)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 m.vault,
                 p.rel,
@@ -353,6 +354,7 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
                 m.validity,
                 m.as_of,
                 m.superseded_by,
+                "\n".join(m.subject) or None,
             ),
         )
         note_id = cur.lastrowid

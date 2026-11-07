@@ -163,8 +163,9 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
         Filters: vault (the name of a vault folder), project (folder slug), area, type (research,
         spec, plan, summary, drivers, guide, note, ...). include_private works only when the user allows it.
         A note that has them also shows class (state, proposal, record), validity (current, superseded, open,
-        accepted, rejected), as_of and superseded_by (the note that replaces it). Notes with validity superseded
-        or rejected are left out; include_superseded=true shows them, for a question about the past.
+        accepted, rejected), as_of, superseded_by (the note that replaces it) and subject (the notes it is about).
+        A note with no class gets one from its type. Notes with validity superseded or rejected are left out;
+        include_superseded=true shows them, for a question about the past.
         """
         return get().search(
             query,
@@ -190,7 +191,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
     @server.tool()
     @timed
     def list_project(project: str, vault: str | None = None) -> dict:
-        """All notes of a project in any folder, with type, status and description, with stage, state, next action."""
+        """All notes of a project in any folder, with type, status, description and class and validity when given."""
         return get().list_project(project, vault=vault)
 
     @server.tool()

@@ -134,15 +134,19 @@ class Tools:
             where += " AND n.vault = ?"
             params.append(vault)
         rows = self.conn.execute(
-            f"SELECT vault, path, title, type, status, description FROM notes n WHERE {where}{self._visible()}"
+            "SELECT vault, path, title, type, status, description, note_class, validity FROM notes n"
+            f" WHERE {where}{self._visible()}"
             " ORDER BY vault, path",
             params,
         ).fetchall()
         by_vault: dict[str, list[dict]] = {}
-        for v, path, title, type_, status, description in rows:
-            by_vault.setdefault(v, []).append(
-                {"path": path, "title": title, "type": type_, "status": status, "description": description}
-            )
+        for v, path, title, type_, status, description, note_class, validity in rows:
+            note = {"path": path, "title": title, "type": type_, "status": status, "description": description}
+            if note_class:
+                note["class"] = note_class
+            if validity:
+                note["validity"] = validity
+            by_vault.setdefault(v, []).append(note)
         results = [{**self._project_info(v, project), "notes": notes} for v, notes in by_vault.items()]
         return {"results": results, "warnings": warnings}
 

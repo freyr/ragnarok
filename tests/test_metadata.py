@@ -260,6 +260,61 @@ def test_a_note_without_kb_keys_has_no_labels(vault):
     assert (m.note_class, m.validity, m.as_of, m.superseded_by) == (None, None, None, None)
 
 
+@pytest.mark.parametrize(
+    "raw_type, expected",
+    [
+        ("research", "record"),
+        ("meeting", "record"),
+        ("log", "record"),
+        ("review", "record"),
+        ("decision", "record"),
+        ("plan", "proposal"),
+        ("brainstorm", "proposal"),
+        ("spec", "proposal"),
+        ("guide", "state"),
+        ("reference", "state"),
+        ("summary", "state"),
+        ("drivers", "state"),
+        ("note", None),
+        ("template", None),
+        ("entity", None),
+        ("something-else", None),
+        ("investigation", "record"),  # a raw type: the default follows the mapped type research
+        ("how-to", "state"),  # mapped to guide
+    ],
+)
+def test_class_defaults_from_the_normalized_type(vault, raw_type, expected):
+    m = resolve(vault, "Home/Heating/notes/boiler.md", {"type": raw_type})
+    assert m.note_class == expected
+    assert m.validity is None  # a default class gives no validity
+
+
+def test_class_defaults_from_a_path_type(vault):
+    assert resolve(vault, "Home/Heating/SUMMARY.md", {}).note_class == "state"
+    assert resolve(vault, "Home/Heating/notes/boiler.md", {}).note_class is None
+
+
+def test_an_explicit_class_wins_over_the_default(vault):
+    m = resolve(vault, "Home/Heating/notes/boiler.md", {"type": "research", "class": "State"})
+    assert m.note_class == "state"
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (["[[boiler|the boiler]]", "[[Home/Heating/pump#Flow]]"], ["boiler", "Home/Heating/pump"]),
+        ("[[boiler]]", ["boiler"]),
+        ("plain topic", ["plain topic"]),
+        ([["boiler"], ["pump"]], ["boiler", "pump"]),  # unquoted wiki-links are nested lists in YAML
+        (None, []),
+        ([], []),
+    ],
+)
+def test_subject_targets_come_from_frontmatter(vault, value, expected):
+    fm = {} if value is None else {"subject": value}
+    assert resolve(vault, "Home/Heating/notes/boiler.md", fm).subject == expected
+
+
 def test_summary_stage_does_not_reach_notes_outside_the_project(vault):
     (vault.root / "Home/Heating/SUMMARY.md").write_text("---\nstage: DONE\n---\n# Heating\n")
     assert meta(vault, "Home/Astro/Theory/Field Stop.md").status == "active"

@@ -93,7 +93,8 @@ def test_hit_has_ranks_and_snippet(index):
 @pytest.fixture
 def labeled(vault):
     notes = {
-        "Home/Heating/notes/boiler.md": "---\nclass: state\nvalidity: current\nas_of: 2026-11-01\n---\n"
+        "Home/Heating/notes/boiler.md": "---\nclass: state\nvalidity: current\nas_of: 2026-11-01\n"
+        "subject:\n  - '[[pump]]'\n  - '[[valve|v]]'\n---\n"
         "# Boiler\nThe boiler flow temperature is 45 degrees.\n",
         "Home/Heating/notes/boiler-2025.md": "---\nclass: state\nsuperseded_by: '[[boiler]]'\n---\n"
         "# Boiler 2025\nThe boiler flow temperature was 55 degrees.\n",
@@ -128,7 +129,11 @@ def test_hit_shows_the_kb_labels(labeled):
     hits = {h.path: h.as_dict() for h in search(cfg, conn, emb, "boiler", include_superseded=True, limit=50)}
     current = hits["Home/Heating/notes/boiler.md"]
     assert (current["class"], current["validity"], current["as_of"]) == ("state", "current", "2026-11-01")
+    assert current["subject"] == ["pump", "valve"]
     old = hits["Home/Heating/notes/boiler-2025.md"]
+    assert "subject" not in old
     assert (old["validity"], old["superseded_by"]) == ("superseded", "boiler")
-    unlabeled = next(h for p, h in hits.items() if not p.startswith("Home/Heating/notes/boiler"))
-    assert not {"class", "validity", "as_of", "superseded_by"} & unlabeled.keys()
+    unlabeled = next(
+        h for p, h in hits.items() if h["type"] == "note" and not p.startswith("Home/Heating/notes/boiler")
+    )
+    assert not {"class", "validity", "as_of", "superseded_by", "subject"} & unlabeled.keys()

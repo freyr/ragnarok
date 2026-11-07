@@ -43,17 +43,21 @@ def count(conn, sql):
 
 
 def test_an_index_without_the_kb_columns_gets_them_and_derives_the_notes_again(cfg):
-    (cfg.root / "Home/Heating/notes/boiler.md").write_text("---\nclass: state\nvalidity: current\n---\n# Boiler\n")
+    (cfg.root / "Home/Heating/notes/boiler.md").write_text(
+        "---\nclass: state\nvalidity: current\nsubject:\n  - '[[pump]]'\n  - '[[valve|v]]'\n---\n# Boiler\n"
+    )
     conn, emb, _ = build(cfg)
-    for column in ("note_class", "validity", "as_of", "superseded_by"):
+    for column in ("note_class", "validity", "as_of", "superseded_by", "subject"):
         conn.execute(f"ALTER TABLE notes DROP COLUMN {column}")
     conn.commit()
     conn.close()
     conn = connect(cfg)
     result = update(cfg, conn, emb)
     assert result.rederived >= 1 and result.embedded == 0
-    row = conn.execute("SELECT note_class, validity FROM notes WHERE path = 'Home/Heating/notes/boiler.md'").fetchone()
-    assert row == ("state", "current")
+    row = conn.execute(
+        "SELECT note_class, validity, subject FROM notes WHERE path = 'Home/Heating/notes/boiler.md'"
+    ).fetchone()
+    assert row == ("state", "current", "pump\nvalve")
 
 
 def test_full_index_then_no_new_embeddings(cfg):

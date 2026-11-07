@@ -48,6 +48,22 @@ FOLDER_TYPES = {
     "99-Templates": "template",
 }
 
+# the knowledge-base class that a note gets from its type when it gives no `class`; other types get none
+DEFAULT_CLASS = {
+    "research": "record",
+    "meeting": "record",
+    "log": "record",
+    "review": "record",
+    "decision": "record",
+    "plan": "proposal",
+    "brainstorm": "proposal",
+    "spec": "proposal",
+    "guide": "state",
+    "reference": "state",
+    "summary": "state",
+    "drivers": "state",
+}
+
 # existing raw `type:` values -> schema types
 TYPE_MAP = {
     "research": "research",
@@ -110,6 +126,7 @@ class NoteMeta:
     validity: str | None = None  # current, superseded, open, accepted or rejected
     as_of: str | None = None
     superseded_by: str | None = None  # the target of the `superseded_by` link
+    subject: list[str] = field(default_factory=list)  # the targets of the `subject` links
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -314,6 +331,7 @@ def resolve(
 
     jira = sorted(set(_as_list(fm.get("jira"))) | set(find_jira(cfg, vault, body)))
     note_class, validity, as_of, superseded_by = kb_labels(fm)
+    note_class = note_class or DEFAULT_CLASS.get(note_type)
 
     return NoteMeta(
         vault=vault,
@@ -331,6 +349,7 @@ def resolve(
         validity=validity,
         as_of=as_of,
         superseded_by=superseded_by,
+        subject=link_targets(fm.get("subject")),
     )
 
 
@@ -340,15 +359,27 @@ def _label(fm: dict, key: str) -> str | None:
     return text or None
 
 
-def _link_target(value) -> str | None:
-    """The target of a wiki-link (or of the first one in a list), without alias, heading and .md."""
-    while isinstance(value, list):  # an unquoted [[x]] is a nested list in YAML
-        value = value[0] if value else None
+def _target(value) -> str | None:
     text = str(value).strip() if value is not None else ""
     if text.startswith("[[") and text.endswith("]]"):
         text = text[2:-2]
     text = text.split("|")[0].split("#")[0].strip().removesuffix(".md")
     return text or None
+
+
+def _link_target(value) -> str | None:
+    """The target of a wiki-link (or of the first one in a list), without alias, heading and .md."""
+    while isinstance(value, list):  # an unquoted [[x]] is a nested list in YAML
+        value = value[0] if value else None
+    return _target(value)
+
+
+def link_targets(value) -> list[str]:
+    """The targets of all wiki-links (or plain strings) of a frontmatter value, in order."""
+    if isinstance(value, list):
+        return [t for item in value for t in link_targets(item)]
+    target = _target(value)
+    return [target] if target else []
 
 
 def kb_labels(fm: dict) -> tuple[str | None, str | None, str | None, str | None]:

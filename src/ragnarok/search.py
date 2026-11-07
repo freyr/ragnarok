@@ -45,6 +45,7 @@ class Hit:
     validity: str | None = None
     as_of: str | None = None
     superseded_by: str | None = None
+    subject: list[str] | None = None  # the targets of the `subject` links
 
     def as_dict(self) -> dict:
         """The hit as a dict. The knowledge-base labels appear only when the note has them; note_class is `class`."""
@@ -56,7 +57,7 @@ class Hit:
         return d
 
 
-KB_LABELS = ("note_class", "validity", "as_of", "superseded_by")
+KB_LABELS = ("note_class", "validity", "as_of", "superseded_by", "subject")
 HIDDEN_VALIDITY = ("superseded", "rejected")
 
 
@@ -171,11 +172,12 @@ def search(
     for nid in top:
         n = conn.execute(
             "SELECT path, vault, title, project, area, type, status, description, note_class, validity, as_of,"
-            " superseded_by FROM notes WHERE id = ?",
+            " superseded_by, subject FROM notes WHERE id = ?",
             (nid,),
         ).fetchone()
         heading, text = conn.execute("SELECT heading, text FROM chunks WHERE id = ?", (best[nid][1],)).fetchone()
         words = text.split()
         snippet = " ".join(words[:SNIPPET_WORDS]) + (" …" if len(words) > SNIPPET_WORDS else "")
-        hits.append(Hit(*n[:8], heading, snippet, round(scores[nid], 5), *ranks[nid], *n[8:]))
+        subject = n[12].split("\n") if n[12] else None
+        hits.append(Hit(*n[:8], heading, snippet, round(scores[nid], 5), *ranks[nid], *n[8:12], subject))
     return hits

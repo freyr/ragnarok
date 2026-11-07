@@ -60,6 +60,19 @@ def test_list_project(tools):
     assert [n["path"] for n in result[0]["notes"]] == ["Home/Heating/SUMMARY.md", "Home/Heating/notes/boiler.md"]
 
 
+def test_list_project_shows_class_and_validity_when_the_note_has_them(tools):
+    root = tools.cfg.root
+    (root / "Home/Heating/notes/boiler.md").write_text("---\nclass: state\nvalidity: current\n---\n# Boiler\n")
+    (root / "Home/Heating/notes/plan-valves.md").write_text("---\ntype: plan\n---\n# Valves\n")
+    notes = {n["path"]: n for n in tools.list_project("Heating")["results"][0]["notes"]}
+    boiler = notes["Home/Heating/notes/boiler.md"]
+    assert (boiler["class"], boiler["validity"]) == ("state", "current")
+    assert notes["Home/Heating/notes/plan-valves.md"]["class"] == "proposal"
+    assert "validity" not in notes["Home/Heating/notes/plan-valves.md"]
+    summary = notes["Home/Heating/SUMMARY.md"]
+    assert summary["class"] == "state" and "validity" not in summary
+
+
 def test_open_projects_groups_by_state(tools):
     root = tools.cfg.root
     (root / "Work/Devops/db-resize/SUMMARY.md").write_text(
