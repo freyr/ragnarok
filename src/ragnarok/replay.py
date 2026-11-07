@@ -2,8 +2,10 @@
 
 `build` makes the cases from the index and its mirror (the configured vaults):
 - a positive case is one newer note with the old notes that it replaces, from the resolved `superseded_by` refs
-  (a `supersedes` entry adds no pair);
-- a pair (old, newer) with an equal normalized body is a duplicate case only (expected action `same`);
+  and the resolved wiki-links of `supersedes` (a free-text entry adds no pair);
+- each group of notes with an equal normalized body (layer D0, the whole mirror) is a duplicate case: the draft is
+  the note with the last path, the expected action is `same` for each other note. A supersession pair with an
+  equal body is a duplicate case only;
 - a negative case (expected action `new`) is a sampled note in no case, with no shared `subject`, no resolved
   wiki-link in or out, and a best chunk distance to the chunks of the other notes above a frozen limit.
 Each case has two draft forms (`bare`: the body only; `typed`: the body with the newer note's own `type`,
@@ -34,7 +36,7 @@ import numpy as np
 
 from .collisions import SOURCES, find_collisions
 from .config import Config
-from .metadata import iter_notes, normalize_alias, parse_note
+from .metadata import iter_notes, link_targets, normalize_alias, parse_note
 from .validate import _Context, _link, body_links
 
 MARKER = ".ragnarok-bench"
@@ -134,8 +136,14 @@ def _expected(notes: _Notes, newer: str, old: str) -> str:
     return "supersede"
 
 
+def _wiki_targets(value) -> set[str]:
+    """The targets of the wiki-link entries of a supersedes value (free text is left out)."""
+    items = value if isinstance(value, list) else [value]
+    return {t for v in items if _link(v) is not None for t in link_targets(v)}
+
+
 def _pairs(notes: _Notes, conn: sqlite3.Connection, counts: dict) -> dict[str, list[str]]:
-    """{newer path: old paths} from the resolved superseded_by refs."""
+    """{newer path: old paths} from the resolved superseded_by refs and the resolved supersedes wiki-links."""
     rows = conn.execute(
         "SELECT n.path, r.to_note FROM refs r JOIN notes n ON n.id = r.note_id"
         " WHERE r.key = 'superseded_by' ORDER BY n.path"
@@ -153,7 +161,29 @@ def _pairs(notes: _Notes, conn: sqlite3.Connection, counts: dict) -> dict[str, l
         newer = notes.path_of[to]
         if newer != old:
             groups.setdefault(newer, set()).add(old)
+    rows = conn.execute(
+        "SELECT n.path, r.target, r.to_note FROM refs r JOIN notes n ON n.id = r.note_id"
+        " WHERE r.key = 'supersedes' ORDER BY n.path"
+    ).fetchall()
+    counts.update(supersedes_refs=len(rows), supersedes_pairs=0)
+    for newer, target, to in rows:
+        if to is None or target not in _wiki_targets(notes.get(newer)[0].get("supersedes")):
+            continue
+        old = notes.path_of[to]
+        if old != newer and old not in groups.get(newer, set()):
+            groups.setdefault(newer, set()).add(old)
+            counts["supersedes_pairs"] += 1
     return {newer: sorted(olds) for newer, olds in groups.items()}
+
+
+def _equal_bodies(notes: _Notes) -> list[list[str]]:
+    """The groups (sorted paths) of two or more notes with an equal, not empty, normalized body."""
+    groups: dict[str, list[str]] = {}
+    for path in sorted(notes.ctx.ids):
+        body = notes.get(path)[1]
+        if normalize(body):
+            groups.setdefault(body_hash(body), []).append(path)
+    return [g for g in groups.values() if len(g) > 1]
 
 
 def build(
@@ -171,16 +201,18 @@ def build(
     notes = _Notes(cfg, conn)
     counts: dict = {}
     groups = _pairs(notes, conn, counts)
-    positives, duplicates = [], []
+    equal = _equal_bodies(notes)
+    duplicates = [
+        _case(notes, "duplicate", g[-1], [{"path": old, "expected": "same", "similarity": 1.0} for old in g[:-1]])
+        for g in equal
+    ]
+    positives = []
     for newer in sorted(groups):
         new_body = notes.get(newer)[1]
         kept = []
         for old in groups[newer]:
             if body_hash(notes.get(old)[1]) == body_hash(new_body):
-                duplicates.append(
-                    _case(notes, "duplicate", newer, [{"path": old, "expected": "same", "similarity": 1.0}])
-                )
-                continue
+                continue  # a duplicate case only
             ratio = round(similarity(notes.get(old)[1], new_body), 4)
             kept.append({"path": old, "expected": _expected(notes, newer, old), "similarity": ratio})
         if not kept:
@@ -190,7 +222,7 @@ def build(
             "moved_copy" if all(o["similarity"] >= copy_similarity for o in kept) else "content_change"
         )
         positives.append(case)
-    duplicates.sort(key=lambda c: (c["newer"], c["old"][0]["path"]))
+    duplicates.sort(key=lambda c: c["newer"])
     for prefix, group in (("p", positives), ("d", duplicates)):
         for i, case in enumerate(group, start=1):
             case["id"] = f"{prefix}{i:03d}"
@@ -216,6 +248,7 @@ def build(
         content_change=sum(c["positive_kind"] == "content_change" for c in positives),
         old_notes=len(olds),
         duplicate=len(duplicates),
+        duplicate_targets=sum(len(c["old"]) for c in duplicates),
         negative=len(negatives),
         leak=sum(c["leak"] for c in positives),
         duplicate_leak=sum(c["leak"] for c in duplicates),
@@ -314,11 +347,12 @@ def format_build(manifest: dict) -> str:
         f"positive cases: {c['positive']} (moved_copy {c['moved_copy']}, content_change {c['content_change']}),"
         f" old notes {c['old_notes']} (merge {c['merge']}, supersede {c['supersede']}),"
         f" leak {c['leak']}, identity key {c['identity_key']}, private old notes {c['private_old']}",
-        f"duplicate cases: {c['duplicate']} (leak {c['duplicate_leak']})",
+        f"duplicate cases: {c['duplicate']} (targets {c['duplicate_targets']}, leak {c['duplicate_leak']})",
         f"negative cases: {c['negative']}",
         f"superseded_by refs: {c['superseded_by_refs']}, newer notes {c['newer_notes']},"
         f" bare paths resolved {c['bare_resolved']}, dropped {c['bare_dropped']},"
-        f" unresolved links {c['unresolved_links']}",
+        f" unresolved links {c['unresolved_links']}; supersedes refs {c['supersedes_refs']},"
+        f" pairs added {c['supersedes_pairs']}",
         "negative notes that qualify: " + ", ".join(f"D {d}: {n}" for d, n in manifest["negative_qualifying"].items()),
         f"cases sha256: {manifest['cases_sha256']}",
         f"mirror sha256: {manifest['mirror_sha256']} ({manifest['mirror_notes']} notes)",
@@ -380,7 +414,8 @@ def _rate(hits: int, n: int) -> dict:
 
 
 def summarize(records: list[dict]) -> dict:
-    """R1 with the Wilson interval for each draft form and subset, and the share of old notes of each source."""
+    """R1 with the Wilson interval for each draft form and subset, and for each source (a hit when the source
+    found every old note of the case). The share of old notes that each source found is an extra count."""
     summary = {}
     for form in FORMS:
         mine = [r for r in records if r["form"] == form]
@@ -397,10 +432,14 @@ def summarize(records: list[dict]) -> dict:
         olds = [o for r in mine for o in r["old"]]
         out["sources"] = {}
         for source in SOURCES:
+            hits = sum(all(source in o["reasons"] for o in r["old"]) for r in mine)
             found = sum(source in o["reasons"] for o in olds)
-            low, high = wilson(found, len(olds))
-            share = found / len(olds) if olds else None
-            out["sources"][source] = {"found": found, "old_notes": len(olds), "share": share, "low": low, "high": high}
+            out["sources"][source] = {
+                **_rate(hits, len(mine)),
+                "old_found": found,
+                "old_notes": len(olds),
+                "old_share": found / len(olds) if olds else None,
+            }
         summary[form] = out
     return summary
 
@@ -420,7 +459,7 @@ def format_summary(summary: dict) -> str:
             )
         for source, s in out["sources"].items():
             lines.append(
-                f"{form:6} {source:20} {s['found']:>4}/{s['old_notes']:<4} old notes {_num(s['share'])}"
-                f"  {_num(s['low'])} - {_num(s['high'])}"
+                f"{form:6} {source:15} {s['hits']:>4}/{s['cases']:<4} {_num(s['r1']):>6}"
+                f"  {_num(s['low'])} - {_num(s['high'])}  old notes {s['old_found']}/{s['old_notes']}"
             )
     return "\n".join(lines)

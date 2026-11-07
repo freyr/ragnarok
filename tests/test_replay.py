@@ -69,8 +69,8 @@ NOTES = {
     OLD_X: "---\nsuperseded_by: Docs/nothing-here\n---\n# Old X\nThe boiler draft.\n",
     # a wiki-link that resolves to no note
     OLD_Y: "---\nsuperseded_by: '[[missing-note]]'\n---\n# Old Y\nThe boiler sketch.\n",
-    # supersedes alone (free text that names an entity alias, and a link) makes no pair
-    NEW_F: "---\nsupersedes: ['Pump', '[[old-z]]']\n---\n# Free\nThe boiler fan.\n",
+    # free text (that names an entity alias) and an unresolved link in supersedes make no pair
+    NEW_F: "---\nsupersedes: ['Pump', '[[missing-z]]']\n---\n# Free\nThe boiler fan.\n",
     OLD_Z: "# Old Z\nThe boiler plan.\n",
     NEW_M: "---\ntype: guide\nproject: heat\n---\n" + MOVED.format("night"),
     OLD_M: "---\ntype: guide\nsuperseded_by: '[[new-m]]'\n---\n" + MOVED.format("morning"),
@@ -161,12 +161,26 @@ def test_a_bare_path_counts_only_when_it_resolves(built):
     assert built.counts["unresolved_links"] == 1
 
 
-def test_supersedes_gives_no_pair(built):
+def test_free_text_and_unresolved_supersedes_give_no_pair(built):
     assert NEW_F not in by_newer(built)
     every_old = [p for c in built.cases for p in old_paths(c)]
     assert OLD_Z not in every_old and PUMP not in every_old
     # the supersedes link of NEW_A repeats a superseded_by pair: one old note, listed once
     assert old_paths(by_newer(built)[NEW_A]).count(OLD_A1) == 1
+    assert built.counts["supersedes_refs"] == 4
+    assert built.counts["supersedes_pairs"] == 0
+
+
+def test_a_resolved_supersedes_link_adds_a_pair_to_the_note_that_holds_it(cfg, conn):
+    path = cfg.root / NEW_F
+    path.write_text("---\nsupersedes: ['Pump', '[[old-z]]', '[[missing-z]]']\n---\n# Free\nThe boiler fan.\n")
+    update(cfg, conn, TopicEmbedder())
+    result = replay.build(cfg, conn)
+    case = by_newer(result)[NEW_F]
+    assert old_paths(case) == [OLD_Z]  # not the entity that the free text names
+    assert case["old"][0]["expected"] == "supersede"
+    assert old_paths(by_newer(result)[NEW_A]).count(OLD_A1) == 1
+    assert result.counts["supersedes_pairs"] == 1
 
 
 def test_an_equal_body_pair_is_a_duplicate_case_only(built):
@@ -178,6 +192,27 @@ def test_an_equal_body_pair_is_a_duplicate_case_only(built):
     assert all(c["old"][0]["expected"] == "same" for c in dups)
     assert old_paths(by_newer(built)[NEW_D]) == [OLD_D2]  # OLD_D1 left the positive case
     assert NEW_E not in by_newer(built)  # no old note left: no positive case
+
+
+def test_equal_body_notes_across_the_mirror_are_one_duplicate_case(cfg, conn):
+    tpl = ["V/Misc/tpl-a.md", "V/Misc/tpl-b.md", "V/Zed/tpl-c.md"]
+    extra = {rel: f"---\ntype: guide\nn: {i}\n---\n# Template\n\nThe boiler   form.\n" for i, rel in enumerate(tpl)}
+    extra["V/Misc/empty-1.md"] = "---\ntype: guide\n---\n"
+    extra["V/Misc/empty-2.md"] = "---\ntype: guide\n---\n\n"
+    for rel, text in extra.items():
+        (cfg.root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (cfg.root / rel).write_text(text)
+    update(cfg, conn, TopicEmbedder())
+    dups = cases_of(replay.build(cfg, conn), "duplicate")
+    assert [(c["id"], c["newer"], old_paths(c)) for c in dups] == [
+        ("d001", NEW_D, [OLD_D1]),
+        ("d002", NEW_E, [OLD_E]),
+        ("d003", "V/Zed/tpl-c.md", ["V/Misc/tpl-a.md", "V/Misc/tpl-b.md"]),  # the draft: the last path
+    ]
+    group = dups[2]
+    assert [o["expected"] for o in group["old"]] == ["same", "same"]
+    assert group["start_state"] == {"exclude": "V/Zed/tpl-c.md", "remove_keys": {tpl[0]: [], tpl[1]: []}}
+    assert parse_note(group["drafts"]["typed"])[0] == {"type": "guide"}
 
 
 def test_moved_copy_or_content_change_by_the_similarity(cfg, conn, built):
@@ -335,11 +370,18 @@ def test_the_summary_for_each_form_and_subset():
     assert (bare["moved_copy"]["hits"], bare["moved_copy"]["cases"]) == (5, 5)
     assert (bare["content_change"]["hits"], bare["content_change"]["cases"]) == (4, 5)
     sources = bare["sources"]
-    assert (sources["search"]["found"], sources["search"]["old_notes"]) == (10, 11)
-    assert sources["links_out"]["found"] == 2
-    assert sources["identity"]["found"] == 2
-    assert sources["links_to_supersedes"]["found"] == 0
-    assert sources["links_out"]["share"] == pytest.approx(2 / 11)
+    # per case: a hit when the source found every old note of the case
+    assert (sources["search"]["hits"], sources["search"]["cases"]) == (9, 10)
+    assert sources["search"]["low"] == pytest.approx(0.59585, abs=1e-4)
+    assert (sources["links_out"]["hits"], sources["identity"]["hits"]) == (2, 2)
+    assert sources["links_out"]["r1"] == pytest.approx(0.2)
+    assert sources["links_out"]["low"] == pytest.approx(0.05668, abs=1e-4)
+    assert sources["links_out"]["high"] == pytest.approx(0.50984, abs=1e-4)
+    assert sources["links_to_supersedes"]["hits"] == 0
+    # per old note: a count with no interval
+    assert (sources["search"]["old_found"], sources["search"]["old_notes"]) == (10, 11)
+    assert sources["links_out"]["old_share"] == pytest.approx(2 / 11)
+    assert "old_low" not in sources["links_out"]
     assert (typed["all"]["hits"], typed["all"]["cases"]) == (5, 10)
     assert (typed["no_leak"]["hits"], typed["no_leak"]["cases"]) == (3, 8)
     assert (typed["content_change"]["hits"], typed["content_change"]["cases"]) == (0, 5)
