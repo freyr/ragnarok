@@ -226,6 +226,32 @@ def test_an_equal_body_below_min_words_is_no_duplicate_case(cfg, conn):
     assert [c["newer"] for c in dups] == [NEW_D, NEW_E]  # the 2-word stub pair gives no case
 
 
+def test_a_wiki_link_compares_by_its_display_text():
+    assert replay.normalize("See [[Docs/Old/pump.md|the pump]] and ![[img/a.png]].") == "See the pump and a.png."
+    assert replay.normalize("See [[V/Entities/Pump#Valves]], [[pump^b1]], [[#Top]]") == "See Pump, pump, Top"
+    assert replay.normalize("A [[x]]\n\n  [[a/b|c]]") == "A x c"
+    assert replay.body_hash("See [[Area/Old/pump]].") == replay.body_hash("See [[New/Place/pump.md]].")
+    assert replay.body_hash("See [[pump]].") != replay.body_hash("See [[pump|the pump]].")
+    assert replay.similarity("one [[A/x]] two", "one [[B/x|x]] two") == 1.0
+    assert "wiki-link" in replay.NORMALIZATION and "normalized bodies" in replay.SIMILARITY
+
+
+def test_a_moved_note_with_rewritten_link_targets_is_a_duplicate_only(cfg, conn):
+    body = "# Guide\nThe valve opens at noon. See [[{}]] and [[{}|the curve]].\n"
+    extra = {
+        "V/Archive/guide-old.md": "---\nsuperseded_by: '[[guide-new]]'\n---\n" + body.format("Old/pump", "Old/c"),
+        "V/Docs/guide-new.md": "---\ntype: guide\n---\n" + body.format("V/Entities/pump.md", "V/Docs/curve"),
+    }
+    for rel, text in extra.items():
+        (cfg.root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (cfg.root / rel).write_text(text)
+    update(cfg, conn, TopicEmbedder())
+    result = replay.build(cfg, conn)
+    dup = by_newer(result, "duplicate")["V/Docs/guide-new.md"]
+    assert old_paths(dup) == ["V/Archive/guide-old.md"] and dup["old"][0]["expected"] == "same"
+    assert "V/Docs/guide-new.md" not in by_newer(result)  # a duplicate case only, no positive case
+
+
 def test_moved_copy_or_content_change_by_the_similarity(cfg, conn, built):
     cases = by_newer(built)
     assert cases[NEW_M]["positive_kind"] == "moved_copy"
@@ -466,6 +492,8 @@ def test_build_writes_the_set_the_manifest_and_the_marker(cli, cfg, tmp_path, ca
     assert manifest["counts"]["positive"] == 3 and manifest["counts"]["duplicate"] == 2
     assert manifest["parameters"]["copy_similarity"] == 0.9
     assert manifest["parameters"]["neg_count"] == 0
+    assert manifest["parameters"]["body_normalization"] == replay.NORMALIZATION
+    assert manifest["parameters"]["similarity_measure"] == replay.SIMILARITY
     assert "commit" in manifest
     printed = capsys.readouterr().out
     assert "0.30" in printed and "positive" in printed

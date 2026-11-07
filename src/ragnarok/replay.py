@@ -5,7 +5,10 @@
   and the resolved wiki-links of `supersedes` (a free-text entry adds no pair);
 - each group of notes with an equal normalized body of at least `min_words` words (layer D0, the whole mirror)
   is a duplicate case: the draft is the note with the last path, the expected action is `same` for each other
-  note. A supersession pair in such a group is a duplicate case only;
+  note. A supersession pair in such a group is a duplicate case only. The normalization (`NORMALIZATION`, recorded
+  in the manifest) replaces each wiki-link by its display text before it collapses whitespace, so a moved note
+  whose only change is rewritten link targets with the same display text is a duplicate. The similarity of the
+  moved-copy split uses the same normalization;
 - a negative case (expected action `new`) is a sampled note in no case, with no shared `subject`, no resolved
   wiki-link in or out, and a best chunk distance to the chunks of the other notes above a frozen limit.
 Each case has two draft forms (`bare`: the body only; `typed`: the body with the newer note's own `type`,
@@ -25,6 +28,7 @@ import hashlib
 import json
 import math
 import random
+import re
 import sqlite3
 import subprocess
 from dataclasses import dataclass, field
@@ -46,7 +50,14 @@ REMOVED_KEYS = ("supersedes", "superseded_by", "validity")
 DISTANCES = (0.15, 0.20, 0.25, 0.30)
 SUBSETS = ("all", "no_leak", "moved_copy", "content_change")
 Z = 1.96  # the 95% interval
-SIMILARITY = "difflib.SequenceMatcher ratio of the word lists of the normalized bodies, autojunk off"
+WIKI_LINK = re.compile(r"!?\[\[([^\[\]\n]*)\]\]")
+NORMALIZATION = (
+    "each wiki-link ([[t]], [[t|alias]], [[t#heading]], ![[t]]) replaced by its display text (the alias, else the"
+    " last path segment of the target without .md and #heading), then whitespace collapsed to single spaces"
+)
+SIMILARITY = (
+    "difflib.SequenceMatcher ratio of the word lists of the normalized bodies (body_normalization), autojunk off"
+)
 
 
 @dataclass
@@ -59,9 +70,22 @@ class ReplaySet:
 # --- bodies and drafts -------------------------------------------------------------------------------------------
 
 
+def _display(match: re.Match) -> str:
+    """The display text of a wiki-link: the alias, else the last path segment of the target, without .md, the
+    heading and the block id (a link to a heading of the same note shows the heading)."""
+    inner = match.group(1)
+    if "|" in inner:
+        return inner.split("|", 1)[1].strip()
+    target = re.split(r"[#^]", inner, maxsplit=1)[0].rstrip("\\").strip()
+    if not target:
+        return inner.lstrip("#^").strip()
+    return target.rsplit("/", 1)[-1].removesuffix(".md")
+
+
 def normalize(body: str) -> str:
-    """The body with whitespace collapsed to single spaces."""
-    return " ".join(body.split())
+    """The body with each wiki-link replaced by its display text and whitespace collapsed to single spaces (see
+    NORMALIZATION). Code is not treated apart: both bodies of a comparison get the same change."""
+    return " ".join(WIKI_LINK.sub(_display, body).split())
 
 
 def body_hash(body: str) -> str:
@@ -325,7 +349,7 @@ def write_set(cfg: Config, out: Path, result: ReplaySet, parameters: dict) -> di
     (out / "cases.jsonl").write_bytes(data)
     mirror, count = mirror_hash(cfg)
     manifest = {
-        "parameters": {**parameters, "similarity_measure": SIMILARITY},
+        "parameters": {**parameters, "body_normalization": NORMALIZATION, "similarity_measure": SIMILARITY},
         "commit": code_commit(),
         "counts": result.counts,
         "negative_qualifying": result.qualifying,

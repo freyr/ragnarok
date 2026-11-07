@@ -294,6 +294,72 @@ def test_a_merge_into_another_target_than_the_expected_one_is_wrong():
     assert s["category"] == "merge-for-supersede" and s["merge_target"] == OLDS[1]
 
 
+ENTITY = "V/Entities/Heat pump.md"
+ENTITY_TEXT = note("# Heat pump\nA heat pump of the house.\n", type="entity", kind="product")
+
+
+def test_a_created_entity_note_is_no_extra_write_for_any_action():
+    # supersede: the new note and a new entity note
+    good = superseded()
+    notes = texts({o: good.before(o) for o in OLDS}, {**{k: good.after(k) for k in [*OLDS, "V/new.md"]},
+                                                       ENTITY: ENTITY_TEXT})  # fmt: skip
+    s = rr.score(POSITIVE, rec("supersede", OLDS, written=True), diff([ENTITY, "V/new.md"], OLDS), notes)
+    assert s["correct"] and s["extra_writes"] == [] and s["entity_notes"] == [ENTITY]
+    # merge
+    good = merged()
+    notes = texts({"V/state.md": good.before("V/state.md")}, {"V/state.md": good.after("V/state.md"),
+                                                              ENTITY: ENTITY_TEXT}, good.as_of)  # fmt: skip
+    s = rr.score(MERGE, rec("merge", ["V/state.md"], written=True), diff([ENTITY], ["V/state.md"]), notes)
+    assert s["correct"] and s["entity_notes"] == [ENTITY]
+    # new: the entity note sorts before the new note and does not take its place
+    notes = texts({}, {ENTITY: ENTITY_TEXT, "V/fresh.md": note()})
+    s = rr.score(NEGATIVE, rec("new", [], written=True), diff([ENTITY, "V/fresh.md"]), notes)
+    assert s["correct"] and s["entity_notes"] == [ENTITY]
+    # same and link: only the entity note is created
+    notes = texts({}, {ENTITY: ENTITY_TEXT})
+    s = rr.score(DUPLICATE, rec("same", ["V/dup.md"], written=True), diff([ENTITY]), notes)
+    assert s["correct"] and s["entity_notes"] == [ENTITY]
+    s = rr.score(DUPLICATE, rec("link", ["V/dup.md"], written=True), diff([ENTITY]), notes)
+    assert s["extra_writes"] == [] and s["entity_notes"] == [ENTITY] and s["reasons"] == ["action"]
+
+
+def test_a_created_entity_note_needs_the_note_texts_and_type_entity():
+    # without the texts: the current rule, an extra write
+    s = rr.score(DUPLICATE, rec("same", ["V/dup.md"]), diff([ENTITY]))
+    assert s["extra_writes"] == [f"created {ENTITY}"] and s["entity_notes"] == []
+    # a created note of another type is still an extra write
+    notes = texts({}, {"V/other.md": note(type="guide")})
+    s = rr.score(DUPLICATE, rec("same", ["V/dup.md"]), diff(["V/other.md"]), notes)
+    assert s["extra_writes"] == ["created V/other.md"] and s["entity_notes"] == []
+    # the only created note of a new is an entity (the draft is an entity): it is the new note
+    notes = texts({}, {ENTITY: ENTITY_TEXT})
+    s = rr.score(NEGATIVE, rec("new", [], written=True), diff([ENTITY]), notes)
+    assert s["correct"] and s["entity_notes"] == []
+
+
+def test_open_conflicts_are_reported_and_do_not_change_the_score():
+    conflicts = [{"path": "V/third.md", "draft_claim": "a", "candidate_claim": "b"}, "V/fourth.md"]
+    record = rec("same", ["V/dup.md"], open_conflicts=conflicts)
+    assert rr.parse_record(f"{rr.PREFIX} {json.dumps(record)}") == (record, None)
+    s = rr.score(DUPLICATE, record, EMPTY)
+    assert s["correct"] and s["open_conflicts"] == ["V/fourth.md", "V/third.md"]
+    assert rr.score(DUPLICATE, rec("same", ["V/dup.md"]), EMPTY)["open_conflicts"] == []
+    assert rr.score(DUPLICATE, rec("same", ["V/dup.md"], open_conflicts="bad"), EMPTY)["correct"]
+
+
+def test_the_summary_counts_entity_notes_and_open_conflicts():
+    notes = texts({}, {ENTITY: ENTITY_TEXT})
+    record = rec("same", ["V/dup.md"], written=True, open_conflicts=[{"path": "V/a.md"}, {"path": "V/b.md"}])
+    rows = [
+        {"kind": "duplicate", "positive_kind": None, "score": rr.score(DUPLICATE, record, diff([ENTITY]), notes)},
+        {"kind": "duplicate", "positive_kind": None, "score": rr.score(DUPLICATE, None, EMPTY)},
+        {"kind": "negative", "positive_kind": None, "score": {"correct": False, "category": "failed"}},
+    ]
+    s = rr.summarize(rows)
+    assert s["entity_notes"] == 1 and s["open_conflicts"] == 2
+    assert "entity notes 1" in rr.format_summary(s)
+
+
 def test_the_bash_sandbox_closes_the_paths_around_the_case_home_and_the_plugin(tmp_path):
     top = tmp_path / "user"
     for rel in ("code/a/runs/r1/case/mirror", "code/a/runs/r0", "code/a/data", "code/plugin/scripts", "code/other",

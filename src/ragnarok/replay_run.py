@@ -31,7 +31,10 @@ The scorer compares the action and the targets of the agent's final record (`KB-
 values of the case, checks that the snapshot diff of the case mirror holds exactly the files of that action, and
 checks the content of a supersede or a merge: the `supersedes`, `superseded_by` and `validity` keys of each note in
 the direction that the skill defines, the expected merge target, and the unchanged body of each superseded note. The
-skill can rewrite the draft text, so the text is not compared.
+skill can rewrite the draft text, so the text is not compared. A created note with `type: entity` (the skill makes
+one when no entity exists for the main topic of the draft) is no extra write of any action; the score lists it in
+`entity_notes`. The `open_conflicts` of the record are reported in the score and do not change it. The summary
+counts both.
 """
 
 from __future__ import annotations
@@ -827,16 +830,48 @@ def merge_target_of(action: str | None, targets: set[str], notes: NoteTexts | No
     return heads[0] if len(heads) == 1 else None
 
 
+def entity_notes_of(action: str | None, diff: dict, notes: NoteTexts | None) -> list[str]:
+    """The created notes with `type: entity` that the skill adds for the main topic of the draft (at most one in a
+    run, but all are listed); they are no extra write of any action. The created note of a new or a supersede comes
+    first from the other created notes: when no other note is created, the first entity note is that note. Empty
+    without the note texts."""
+    if notes is None:
+        return []
+    created = [p for p in diff["created"] if is_note(p)]
+    entities = []
+    for path in created:
+        text = notes.after(path)
+        kind = parse_note(text)[0].get("type") if text is not None else None
+        if str(kind or "").strip().lower() == "entity":
+            entities.append(path)
+    need = 1 if action in ("new", "supersede") else 0
+    return sorted(entities[max(0, need - (len(created) - len(entities))) :])
+
+
+def open_conflicts_of(record: dict | None) -> list[str]:
+    """The paths of the `open_conflicts` of a record (objects with a `path`, or paths); a value of another shape
+    gives none. They do not change the score."""
+    value = (record or {}).get("open_conflicts")
+    if not isinstance(value, list):
+        return []
+    paths = [item.get("path") if isinstance(item, dict) else item for item in value]
+    return sorted(str(p) for p in paths if isinstance(p, str) and p)
+
+
 def score(case: dict, record: dict | None, diff: dict, notes: NoteTexts | None = None) -> dict:
     """The score of one case. A supersede or a merge needs the note texts (notes) for the check of its content;
-    without them it is not correct (`effect-unchecked`)."""
+    without them it is not correct (`effect-unchecked`). A created entity note (`entity_notes_of`) is left out of
+    the check of the writes; with one, the written flag must be true. The `open_conflicts` of the record are only
+    reported."""
     expected, expected_targets = expected_of(case)
     action = record.get("action") if record else None
     targets = set(record.get("targets") or []) if record else set()
     action_ok = record is not None and action == expected
     target_ok = record is not None and targets == set(expected_targets)
+    entities = entity_notes_of(action, diff, notes) if record else []
+    diff = {**diff, "created": [p for p in diff["created"] if p not in entities]}
     extra, missing = check_writes(action, targets, diff) if record else ([], [])
-    flag_ok = record is not None and record.get("written") is (action in WRITE_ACTIONS)
+    flag_ok = record is not None and record.get("written") is (action in WRITE_ACTIONS or bool(entities))
     written_ok = record is not None and not extra and not missing and flag_ok
     effect: list[tuple[str, str]] = []
     if record is not None and action in ("supersede", "merge"):
@@ -877,6 +912,8 @@ def score(case: dict, record: dict | None, diff: dict, notes: NoteTexts | None =
         "extra_targets": sorted(targets - set(expected_targets)),
         "extra_writes": extra,
         "missing_writes": missing,
+        "entity_notes": entities,
+        "open_conflicts": open_conflicts_of(record),
         "effect_errors": [detail for _, detail in effect],
         "merge_target": merge_target_of(action, targets, notes),
         "action_ok": action_ok,
@@ -896,8 +933,8 @@ def _rate(rows: list[dict]) -> dict:
 
 
 def summarize(rows: list[dict]) -> dict:
-    """correct / n with the 95% Wilson interval: all, without ask, by kind and by positive kind; the categories and
-    the total cost."""
+    """correct / n with the 95% Wilson interval: all, without ask, by kind and by positive kind; the categories, the
+    total of created entity notes and of open conflicts, and the total cost."""
     kinds = sorted({r["kind"] for r in rows})
     positive_kinds = sorted({r["positive_kind"] for r in rows if r["positive_kind"]})
     return {
@@ -906,6 +943,8 @@ def summarize(rows: list[dict]) -> dict:
         "by_kind": {k: _rate([r for r in rows if r["kind"] == k]) for k in kinds},
         "by_positive_kind": {k: _rate([r for r in rows if r["positive_kind"] == k]) for k in positive_kinds},
         "categories": dict(Counter(r["score"]["category"] for r in rows)),
+        "entity_notes": sum(len(r["score"].get("entity_notes") or []) for r in rows),
+        "open_conflicts": sum(len(r["score"].get("open_conflicts") or []) for r in rows),
         "cost_usd": round(sum(r.get("cost_usd") or 0 for r in rows), 4),
     }
 
@@ -924,6 +963,9 @@ def format_summary(summary: dict) -> str:
             f"{name:24} {r['correct']:>4}/{r['cases']:<4} {_num(r['rate']):>6}  {_num(r['low'])} - {_num(r['high'])}"
         )
     lines.append("categories: " + ", ".join(f"{k} {v}" for k, v in sorted(summary["categories"].items())))
+    lines.append(
+        f"created entity notes {summary.get('entity_notes', 0)}, open conflicts {summary.get('open_conflicts', 0)}"
+    )
     lines.append(f"cost: ${summary['cost_usd']:.2f}")
     if "clean" in summary:
         lines.append(
