@@ -318,3 +318,26 @@ def test_subject_targets_come_from_frontmatter(vault, value, expected):
 def test_summary_stage_does_not_reach_notes_outside_the_project(vault):
     (vault.root / "Home/Heating/SUMMARY.md").write_text("---\nstage: DONE\n---\n# Heating\n")
     assert meta(vault, "Home/Astro/Theory/Field Stop.md").status == "active"
+
+
+def test_an_entity_note_gives_its_kind_and_aliases(vault):
+    fm = {"type": "Entity", "kind": " Device ", "aliases": ["HP", "heat pump", " hp ", "Wärmepumpe"]}
+    m = resolve(vault, "Home/Entities/Heat pump.md", fm)
+    assert (m.entity, m.kind, m.aliases) == (True, "device", ["HP", "heat pump", "Wärmepumpe"])
+    assert m.type == "note"  # the type label does not change
+
+
+def test_a_single_alias_can_be_a_string(vault):
+    m = resolve(vault, "Home/Entities/Heat pump.md", {"type": "entity", "aliases": "HP"})
+    assert (m.entity, m.kind, m.aliases) == (True, None, ["HP"])
+
+
+def test_a_note_that_is_not_an_entity_has_no_kind_or_aliases(vault):
+    m = resolve(vault, "Home/Heating/notes/boiler.md", {"kind": "device", "aliases": ["b"]})
+    assert (m.entity, m.kind, m.aliases) == (False, None, [])
+
+
+def test_owner_and_supersedes_targets_come_from_frontmatter(vault):
+    fm = {"owner": "[[Platform team|team]]", "supersedes": ["[[boiler-2025]]", "[[old/boiler-2024.md]]"]}
+    m = resolve(vault, "Home/Heating/notes/boiler.md", fm)
+    assert (m.owner, m.supersedes) == (["Platform team"], ["boiler-2025", "old/boiler-2024"])

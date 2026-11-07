@@ -137,3 +137,56 @@ def test_hit_shows_the_kb_labels(labeled):
         h for p, h in hits.items() if h["type"] == "note" and not p.startswith("Home/Heating/notes/boiler")
     )
     assert not {"class", "validity", "as_of", "superseded_by", "subject"} & unlabeled.keys()
+
+
+BOILER, PUMP_2025, MOUNT = (
+    "Home/Heating/notes/boiler.md",
+    "Home/Heating/notes/pump-2025.md",
+    "Home/Astro/Theory/mount.md",
+)
+
+
+@pytest.fixture
+def subjects(labeled):
+    """The labeled notes, an entity note Pump (alias circulator) and two more notes about it."""
+    cfg, conn, emb = labeled
+    notes = {
+        "Home/Entities/Pump.md": "---\ntype: entity\nkind: device\naliases: [circulator]\n---\n# Pump\n",
+        PUMP_2025: "---\nclass: state\nvalidity: superseded\nsubject: '[[circulator]]'\n---\n"
+        "# Pump 2025\nThe boiler pump ran at speed 2.\n",
+        MOUNT: "---\nsubject: '[[Home/Entities/Pump]]'\n---\n# Mount\nThe boiler room holds the mount.\n",
+    }
+    for rel, text in notes.items():
+        (cfg.root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (cfg.root / rel).write_text(text)
+    update(cfg, conn, emb)
+    return cfg, conn, emb
+
+
+@pytest.mark.parametrize("value", ["Pump", "pump", "circulator", "CIRCULATOR", "Home/Entities/Pump.md", "[[Pump]]"])
+def test_subject_filter_by_name_alias_or_path(subjects, value):
+    cfg, conn, emb = subjects
+    assert set(paths(search(cfg, conn, emb, "boiler", subject=value, limit=50))) == {BOILER, MOUNT}
+
+
+def test_subject_filter_combines_with_the_other_filters(subjects):
+    cfg, conn, emb = subjects
+    found = paths(search(cfg, conn, emb, "boiler", subject="pump", include_superseded=True, limit=50))
+    assert set(found) == {BOILER, PUMP_2025, MOUNT}
+    found = paths(search(cfg, conn, emb, "boiler", subject="pump", project="Heating", limit=50))
+    assert found == [BOILER]
+
+
+@pytest.mark.parametrize("value", ["nobody", "valve"])  # valve is a subject target, but no entity note
+def test_subject_filter_with_an_unknown_entity_gives_no_results(subjects, value):
+    cfg, conn, emb = subjects
+    assert search(cfg, conn, emb, "boiler", subject=value, limit=50) == []
+
+
+@pytest.mark.parametrize("mode", ["hybrid", "dense", "fts"])
+def test_subject_filter_keeps_the_order_of_the_notes(subjects, mode):
+    cfg, conn, emb = subjects
+    kept = {BOILER, PUMP_2025, MOUNT}
+    every = [p for p in paths(search(cfg, conn, emb, "boiler pump", include_superseded=True, limit=50, mode=mode))]
+    found = paths(search(cfg, conn, emb, "boiler pump", subject="pump", include_superseded=True, limit=50, mode=mode))
+    assert found == [p for p in every if p in kept]

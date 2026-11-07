@@ -6,6 +6,7 @@ Sensitivity comes only from the configured path patterns, never from frontmatter
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import date
@@ -105,6 +106,9 @@ TYPE_MAP = {
     "summary": "summary",
 }
 
+# letters that NFKD does not decompose and that have a clear Latin base
+_FOLD = str.maketrans({"ł": "l", "ø": "o", "đ": "d", "ħ": "h", "ß": "ss", "æ": "ae", "œ": "oe"})
+
 JIRA_RE = re.compile(r"\b([A-Z][A-Z0-9]{1,9})-(\d+)\b")
 
 
@@ -127,6 +131,12 @@ class NoteMeta:
     as_of: str | None = None
     superseded_by: str | None = None  # the target of the `superseded_by` link
     subject: list[str] = field(default_factory=list)  # the targets of the `subject` links
+    owner: list[str] = field(default_factory=list)  # the targets of the `owner` links
+    supersedes: list[str] = field(default_factory=list)  # the targets of the `supersedes` links
+    # an entity note: raw frontmatter `type: entity`; the `type` label stays as resolved
+    entity: bool = False
+    kind: str | None = None
+    aliases: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -332,6 +342,8 @@ def resolve(
     jira = sorted(set(_as_list(fm.get("jira"))) | set(find_jira(cfg, vault, body)))
     note_class, validity, as_of, superseded_by = kb_labels(fm)
     note_class = note_class or DEFAULT_CLASS.get(note_type)
+    entity = raw_type == "entity"
+    kind, aliases = entity_labels(fm) if entity else (None, [])
 
     return NoteMeta(
         vault=vault,
@@ -350,6 +362,11 @@ def resolve(
         as_of=as_of,
         superseded_by=superseded_by,
         subject=link_targets(fm.get("subject")),
+        owner=link_targets(fm.get("owner")),
+        supersedes=link_targets(fm.get("supersedes")),
+        entity=entity,
+        kind=kind,
+        aliases=aliases,
     )
 
 
@@ -390,6 +407,27 @@ def kb_labels(fm: dict) -> tuple[str | None, str | None, str | None, str | None]
     as_of = fm.get("as_of")
     as_of = (as_of.isoformat() if isinstance(as_of, date) else str(as_of).strip()) if as_of is not None else None
     return _label(fm, "class"), validity, as_of or None, successor
+
+
+def normalize_alias(text: str) -> str:
+    """Lower case, no diacritics, single spaces. A letter with no decomposition (such as ł) folds by a map."""
+    decomposed = unicodedata.normalize("NFKD", text)
+    plain = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return " ".join(plain.lower().translate(_FOLD).split())
+
+
+def entity_labels(fm: dict) -> tuple[str | None, list[str]]:
+    """(kind, aliases) of an entity note. The kind is lower case; an alias that repeats another one is dropped."""
+    kind = _label(fm, "kind")
+    value = fm.get("aliases")
+    seen, aliases = set(), []
+    for alias in [value] if isinstance(value, str) else value if isinstance(value, list) else []:
+        text = str(alias).strip()
+        norm = normalize_alias(text)
+        if norm and norm not in seen:
+            seen.add(norm)
+            aliases.append(text)
+    return kind, aliases
 
 
 def resolve_file(cfg: Config, rel: str) -> NoteMeta:

@@ -102,16 +102,17 @@ change of the configuration applies at the next `ragnarok index` or MCP tool cal
 
 ## Use in Claude Code
 
-The server gives six tools:
+The server gives seven tools:
 
 | Tool | What it does |
 |---|---|
-| `search` | Hybrid search over the notes. Filters: vault, project, area, type, archived. |
+| `search` | Hybrid search over the notes. Filters: vault, project, area, type, archived, subject (an entity). |
 | `find_projects` | The projects that match a prompt, with the summary and the matching notes of each project. |
 | `list_project` | All notes of one project. |
 | `open_projects` | The open projects (`state: in-progress` and `paused` by default), grouped by state, newest update first. |
 | `open_note` | The text of a note or of one section, with its links and backlinks. A note of more than 4,000 words gives an outline: each section with its heading path, words and first sentence. |
 | `find_by_jira` | The notes that contain a ticket key, for example `ABC-123`. |
+| `find_entities` | The entity notes (`type: entity`), with kind and aliases. |
 
 The plugin adds the guidance below to each session itself, with the plugin tool names
 `mcp__plugin_ragnarok_ragnarok__*`. Without the plugin, Claude Code loads MCP tools on demand. To make Claude

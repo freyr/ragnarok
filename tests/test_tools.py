@@ -1,5 +1,6 @@
 import asyncio
 import dataclasses
+import json
 import os
 import time
 
@@ -180,10 +181,76 @@ def test_each_call_scans_first(tools):
     assert tools.last_scan["changed"] == 1
 
 
-def test_server_lists_the_six_tools(tools):
+ENTITIES = {
+    "Home/Entities/Pump.md": "---\ntype: entity\nkind: Device\naliases: [circulator, Umwälzpumpe]\n---\n# Pump\n",
+    "Home/Entities/Garage.md": "---\ntype: entity\nkind: room\n---\n# Garage\n",
+    "Home/Entities/Ghost.md": "---\ntype: entity\n---\n# Ghost\n",
+    "Home/Password/Router.md": "---\ntype: entity\nkind: device\n---\n# Router\n",  # private
+    "Home/Heating/notes/valves.md": "---\nkind: device\naliases: [v]\nsubject: '[[pump]]'\n---\n# Valves\n",
+}
+
+
+def write_entities(tools):
+    for rel, text in ENTITIES.items():
+        (tools.cfg.root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tools.cfg.root / rel).write_text(text)
+
+
+def test_find_entities_lists_the_entity_notes(tools):
+    write_entities(tools)
+    assert tools.find_entities() == {
+        "results": [
+            {"path": "Home/Entities/Garage.md", "title": "Garage", "kind": "room", "aliases": []},
+            {"path": "Home/Entities/Ghost.md", "title": "Ghost", "kind": None, "aliases": []},
+            {
+                "path": "Home/Entities/Pump.md",
+                "title": "Pump",
+                "kind": "device",
+                "aliases": ["circulator", "Umwälzpumpe"],
+            },
+        ],
+        "warnings": [],
+    }
+
+
+def test_find_entities_filters_by_kind_and_name(tools):
+    write_entities(tools)
+    found = lambda **f: [r["path"] for r in tools.find_entities(**f)["results"]]  # noqa: E731
+    assert found(kind="DEVICE") == ["Home/Entities/Pump.md"]
+    assert found(name="umwalz") == ["Home/Entities/Pump.md"]  # an alias, any case, no diacritics
+    assert found(name="gar") == ["Home/Entities/Garage.md"]  # the title
+    assert found(name="pump", kind="room") == []
+
+
+def test_find_entities_shows_private_entities_only_when_allowed(tools):
+    write_entities(tools)
+    tools.cfg = dataclasses.replace(tools.cfg, allow_private=True)
+    assert "Home/Password/Router.md" in [r["path"] for r in tools.find_entities(kind="device")["results"]]
+
+
+def test_server_search_takes_a_subject(tools):
+    write_entities(tools)
+    server = build(tools=tools)
+    paths = lambda name, args: [  # noqa: E731
+        r["path"] for r in json.loads(asyncio.run(server.call_tool(name, args)).content[0].text)["results"]
+    ]
+    assert paths("search", {"query": "valves", "subject": "circulator"}) == ["Home/Heating/notes/valves.md"]
+    assert paths("search", {"query": "valves", "subject": "nobody"}) == []
+    assert paths("find_entities", {"name": "garage"}) == ["Home/Entities/Garage.md"]
+
+
+def test_server_lists_the_seven_tools(tools):
     server = build(tools=tools)
     names = {t.name for t in asyncio.run(server.list_tools())}
-    assert names == {"search", "find_projects", "list_project", "open_projects", "open_note", "find_by_jira"}
+    assert names == {
+        "search",
+        "find_projects",
+        "list_project",
+        "open_projects",
+        "open_note",
+        "find_by_jira",
+        "find_entities",
+    }
 
 
 def test_server_errors_carry_their_reason(tools):

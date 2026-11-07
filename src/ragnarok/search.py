@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 import sqlite_vec
 
 from .config import Config
+from .index import find_entity
 
 RRF_K = 60
 CANDIDATES = 200  # chunks from each list
@@ -137,24 +138,37 @@ def search(
     include_archived: bool = True,
     include_private: bool = False,
     include_superseded: bool = False,
+    subject: str | None = None,
     limit: int = 8,
     mode: str = "hybrid",
 ) -> list[Hit]:
-    """Hybrid search. Notes with validity superseded or rejected are left out unless include_superseded."""
+    """Hybrid search. Notes with validity superseded or rejected are left out unless include_superseded.
+
+    subject (an entity name, alias or path) keeps the notes with a subject that resolves to that entity note; an
+    unknown entity gives no results. It applies after the fusion, so the notes that remain keep their order."""
     if include_private and not cfg.allow_private:
         raise PrivateNotAllowed("include_private needs allow_private = true in the configuration")
+    about = None
+    if subject is not None:
+        entity = find_entity(conn, subject)
+        if entity is None:
+            return []
+        rows = conn.execute("SELECT note_id FROM refs WHERE key = 'subject' AND to_note = ?", (entity,))
+        about = {nid for (nid,) in rows}
     note_where, note_params = _note_filters(
         vault, project, area, type, include_archived, include_private, include_superseded
     )
     lists: list[list[tuple[int, int]]] = []
     if mode in ("hybrid", "dense"):
-        k = FILTERED_CANDIDATES if (project or area or type) else CANDIDATES
+        k = FILTERED_CANDIDATES if (project or area or type or subject) else CANDIDATES
         ids = _dense(conn, embedder.embed_query(query), k, vault, include_archived, include_private)
         lists.append(_by_note(conn, ids, note_where, note_params))
     else:
         lists.append([])
     if mode in ("hybrid", "fts"):
-        lists.append(_by_note(conn, _fts(conn, query, CANDIDATES, note_where, note_params), note_where, note_params))
+        # deeper lists for a subject: the ranks of the first candidates do not change
+        k = FILTERED_CANDIDATES if subject else CANDIDATES
+        lists.append(_by_note(conn, _fts(conn, query, k, note_where, note_params), note_where, note_params))
     else:
         lists.append([])
 
@@ -167,7 +181,7 @@ def search(
             ranks.setdefault(nid, [None, None])[li] = rank
             if nid not in best or rank < best[nid][0]:
                 best[nid] = (rank, cid)
-    top = sorted(scores, key=lambda n: -scores[n])[:limit]
+    top = sorted((n for n in scores if about is None or n in about), key=lambda n: -scores[n])[:limit]
     hits = []
     for nid in top:
         n = conn.execute(

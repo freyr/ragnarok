@@ -13,7 +13,7 @@ import sqlite_vec
 
 from .config import Config, rules_hash
 from .embed import input_hash
-from .metadata import iter_notes, read_note, resolve
+from .metadata import iter_notes, link_targets, normalize_alias, read_note, resolve
 from .splitter import chunk_note
 
 SCHEMA_VERSION = 1
@@ -92,6 +92,7 @@ def connect(cfg: Config) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(_schema(cfg.dimension))
     _add_kb_columns(conn)
+    _add_kb_tables(conn)
     expected = {"model": cfg.model, "dimension": str(cfg.dimension), "schema_version": str(SCHEMA_VERSION)}
     stored = dict(conn.execute("SELECT key, value FROM meta").fetchall())
     if not stored:
@@ -123,6 +124,37 @@ def _add_kb_columns(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+# the entity notes and the references of the notes; derived from the frontmatter like `links` and `jira`
+KB_TABLES = """
+CREATE TABLE IF NOT EXISTS entities (note_id INTEGER PRIMARY KEY, kind TEXT);
+CREATE TABLE IF NOT EXISTS entity_aliases (note_id INTEGER NOT NULL, alias TEXT NOT NULL, norm TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS entity_aliases_note ON entity_aliases (note_id);
+CREATE TABLE IF NOT EXISTS refs (note_id INTEGER NOT NULL, key TEXT NOT NULL, target TEXT NOT NULL, to_note INTEGER);
+CREATE INDEX IF NOT EXISTS refs_note ON refs (note_id);
+CREATE INDEX IF NOT EXISTS refs_to ON refs (to_note, key);
+"""
+REF_KEYS = ("subject", "owner", "supersedes", "superseded_by")
+ENTITY_KEYS = ("subject", "owner")  # these resolve only to entity notes
+
+
+def _add_kb_tables(conn: sqlite3.Connection) -> None:
+    """Add the entity and reference tables. In an older index the rules hash is removed, so the next update
+    writes their rows from the frontmatter, with no new embedding."""
+    have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if {"entities", "entity_aliases", "refs"} <= have:
+        return
+    conn.executescript(KB_TABLES)
+    conn.execute("DELETE FROM meta WHERE key = 'rules_hash'")
+    conn.commit()
+
+
+def _refs(m) -> list[tuple[str, str]]:
+    """(key, target) of the reference keys of a note, in order."""
+    successor = [m.superseded_by] if m.superseded_by else []
+    keys = zip(REF_KEYS, (m.subject, m.owner, m.supersedes, successor), strict=True)
+    return [(k, t) for k, targets in keys for t in targets]
+
+
 def _hash_file(data: bytes) -> str:
     return hashlib.sha1(data).hexdigest()
 
@@ -135,6 +167,10 @@ def _delete_note(conn: sqlite3.Connection, note_id: int) -> None:
     conn.execute("DELETE FROM links WHERE from_note = ?", (note_id,))
     conn.execute("UPDATE links SET to_note = NULL WHERE to_note = ?", (note_id,))
     conn.execute("DELETE FROM jira WHERE note_id = ?", (note_id,))
+    conn.execute("DELETE FROM refs WHERE note_id = ?", (note_id,))
+    conn.execute("UPDATE refs SET to_note = NULL WHERE to_note = ?", (note_id,))
+    conn.execute("DELETE FROM entities WHERE note_id = ?", (note_id,))
+    conn.execute("DELETE FROM entity_aliases WHERE note_id = ?", (note_id,))
     conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
 
 
@@ -182,6 +218,13 @@ def _same(cfg: Config, conn: sqlite3.Connection, note_id: int, m, chunks) -> boo
     ):  # fmt: skip
         return False
     jira = [k for (k,) in conn.execute("SELECT key FROM jira WHERE note_id = ? ORDER BY key", (note_id,))]
+    refs = conn.execute("SELECT key, target FROM refs WHERE note_id = ? ORDER BY rowid", (note_id,)).fetchall()
+    entity = conn.execute("SELECT kind FROM entities WHERE note_id = ?", (note_id,)).fetchall()
+    aliases = [
+        a for (a,) in conn.execute("SELECT alias FROM entity_aliases WHERE note_id = ? ORDER BY rowid", (note_id,))
+    ]
+    if (refs, entity, aliases) != (_refs(m), [(m.kind,)] if m.entity else [], m.aliases):
+        return False
     stored = [h for (h,) in conn.execute("SELECT text_hash FROM chunks WHERE note_id = ? ORDER BY ord", (note_id,))]
     return jira == m.jira and stored == [input_hash(cfg, c.heading, c.text) for c in chunks]
 
@@ -286,6 +329,7 @@ def update(
         result.removed += 1
     if result.added or result.changed or result.moved or result.removed or result.rederived:
         resolve_links(conn)
+        resolve_refs(conn)
     if rederive:
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('rules_hash', ?)", (rules,))
     conn.commit()
@@ -373,6 +417,15 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
             result.chunks += 1
         conn.executemany("INSERT INTO links (from_note, target) VALUES (?, ?)", [(note_id, t) for t in p.links])
         conn.executemany("INSERT INTO jira (key, note_id) VALUES (?, ?)", [(k, note_id) for k in m.jira])
+        conn.executemany(
+            "INSERT INTO refs (note_id, key, target) VALUES (?, ?, ?)", [(note_id, k, t) for k, t in _refs(m)]
+        )
+        if m.entity:
+            conn.execute("INSERT INTO entities (note_id, kind) VALUES (?, ?)", (note_id, m.kind))
+            conn.executemany(
+                "INSERT INTO entity_aliases (note_id, alias, norm) VALUES (?, ?, ?)",
+                [(note_id, a, normalize_alias(a)) for a in m.aliases],
+            )
 
 
 def _link_key(path: str) -> str:
@@ -390,30 +443,89 @@ def _common_folders(folders: list[str], path: str) -> int:
     return count
 
 
-def resolve_links(conn: sqlite3.Connection) -> None:
-    """Resolve each wiki-link target to a note.
+class _Paths:
+    """Resolve a link target to a note by its path: the last segment, then the folders that the target gives.
 
     Rank the candidates by the same vault as the note with the link, then the most folders in common with that
     note, then the shortest path.
     """
-    notes = [(nid, vault, _link_key(path)) for nid, vault, path in conn.execute("SELECT id, vault, path FROM notes")]
-    by_name: dict[str, list[tuple[int, str, str]]] = {}
-    for n in notes:
-        by_name.setdefault(n[2].rsplit("/", 1)[-1], []).append(n)
-    vault_of = {nid: vault for nid, vault, _ in notes}
-    path_of = {nid: path for nid, _, path in notes}
-    updates = []
-    for rowid, from_note, target in conn.execute("SELECT rowid, from_note, target FROM links").fetchall():
+
+    def __init__(self, conn: sqlite3.Connection):
+        notes = [
+            (nid, vault, _link_key(path)) for nid, vault, path in conn.execute("SELECT id, vault, path FROM notes")
+        ]
+        self.by_name: dict[str, list[tuple[int, str, str]]] = {}
+        for n in notes:
+            self.by_name.setdefault(n[2].rsplit("/", 1)[-1], []).append(n)
+        self.vault_of = {nid: vault for nid, vault, _ in notes}
+        self.path_of = {nid: path for nid, _, path in notes}
+
+    def find(self, target: str, from_note: int | None, among: set[int] | None = None) -> int | None:
         key = _link_key(target).strip("/")
-        candidates = [n for n in by_name.get(key.rsplit("/", 1)[-1], []) if n[2].endswith(key)]
+        candidates = [
+            n
+            for n in self.by_name.get(key.rsplit("/", 1)[-1], [])
+            if n[2].endswith(key) and (among is None or n[0] in among)
+        ]
         if not candidates:
-            to_note = None
-        else:
-            home = vault_of.get(from_note)
-            folders = path_of.get(from_note, "").split("/")[:-1]
-            to_note = min(candidates, key=lambda n: (n[1] != home, -_common_folders(folders, n[2]), len(n[2])))[0]
-        updates.append((to_note, rowid))
+            return None
+        home = self.vault_of.get(from_note)
+        folders = self.path_of.get(from_note, "").split("/")[:-1]
+        return min(candidates, key=lambda n: (n[1] != home, -_common_folders(folders, n[2]), len(n[2])))[0]
+
+
+def resolve_links(conn: sqlite3.Connection) -> None:
+    """Resolve each wiki-link target to a note by its path."""
+    paths = _Paths(conn)
+    links = conn.execute("SELECT rowid, from_note, target FROM links").fetchall()
+    updates = [(paths.find(target, from_note), rowid) for rowid, from_note, target in links]
     conn.executemany("UPDATE links SET to_note = ? WHERE rowid = ?", updates)
+
+
+class _Resolver:
+    """Resolve the target of a reference key: by path, then by a unique alias of an entity note (its title counts
+    as an alias). An alias of two entity notes resolves to nothing."""
+
+    def __init__(self, conn: sqlite3.Connection):
+        self.paths = _Paths(conn)
+        self.entities = {nid for (nid,) in conn.execute("SELECT note_id FROM entities")}
+        names = conn.execute(
+            "SELECT note_id, norm FROM entity_aliases"
+            " UNION SELECT n.id, n.title FROM notes n JOIN entities e ON e.note_id = n.id"
+        ).fetchall()
+        self.by_alias: dict[str, set[int]] = {}
+        for nid, name in names:
+            self.by_alias.setdefault(normalize_alias(name), set()).add(nid)
+
+    def _alias(self, text: str) -> int | None:
+        found = self.by_alias.get(normalize_alias(text), set())
+        return next(iter(found)) if len(found) == 1 else None
+
+    def entity(self, text: str, from_note: int | None) -> int | None:
+        """A `subject` or an `owner`: an entity note only."""
+        found = self.paths.find(text, from_note, self.entities)
+        return found if found is not None else self._alias(text)
+
+    def note(self, text: str, from_note: int | None) -> int | None:
+        """A `supersedes` or a `superseded_by`: any note, or an entity note by its alias."""
+        found = self.paths.find(text, from_note)
+        return found if found is not None else self._alias(text)
+
+
+def resolve_refs(conn: sqlite3.Connection) -> None:
+    """Resolve the targets of the reference keys to notes. A target that resolves to nothing keeps a null note."""
+    r = _Resolver(conn)
+    rows = conn.execute("SELECT rowid, note_id, key, target FROM refs").fetchall()
+    updates = [
+        ((r.entity if key in ENTITY_KEYS else r.note)(target, note_id), rowid) for rowid, note_id, key, target in rows
+    ]
+    conn.executemany("UPDATE refs SET to_note = ? WHERE rowid = ?", updates)
+
+
+def find_entity(conn: sqlite3.Connection, value: str) -> int | None:
+    """The entity note of a name, an alias or a path (a wiki-link is fine), as a `subject` target resolves."""
+    targets = link_targets(value)
+    return _Resolver(conn).entity(targets[0], None) if targets else None
 
 
 def status(cfg: Config, conn: sqlite3.Connection) -> dict:

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 from .config import Config
 from .index import SCAN_LIMIT, update
-from .metadata import read_note
+from .metadata import normalize_alias, read_note
 from .redact import redact
 from .search import PrivateNotAllowed, search
 from .splitter import sections
@@ -236,6 +236,26 @@ class Tools:
         ).fetchall()
         keys = ("path", "title", "project", "type", "status")
         return {"results": [dict(zip(keys, r, strict=True)) for r in rows], "warnings": warnings}
+
+    def find_entities(self, kind: str | None = None, name: str | None = None) -> dict:
+        warnings = self.scan()
+        rows = self.conn.execute(
+            "SELECT n.id, n.path, n.title, e.kind FROM entities e JOIN notes n ON n.id = e.note_id"
+            f" WHERE 1 = 1{self._visible()} ORDER BY n.path"
+        ).fetchall()
+        aliases: dict[int, list[str]] = {}
+        for nid, alias in self.conn.execute("SELECT note_id, alias FROM entity_aliases ORDER BY rowid"):
+            aliases.setdefault(nid, []).append(alias)
+        wanted = normalize_alias(name) if name else None
+        results = []
+        for nid, path, title, entity_kind in rows:
+            names = [title, *aliases.get(nid, [])]
+            if kind and (entity_kind or "") != kind.strip().lower():
+                continue
+            if wanted and not any(wanted in normalize_alias(n) for n in names):
+                continue
+            results.append({"path": path, "title": title, "kind": entity_kind, "aliases": aliases.get(nid, [])})
+        return {"results": results, "warnings": warnings}
 
     # --- project summary ---------------------------------------------------------------------------------------
 

@@ -156,6 +156,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
         include_archived: bool = True,
         include_private: bool = False,
         include_superseded: bool = False,
+        subject: str | None = None,
         limit: int = 8,
     ) -> dict:
         """Hybrid search (meaning and keywords) over the vault notes. Returns notes, each with its best section.
@@ -166,6 +167,8 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
         accepted, rejected), as_of, superseded_by (the note that replaces it) and subject (the notes it is about).
         A note with no class gets one from its type. Notes with validity superseded or rejected are left out;
         include_superseded=true shows them, for a question about the past.
+        subject (an entity name, alias or path, see find_entities) keeps only the notes about that entity; an
+        unknown entity gives no results.
         """
         return get().search(
             query,
@@ -176,6 +179,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
             include_archived=include_archived,
             include_private=include_private,
             include_superseded=include_superseded,
+            subject=subject,
             limit=limit,
         )
 
@@ -221,5 +225,15 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
     def find_by_jira(key: str) -> dict:
         """The notes that contain a Jira key, for example ABC-123."""
         return get().find_by_jira(key)
+
+    @server.tool()
+    @timed
+    def find_entities(kind: str | None = None, name: str | None = None) -> dict:
+        """The entity notes (type: entity): path, title, kind and aliases.
+
+        kind keeps one kind (device, person, team, ...); name keeps the entities whose title or alias contains it,
+        in any case. Use a title or an alias as the subject filter of search.
+        """
+        return get().find_entities(kind=kind, name=name)
 
     return server
