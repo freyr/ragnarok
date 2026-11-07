@@ -31,7 +31,8 @@ jira_prefixes = []
 # Example: eval_exclude = ["Notes/Meta/search-eval"]
 eval_exclude = []
 
-# Put every key above this line: a key below a [vault_paths] or [vault_rules.<vault>] header belongs to that table.
+# Put every key above this line: a key below a [vault_paths], [vault_rules.<vault>] or [write] header belongs to that
+# table.
 
 # The folder of a vault that is not in root. A vault with no entry is the folder root/<vault>.
 # The vault name stays the first part of the note paths, for example "kb/Runbooks/failover.md".
@@ -50,3 +51,16 @@ eval_exclude = []
 # project_parents = []       # folder paths whose child folders are projects, for example "Clients/Projects"
 # ignore_folders = []        # first-level folders that give no area and no project, for example "docs"
 # jira_prefixes = []         # ticket prefixes found only in this vault
+
+# The local rules of the write path. known_keys: frontmatter keys outside the knowledge-base model that
+# `ragnarok validate` does not report as unknown keys. systems_of_record: the kinds of data that live outside the
+# vaults, each with data (the kind of data), system (where it lives) and an optional skill (the skill that reads it).
+# The MCP tool vault_rules gives both. The defaults are empty lists.
+#
+# [write]
+# known_keys = ["tags", "created"]
+#
+# [[write.systems_of_record]]
+# data = "customer tier"
+# system = "CRM"
+# skill = "crm-read"

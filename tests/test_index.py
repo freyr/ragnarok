@@ -42,6 +42,42 @@ def count(conn, sql):
     return conn.execute(sql).fetchone()[0]
 
 
+def test_an_index_without_the_kb_columns_gets_them_and_derives_the_notes_again(cfg):
+    (cfg.root / "Home/Heating/notes/boiler.md").write_text(
+        "---\nclass: state\nvalidity: current\nsubject:\n  - '[[pump]]'\n  - '[[valve|v]]'\n---\n# Boiler\n"
+    )
+    conn, emb, _ = build(cfg)
+    for column in ("note_class", "validity", "as_of", "superseded_by", "subject"):
+        conn.execute(f"ALTER TABLE notes DROP COLUMN {column}")
+    for table in ("refs", "entities", "entity_aliases"):
+        conn.execute(f"DROP TABLE {table}")
+    conn.commit()
+    conn.close()
+    conn = connect(cfg)
+    result = update(cfg, conn, emb)
+    assert result.rederived >= 1 and result.embedded == 0
+    row = conn.execute(
+        "SELECT note_class, validity, subject FROM notes WHERE path = 'Home/Heating/notes/boiler.md'"
+    ).fetchone()
+    assert row == ("state", "current", "pump\nvalve")
+    assert refs(conn, "Home/Heating/notes/boiler.md") == [("subject", "pump", None), ("subject", "valve", None)]
+
+
+def test_an_index_without_the_reference_tables_gets_them_with_no_embedding(cfg):
+    (cfg.root / "Home/Entities").mkdir()
+    (cfg.root / HEAT_PUMP).write_text(ENTITY)
+    (cfg.root / "Home/Heating/notes/boiler.md").write_text("---\nsubject: '[[HP]]'\n---\n# Boiler\n")
+    conn, emb, _ = build(cfg)
+    for table in ("refs", "entities", "entity_aliases"):
+        conn.execute(f"DROP TABLE {table}")
+    conn.commit()
+    conn.close()
+    conn = connect(cfg)
+    result = update(cfg, conn, emb)
+    assert result.rederived == 2 and result.embedded == 0  # the entity note and the note with a subject
+    assert refs(conn, "Home/Heating/notes/boiler.md") == [("subject", "HP", HEAT_PUMP)]
+
+
 def test_full_index_then_no_new_embeddings(cfg):
     conn, emb, first = build(cfg)
     assert first.added == first.notes > 0 and emb.calls == first.embedded > 0
@@ -128,6 +164,23 @@ def test_links_and_jira(cfg):
     ]
     keys = conn.execute("SELECT DISTINCT key FROM jira ORDER BY key").fetchall()
     assert keys == [("CORE-123",), ("OPS-77",), ("TS-9",)]
+
+
+def test_a_relative_link_resolves_from_the_folder_of_the_note(cfg):
+    (cfg.root / "Home/Heating/notes/boiler.md").write_text(
+        "# Boiler\nSee [[../SUMMARY]], [[./boiler|this note]], [[../../Astro/Theory/Field Stop]] and [[../Nothing]].\n"
+    )
+    conn, _, _ = build(cfg)
+    rows = conn.execute(
+        "SELECT l.target, n.path FROM links l JOIN notes f ON f.id = l.from_note LEFT JOIN notes n ON n.id = l.to_note"
+        " WHERE f.path = 'Home/Heating/notes/boiler.md' ORDER BY l.target"
+    ).fetchall()
+    assert rows == [
+        ("../../Astro/Theory/Field Stop", FIELD_STOP),
+        ("../Nothing", None),
+        ("../SUMMARY", "Home/Heating/SUMMARY.md"),
+        ("./boiler", "Home/Heating/notes/boiler.md"),
+    ]
 
 
 def test_model_mismatch_needs_rebuild(cfg):
@@ -302,3 +355,99 @@ def test_a_note_that_another_writer_added_during_the_update_is_replaced(cfg, mon
     assert result.added == result.notes
     assert count(conn, "SELECT COUNT(*) FROM notes") == result.notes
     assert count(conn, "SELECT COUNT(*) FROM chunks") == count(conn, "SELECT COUNT(*) FROM chunks_vec") == result.chunks
+
+
+HEAT_PUMP = "Home/Entities/Heat pump.md"
+ENTITY = "---\ntype: entity\nkind: device\naliases: [HP, Wärmepumpe]\n---\n# Heat pump\n"
+
+
+def refs(conn, path):
+    """(key, target, path of the resolved note) of the references of a note, in order."""
+    return conn.execute(
+        "SELECT r.key, r.target, t.path FROM refs r JOIN notes f ON f.id = r.note_id"
+        " LEFT JOIN notes t ON t.id = r.to_note WHERE f.path = ? ORDER BY r.rowid",
+        (path,),
+    ).fetchall()
+
+
+def test_an_alias_resolves_to_its_entity(cfg):
+    (cfg.root / "Home/Entities").mkdir()
+    (cfg.root / HEAT_PUMP).write_text(ENTITY)
+    (cfg.root / "Home/Heating/notes/boiler.md").write_text(
+        "---\nsubject: ['[[hp]]', '[[warmepumpe]]', '[[Heat Pump|the pump]]', '[[Home/Entities/Heat pump.md]]']\n"
+        "---\n# Boiler\n"
+    )
+    conn, _, _ = build(cfg)
+    assert refs(conn, "Home/Heating/notes/boiler.md") == [
+        ("subject", "hp", HEAT_PUMP),
+        ("subject", "warmepumpe", HEAT_PUMP),  # no diacritics, any case
+        ("subject", "Heat Pump", HEAT_PUMP),
+        ("subject", "Home/Entities/Heat pump", HEAT_PUMP),
+    ]
+    row = conn.execute(
+        "SELECT e.kind FROM entities e JOIN notes n ON n.id = e.note_id WHERE n.path = ?", (HEAT_PUMP,)
+    ).fetchone()
+    assert row == ("device",)
+
+
+def test_a_missing_target_is_kept_unresolved(cfg):
+    (cfg.root / "Home/Heating/notes/boiler.md").write_text("---\nsubject: '[[Nothing here]]'\n---\n# Boiler\n")
+    conn, _, _ = build(cfg)
+    assert refs(conn, "Home/Heating/notes/boiler.md") == [("subject", "Nothing here", None)]
+
+
+def test_subject_and_owner_resolve_only_to_entities_and_supersedes_to_any_note(cfg):
+    (cfg.root / "Home/Entities").mkdir()
+    (cfg.root / HEAT_PUMP).write_text(ENTITY)
+    (cfg.root / "Home/Heating/notes/boiler.md").write_text(
+        "---\nsubject: ['[[Field Stop]]']\nowner: '[[HP]]'\nsupersedes: ['[[Field Stop]]', '[[hp]]']\n"
+        "superseded_by: '[[SUMMARY]]'\n---\n# Boiler\n"
+    )
+    conn, _, _ = build(cfg)
+    assert refs(conn, "Home/Heating/notes/boiler.md") == [
+        ("subject", "Field Stop", None),  # a note that is not an entity
+        ("owner", "HP", HEAT_PUMP),
+        ("supersedes", "Field Stop", FIELD_STOP),
+        ("supersedes", "hp", HEAT_PUMP),
+        ("superseded_by", "SUMMARY", "Home/Heating/SUMMARY.md"),
+    ]
+
+
+def test_an_alias_of_two_entities_resolves_to_nothing(cfg):
+    (cfg.root / "Home/Entities").mkdir()
+    (cfg.root / HEAT_PUMP).write_text(ENTITY)
+    (cfg.root / "Home/Entities/Old pump.md").write_text("---\ntype: entity\naliases: [HP]\n---\n# Old pump\n")
+    (cfg.root / "Home/Heating/notes/boiler.md").write_text("---\nsubject: '[[HP]]'\n---\n# Boiler\n")
+    conn, _, _ = build(cfg)
+    assert refs(conn, "Home/Heating/notes/boiler.md") == [("subject", "HP", None)]
+
+
+@pytest.mark.parametrize("aliases, old_resolves", [("[HP]", False), ("[HP, Heat pump]", True)])
+def test_a_renamed_entity_resolves_by_its_new_name(cfg, aliases, old_resolves):
+    (cfg.root / "Home/Entities").mkdir()
+    (cfg.root / HEAT_PUMP).write_text(f"---\ntype: entity\naliases: {aliases}\n---\n# Pump\n")
+    (cfg.root / "Home/Heating/notes/boiler.md").write_text("---\nsubject: '[[Heat pump]]'\n---\n# Boiler\n")
+    (cfg.root / "Home/Heating/notes/valves.md").write_text("---\nsubject: '[[Air pump]]'\n---\n# Valves\n")
+    conn, emb, _ = build(cfg)
+    assert refs(conn, "Home/Heating/notes/boiler.md") == [("subject", "Heat pump", HEAT_PUMP)]
+    assert refs(conn, "Home/Heating/notes/valves.md") == [("subject", "Air pump", None)]
+    new = "Home/Entities/Air pump.md"
+    (cfg.root / HEAT_PUMP).rename(cfg.root / new)
+    result = update(cfg, conn, emb)
+    assert result.moved == 1  # the title is in the chunk text, so the chunk embeds again
+    assert refs(conn, "Home/Heating/notes/valves.md") == [("subject", "Air pump", new)]
+    assert refs(conn, "Home/Heating/notes/boiler.md") == [("subject", "Heat pump", new if old_resolves else None)]
+
+
+def test_a_deleted_note_takes_its_entity_rows_and_references_away(cfg):
+    (cfg.root / "Home/Entities").mkdir()
+    (cfg.root / HEAT_PUMP).write_text(ENTITY)
+    (cfg.root / "Home/Heating/notes/boiler.md").write_text("---\nsubject: '[[HP]]'\n---\n# Boiler\n")
+    conn, emb, _ = build(cfg)
+    (cfg.root / HEAT_PUMP).unlink()
+    update(cfg, conn, emb)
+    assert refs(conn, "Home/Heating/notes/boiler.md") == [("subject", "HP", None)]
+    assert count(conn, "SELECT COUNT(*) FROM entities") == count(conn, "SELECT COUNT(*) FROM entity_aliases") == 0
+    (cfg.root / "Home/Heating/notes/boiler.md").unlink()
+    update(cfg, conn, emb)
+    assert count(conn, "SELECT COUNT(*) FROM refs") == 0
