@@ -250,6 +250,71 @@ def test_a_merge_checks_its_target_the_superseded_notes_and_as_of():
     assert s["reasons"] == ["merge-target"]
 
 
+def test_a_supersede_that_rewrites_the_body_of_an_old_note_is_wrong():
+    # the probe of review round 3, case 3
+    old = "V/old-1.md"
+    case = {**POSITIVE, "old": [{"path": old, "expected": "supersede"}]}
+    good = superseded([old])
+    rewritten = good.after(old).replace("The pump follows the curve.", "The boiler runs in the morning.")
+    notes = texts({old: good.before(old)}, {old: rewritten, "V/new.md": good.after("V/new.md")})
+    s = rr.score(case, rec("supersede", [old], written=True), diff(["V/new.md"], [old]), notes)
+    assert not s["correct"] and s["reasons"] == ["old-body-changed"]
+    # white space at line ends is not a change of the body
+    spaced = good.after(old).replace("curve.", "curve.  ")
+    notes = texts({old: good.before(old)}, {old: spaced, "V/new.md": good.after("V/new.md")})
+    assert rr.score(case, rec("supersede", [old], written=True), diff(["V/new.md"], [old]), notes)["correct"]
+
+
+def test_the_superseded_notes_of_a_merge_keep_their_body():
+    case = {**POSITIVE, "old": [{"path": "V/state.md", "expected": "merge"}, {"path": "V/b.md", "expected": "merge"}]}
+    targets = ["V/state.md", "V/b.md"]
+    good = merged("V/state.md", ["V/b.md"])
+    after = {t: good.after(t) for t in targets}
+    after["V/b.md"] = after["V/b.md"].replace("curve.", "curve and more.")
+    notes = texts({t: good.before(t) for t in targets}, after, good.as_of)
+    s = rr.score(case, rec("merge", targets, written=True), diff(changed=targets), notes)
+    assert s["reasons"] == ["old-body-changed"]
+
+
+def test_a_merge_into_another_target_than_the_expected_one_is_wrong():
+    # the probe of review round 3, case 4: state.md expects the merge, other.md the supersede
+    case = {
+        **POSITIVE,
+        "old": [{"path": "V/state.md", "expected": "merge"}, {"path": "V/other.md", "expected": "supersede"}],
+    }
+    targets = ["V/state.md", "V/other.md"]
+    right = merged("V/state.md", ["V/other.md"])
+    s = rr.score(case, rec("merge", targets, written=True), diff(changed=targets), right)
+    assert s["correct"] and s["merge_target"] == "V/state.md"
+    wrong = merged("V/other.md", ["V/state.md"])
+    s = rr.score(case, rec("merge", targets, written=True), diff(changed=targets), wrong)
+    assert not s["correct"] and s["reasons"] == ["merge-target"] and s["merge_target"] == "V/other.md"
+    # a merge for an expected supersede: any target can be the merge target, and the row names it
+    s = rr.score(POSITIVE, rec("merge", OLDS, written=True), diff(changed=OLDS), merged(OLDS[1], OLDS[:1]))
+    assert s["category"] == "merge-for-supersede" and s["merge_target"] == OLDS[1]
+
+
+def test_the_bash_sandbox_closes_the_paths_around_the_case_home_and_the_plugin(tmp_path):
+    top = tmp_path / "user"
+    for rel in ("code/a/runs/r1/case/mirror", "code/a/runs/r0", "code/a/data", "code/plugin/scripts", "code/other",
+                "Vaults/V", ".claude/shell-snapshots", "notes.txt"):  # fmt: skip
+        path = top / rel
+        if path.suffix:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x")
+        else:
+            path.mkdir(parents=True, exist_ok=True)
+    case_dir, plugin = top / "code/a/runs/r1/case", top / "code/plugin"
+    closed = rr.closed_around([case_dir, plugin], top, [top / ".claude"])
+    assert closed == sorted(
+        [top / "Vaults", top / "notes.txt", top / "code/other", top / "code/a/data", top / "code/a/runs/r0"]
+    )
+    assert rr.closed_around([tmp_path / "elsewhere"], top) == []
+    settings = rr.case_settings(case_dir / "mirror", case_dir / "tmp", plugin, (), [], closed)
+    assert settings["sandbox"]["filesystem"]["denyRead"] == [str(p) for p in closed]
+    assert not any(str(p) in settings["permissions"]["deny"] for p in closed)  # the Read rules cover the tools
+
+
 def test_wiki_links_resolve_by_path_or_basename():
     assert rr.link_names(["[[A/b|alias]]", "[[c#Heading]]"]) == ["A/b", "c"]
     assert rr.link_names("[[x]]") == ["x"] and rr.link_names("V/y.md") == ["V/y.md"] and rr.link_names(None) == []
@@ -558,6 +623,11 @@ def test_the_agent_loads_no_setting_source_and_only_exact_rules(bench, skill, tm
         "Bash(date:*)",
     ]
     assert [a for a in allow if a.startswith(("Write", "Edit"))] == [f"Write(/{m}/**)", f"Edit(/{m}/**)"]
+    # reads only in the case home and the plugin folder; no bare Read, Glob or Grep rule
+    assert [a for a in allow if a.startswith(("Read", "Glob", "Grep"))] == [
+        f"Read(/{case_home.home}/**)",
+        f"Read(/{plugin}/**)",
+    ]
     sandbox = settings["sandbox"]
     assert sandbox["enabled"] and sandbox["failIfUnavailable"] and not sandbox["allowUnsandboxedCommands"]
     assert not sandbox["autoAllowBashIfSandboxed"]
@@ -914,16 +984,26 @@ def test_the_audit_checks_writes_reads_and_tools(tmp_path):
         tool_use("WebFetch", 7, url="https://example.com"),
         tool_use(f"mcp__{rr.SERVER}__search", 8, query="x"),
         tool_use("Write", 9, file_path="/etc/x"),
+        tool_use("Read", 10, file_path=str(plugin / "skills" / "kb-write" / "SKILL.md")),
+        tool_use("Grep", 11, pattern="x", path="mirror/V"),
+        tool_use("Grep", 12, pattern="x"),
+        tool_use("Glob", 13, pattern="**/*.md"),
+        tool_use("Read", 14, file_path=str(tmp_path / "other-data" / "newer.md")),
+        tool_use("Grep", 15, pattern="x", path="../.."),
+        tool_use("Glob", 16, pattern="/elsewhere/**/*.md"),
         {"type": "result", "result": "", "permission_denials": [{"tool_use_id": "t9"}]},
     )
     audit = rr.audit_agent(out, case, plugin)
-    assert audit["tool_calls"] == 9 and audit["denied"] == 1
+    assert audit["tool_calls"] == 16 and audit["denied"] == 1
     assert audit["violations"] == [
         f"Edit outside the case mirror: {case.home / 'settings.json'}",
         f"Read of a closed path: {tmp_path / 'set' / 'cases.jsonl'}",
         f"Grep of a closed path: {tmp_path / 'src' / 'V'}",
         f"Glob of a closed path: {tmp_path / 'src'}/**/*.md",
         "a tool that the runner did not give: WebFetch",
+        f"Read outside the case home and the plugin folder: {tmp_path / 'other-data' / 'newer.md'}",
+        "Grep outside the case home and the plugin folder: ../..",
+        "Glob outside the case home and the plugin folder: /elsewhere/**/*.md",
     ]
     assert rr.audit_agent("", case, plugin)["violations"] == []  # no output: nothing ran
     no_init = rr.audit_agent(stream({"type": "result"}), case, plugin)
