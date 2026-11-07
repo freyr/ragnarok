@@ -106,7 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         action="append",
         default=[],
-        help="a folder in which no file may change during the run, closed to the agent's reads (repeatable)",
+        help="a folder closed to the agent's reads; a file changed in it during the run is a warning (repeatable)",
     )
     rr.add_argument(
         "--keep-homes",

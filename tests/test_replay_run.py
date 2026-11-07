@@ -52,6 +52,38 @@ def diff(created=(), changed=(), deleted=()):
     return {"created": list(created), "changed": list(changed), "deleted": list(deleted)}
 
 
+def texts(before=None, after=None, as_of=None):
+    before, after = before or {}, after or {}
+    return rr.NoteTexts(before.get, after.get, as_of)
+
+
+def note(body="# Note\nThe pump follows the curve.\n", **keys):
+    head = "".join(f"{k}: {json.dumps(v)}\n" for k, v in keys.items())
+    return f"---\n{head}---\n{body}"
+
+
+def superseded(olds=OLDS, new="V/new.md"):
+    """The note texts of a correct supersede of the olds by the new note."""
+    link = new.removesuffix(".md").rsplit("/", 1)[-1]
+    before = {o: note(**{"class": "state", "validity": "current"}) for o in olds}
+    after = {o: note(**{"class": "state", "validity": "superseded", "superseded_by": f"[[{link}]]"}) for o in olds}
+    stems = [o.removesuffix(".md") for o in olds]
+    after[new] = note(**{"class": "state", "validity": "current", "supersedes": [f"[[{s}]]" for s in stems]})
+    return texts(before, after)
+
+
+def merged(target="V/state.md", others=(), as_of="2026-08-16"):
+    """The note texts of a correct merge into target, with the others superseded by it."""
+    link = target.removesuffix(".md")
+    before = {t: note(**{"class": "state", "validity": "current", "as_of": "2026-01-01"}) for t in (target, *others)}
+    after = {o: note(**{"class": "state", "validity": "superseded", "superseded_by": f"[[{link}]]"}) for o in others}
+    keys = {"class": "state", "validity": "current", "as_of": as_of}
+    if others:
+        keys["supersedes"] = [f"[[{o.removesuffix('.md')}]]" for o in others]
+    after[target] = note("# Note\nThe pump follows the curve.\nThe boiler runs in the morning.\n", **keys)
+    return texts(before, after, "2026-08-16")
+
+
 def test_expected_action_of_each_kind():
     assert rr.expected_of(POSITIVE) == ("supersede", OLDS)
     assert rr.expected_of(MERGE) == ("merge", ["V/state.md"])
@@ -60,14 +92,14 @@ def test_expected_action_of_each_kind():
 
 
 def test_a_supersede_with_the_old_notes_and_exactly_their_change_is_correct():
-    s = rr.score(POSITIVE, rec("supersede", OLDS[::-1], written=True), diff(["V/new.md"], OLDS))
+    s = rr.score(POSITIVE, rec("supersede", OLDS[::-1], written=True), diff(["V/new.md"], OLDS), superseded())
     assert s["action_ok"] and s["target_ok"] and s["written_ok"] and s["correct"]
     assert s["category"] == "correct" and s["reasons"] == []
 
 
 def test_an_extra_target_is_wrong_and_reported():
     record = rec("supersede", [*OLDS, "V/other.md"], written=True)
-    s = rr.score(POSITIVE, record, diff(["V/new.md"], [*OLDS, "V/other.md"]))
+    s = rr.score(POSITIVE, record, diff(["V/new.md"], [*OLDS, "V/other.md"]), superseded())
     assert not s["target_ok"] and not s["correct"] and s["category"] == "wrong"
     assert s["extra_targets"] == ["V/other.md"] and "extra-targets" in s["reasons"]
 
@@ -80,7 +112,9 @@ def test_a_supersede_that_misses_an_old_note_is_wrong():
 
 def test_extra_writes_are_wrong():
     # an unrelated note changed
-    s = rr.score(POSITIVE, rec("supersede", OLDS, written=True), diff(["V/new.md"], [*OLDS, "V/unrelated.md"]))
+    s = rr.score(
+        POSITIVE, rec("supersede", OLDS, written=True), diff(["V/new.md"], [*OLDS, "V/unrelated.md"]), superseded()
+    )
     assert s["target_ok"] and not s["written_ok"] and s["category"] == "wrong"
     assert s["reasons"] == ["extra-writes"] and s["extra_writes"] == ["changed V/unrelated.md"]
     # two created notes
@@ -96,12 +130,12 @@ def test_extra_writes_are_wrong():
 
 
 def test_a_merge_counts_when_the_expected_action_is_merge():
-    s = rr.score(MERGE, rec("merge", ["V/state.md"], written=True), diff(changed=["V/state.md"]))
-    assert s["correct"] and s["category"] == "correct"
+    s = rr.score(MERGE, rec("merge", ["V/state.md"], written=True), diff(changed=["V/state.md"]), merged())
+    assert s["correct"] and s["category"] == "correct" and s["effect_errors"] == []
 
 
 def test_a_merge_for_a_supersede_is_its_own_category():
-    s = rr.score(POSITIVE, rec("merge", OLDS, written=True), diff(changed=OLDS))
+    s = rr.score(POSITIVE, rec("merge", OLDS, written=True), diff(changed=OLDS), merged(OLDS[0], OLDS[1:]))
     assert not s["action_ok"] and not s["correct"] and s["merge_for_supersede"]
     assert s["category"] == "merge-for-supersede"
 
@@ -152,13 +186,86 @@ def test_the_written_flag_must_match_the_snapshot():
     assert not s["written_ok"]
 
 
+def test_a_supersede_in_the_reverse_direction_is_wrong():
+    # the probe of review round 2: the new note is marked superseded by the old note
+    old = "V/old-1.md"
+    case = {**POSITIVE, "old": [{"path": old, "expected": "supersede"}]}
+    notes = texts(
+        {old: note(**{"class": "state", "validity": "current"})},
+        {
+            old: note(**{"class": "state", "validity": "current", "supersedes": ["[[new]]"]}),
+            "V/new.md": note(**{"class": "state", "validity": "superseded", "superseded_by": "[[old-1]]"}),
+        },
+    )
+    s = rr.score(case, rec("supersede", [old], written=True), diff(["V/new.md"], [old]), notes)
+    assert not s["correct"] and s["category"] == "wrong"
+    assert {"supersede-direction", "missing-supersedes", "missing-superseded-by", "validity"} <= set(s["reasons"])
+    assert s["effect_errors"]
+
+
+def test_a_no_op_edit_of_an_old_note_is_wrong():
+    old = "V/old-1.md"
+    case = {**POSITIVE, "old": [{"path": old, "expected": "supersede"}]}
+    good = superseded([old])
+    start = good.before(old)
+    notes = texts(
+        {old: start}, {old: start.replace("curve.", "curve.   ") + "\n\n", "V/new.md": good.after("V/new.md")}
+    )
+    s = rr.score(case, rec("supersede", [old], written=True), diff(["V/new.md"], [old]), notes)
+    assert not s["correct"] and "no-op-edit" in s["reasons"] and "missing-superseded-by" in s["reasons"]
+
+
+def test_a_write_with_no_note_texts_is_not_correct():
+    s = rr.score(POSITIVE, rec("supersede", OLDS, written=True), diff(["V/new.md"], OLDS))
+    assert not s["correct"] and s["reasons"] == ["effect-unchecked"]
+    # the probe of review round 2 now gives wrong
+    rr.score(POSITIVE, rec("ask"), EMPTY)  # an action with no write needs no texts
+    assert rr.score(DUPLICATE, rec("same", ["V/dup.md"]), EMPTY)["correct"]
+
+
+def test_a_superseded_state_needs_validity_superseded_and_a_record_does_not():
+    old = "V/old-1.md"
+    case = {**POSITIVE, "old": [{"path": old, "expected": "supersede"}]}
+    for cls, ok in (("state", False), ("record", True)):
+        notes = texts(
+            {old: note(**{"class": cls})},
+            {old: note(**{"class": cls, "superseded_by": "[[V/new]]"}), "V/new.md": note(supersedes=["[[old-1]]"])},
+        )
+        s = rr.score(case, rec("supersede", [old], written=True), diff(["V/new.md"], [old]), notes)
+        assert s["correct"] is ok and (ok or s["reasons"] == ["validity"])
+
+
+def test_a_merge_checks_its_target_the_superseded_notes_and_as_of():
+    case = {**POSITIVE, "old": [{"path": "V/state.md", "expected": "merge"}, {"path": "V/b.md", "expected": "merge"}]}
+    targets = ["V/state.md", "V/b.md"]
+    changed = diff(changed=targets)
+    assert rr.score(case, rec("merge", targets, written=True), changed, merged("V/state.md", ["V/b.md"]))["correct"]
+    # the old as_of stays on the merge target
+    s = rr.score(case, rec("merge", targets, written=True), changed, merged("V/state.md", ["V/b.md"], "2026-01-01"))
+    assert s["reasons"] == ["as-of"]
+    # two targets with no superseded_by: no single merge target
+    good = merged("V/state.md", ["V/b.md"])
+    both = texts({t: good.before(t) for t in targets}, {t: good.after("V/state.md") for t in targets}, good.as_of)
+    s = rr.score(case, rec("merge", targets, written=True), changed, both)
+    assert s["reasons"] == ["merge-target"]
+
+
+def test_wiki_links_resolve_by_path_or_basename():
+    assert rr.link_names(["[[A/b|alias]]", "[[c#Heading]]"]) == ["A/b", "c"]
+    assert rr.link_names("[[x]]") == ["x"] and rr.link_names("V/y.md") == ["V/y.md"] and rr.link_names(None) == []
+    assert rr.links_to(["b"], "V/A/b.md") and rr.links_to(["A/b.md"], "V/A/b.md") and rr.links_to(["V/A/b"], "V/A/b.md")
+    assert not rr.links_to(["ab"], "V/A/b.md") and not rr.links_to(["A"], "V/A/b.md")
+
+
 def test_the_summary_counts_the_categories_with_the_wilson_interval():
     rows = [
         {
             "kind": "positive",
             "positive_kind": "content_change",
             "cost_usd": 1.5,
-            "score": rr.score(POSITIVE, rec("supersede", OLDS, written=True), diff(["V/n.md"], OLDS)),
+            "score": rr.score(
+                POSITIVE, rec("supersede", OLDS, written=True), diff(["V/n.md"], OLDS), superseded(new="V/n.md")
+            ),
         },
         {
             "kind": "positive",
@@ -456,46 +563,135 @@ def test_the_agent_loads_no_setting_source_and_only_exact_rules(bench, skill, tm
     assert not sandbox["autoAllowBashIfSandboxed"]
     assert sandbox["filesystem"]["allowWrite"] == [str(m), str(case_home.tmp)]
     # a guard that holds the case home cannot be closed to reads; the other guard is closed
-    assert sandbox["filesystem"]["denyRead"] == [str(guard)]
-    assert settings["permissions"]["deny"] == [f"Read(/{guard}/**)"]
+    assert (
+        sandbox["filesystem"]["denyRead"][-1] == str(guard) and str(tmp_path) not in sandbox["filesystem"]["denyRead"]
+    )
+    assert settings["permissions"]["deny"][-2:] == [f"Read(/{guard})", f"Read(/{guard}/**)"]
     prompt = rr.agent_prompt(case_home, skill, plugin)
     assert f"mirror={m}" in prompt and "2026-08-16" in prompt and str(case_home.draft) in prompt
     assert f"TMPDIR is {case_home.tmp}" in prompt
     env = rr.agent_env(case_home)
     assert env["TMPDIR"] == str(case_home.tmp) and env["RAGNAROK_HOME"] == str(case_home.home)
-    assert set(env) <= set(rr.ENV_KEYS) | {"TMPDIR", "RAGNAROK_HOME"}
+    assert set(env) <= set(rr.ENV_KEYS) | set(rr.AUTH_ENV_KEYS) | {"TMPDIR", "RAGNAROK_HOME"}
+
+
+def test_the_agent_gets_the_auth_variables_that_are_set(bench, skill, monkeypatch):
+    cfg, home, mirror, set_dir = bench
+    case_home = rr.build_case_home(CASE, cfg, set_dir / "runs" / "r1", "bare", skill.parent.parent.parent)
+    for key in rr.AUTH_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/cfg")
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
+    monkeypatch.setenv("SOME_OTHER_TOKEN", "x")
+    env = rr.agent_env(case_home)
+    assert env["ANTHROPIC_API_KEY"] == "test-key" and env["CLAUDE_CONFIG_DIR"] == "/cfg"
+    assert env["AWS_REGION"] == "eu-west-1" and "SOME_OTHER_TOKEN" not in env and "ANTHROPIC_BASE_URL" not in env
+    assert {"ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"} <= set(rr.AUTH_ENV_KEYS)
+
+
+def test_the_agent_cannot_read_the_answer_key_the_source_or_other_cases(bench, skill):
+    cfg, home, mirror, set_dir = bench
+    other_run = set_dir / "runs" / "20260101T000000Z-aaaaaa"
+    other_run.mkdir(parents=True)
+    (set_dir / "score-x.json").write_text("{}")
+    (home / "replay" / "set-v0").mkdir()
+    run_dir = set_dir / "runs" / "r1"
+    case_home = rr.build_case_home(
+        CASE, cfg, run_dir, "bare", skill.parent.parent.parent, bench_home=home, case_ids=["p001", "p002"]
+    )
+    settings = json.loads(case_home.settings.read_text())
+    closed = [Path(p) for p in settings["sandbox"]["filesystem"]["denyRead"]]
+    assert set(closed) == {
+        mirror,
+        home / "data",
+        home / "config.toml",
+        home / rr.MARKER,
+        home / "replay" / "set-v0",
+        set_dir / "cases.jsonl",
+        set_dir / "manifest.json",
+        set_dir / "score-x.json",
+        other_run,
+        run_dir / "p002",
+        run_dir / "records.jsonl",
+        run_dir / "summary.json",
+    }
+    assert list(case_home.closed) == closed
+    deny = settings["permissions"]["deny"]
+    for path in closed:
+        assert f"Read(/{path})" in deny and f"Read(/{path}/**)" in deny
+    # the case home and its parent folders stay readable
+    assert not any(case_home.home.is_relative_to(p) for p in closed)
 
 
 # --- the run -----------------------------------------------------------------------------------------------------
 
 
-def fake_runner(action, write=True, seen=None):
-    """A runner that acts like the skill: it writes into the mirror of the prompt and prints a record."""
+def init_event(**changes):
+    """The init event of an isolated case session."""
+    tools = [*rr.BUILTIN_TOOLS.split(","), f"mcp__{rr.SERVER}__search", f"mcp__{rr.SERVER}__find_collisions"]
+    event = {
+        "type": "system",
+        "subtype": "init",
+        "plugins": [{"name": "cc-plugin-telemetry", "path": "builtin", "source": "cc-plugin-telemetry@builtin"}],
+        "mcp_servers": [{"name": rr.SERVER, "status": "connected"}],
+        "tools": tools,
+        "permissionMode": "dontAsk",
+    }
+    return {**event, **changes}
+
+
+def tool_use(name, n=0, **args):
+    return {
+        "type": "assistant",
+        "message": {"content": [{"type": "tool_use", "id": f"t{n}", "name": name, "input": args}]},
+    }
+
+
+def stream(*events):
+    return "\n".join(json.dumps(e) for e in events)
+
+
+def fake_runner(action, write=True, seen=None, calls=(), init=None, denied=()):
+    """A runner that acts like the skill: it writes into the mirror of the prompt (the new note with `supersedes`,
+    the old note with `superseded_by` and `validity`) and prints a transcript and a record."""
 
     def run(argv, prompt, cwd, env, timeout):
         if seen is not None:
             seen.append({"argv": argv, "cwd": cwd, "env": env})
         mirror = Path(re.search(r"mirror=(\S+)", prompt).group(1))
+        script = re.search(r"The helper script is (\S+)\.\n", prompt).group(1)
         targets, written = [], False
+        events = [init or init_event(), tool_use("Bash", 1, command=f"bash {script} bench {mirror}")]
         if write:
-            (mirror / "V" / "Docs" / "fresh.md").write_text("# Fresh\n")
+            fresh = mirror / "V" / "Docs" / "fresh.md"
+            fresh.write_text("---\nclass: state\nvalidity: current\nsupersedes: ['[[old]]']\n---\n# Fresh\n")
             old = (mirror / OLD).read_text()
-            (mirror / OLD).write_text(old.replace("class: state", "class: state\nvalidity: superseded"))
+            new = old.replace("class: state", "class: state\nvalidity: superseded\nsuperseded_by: '[[fresh]]'")
+            (mirror / OLD).write_text(new)
             targets, written = [OLD], True
+            backup = cwd / "tmp" / "kb-write.abc123"
+            events += [
+                tool_use("Bash", 2, command=f"mktemp -d {cwd}/tmp/kb-write.XXXXXX"),
+                tool_use(
+                    "Bash", 3, command=f"KB_WRITE_WITHIN={mirror} bash {script} save {backup} {fresh} {mirror / OLD}"
+                ),
+                tool_use("Write", 4, file_path=str(fresh), content="..."),
+                tool_use("Edit", 5, file_path=str(mirror / OLD), old_string="a", new_string="b"),
+            ]
+        events += [tool_use(name, 10 + i, **args) for i, (name, args) in enumerate(calls)]
         record = rec(action, targets, written=written)
-        events = [
-            {"type": "system", "subtype": "init", "plugins": [], "mcp_servers": [{"name": rr.SERVER}]},
+        events.append(
             {
                 "type": "result",
                 "result": f"done\nKB-WRITE-RECORD {json.dumps(record)}",
                 "total_cost_usd": 0.25,
                 "num_turns": 9,
                 "is_error": False,
-                "permission_denials": [],
-            },  # fmt: skip
-        ]
-        out = "\n".join(json.dumps(e) for e in events)
-        return rr.AgentOutput(exit_code=0, stdout=out, stderr="", duration_s=1.0)
+                "permission_denials": [{"tool_use_id": f"t{10 + i}"} for i in denied],
+            }
+        )
+        return rr.AgentOutput(exit_code=0, stdout=stream(*events), stderr="", duration_s=1.0)
 
     return run
 
@@ -515,9 +711,11 @@ def test_a_run_records_each_case_and_leaves_the_source_unchanged(bench, skill):
     assert row["diff"] == {"created": ["V/Docs/fresh.md"], "changed": [OLD], "deleted": []}
     assert row["record"]["action"] == "supersede" and row["record_error"] is None
     assert row["cost_usd"] == 0.25 and row["turns"] == 9 and row["exit_code"] == 0
-    assert row["session"]["mcp_servers"] == [rr.SERVER] and row["session"]["plugins"] == []
-    assert row["score"]["correct"] and row["home_changes"] is None
-    assert summary["all"]["correct"] == 2 and summary["clean"] and summary["outside_changes"] == []
+    assert row["session"]["mcp_servers"] == [rr.SERVER] and row["session"]["plugins"] == ["cc-plugin-telemetry@builtin"]
+    assert row["score"]["correct"] and row["home_changes"] is None and row["score"]["effect_errors"] == []
+    assert row["audit"] == {"tool_calls": 5, "denied": 0, "violations": []}
+    assert summary["all"]["correct"] == 2 and summary["clean"] and summary["outside_warnings"] == []
+    assert summary["audit_failures"] == {} and summary["home_changes"] == {}
     assert {s["cwd"] for s in seen} == {run_dir / "p001", run_dir / "p002"}
     assert all(s["env"]["TMPDIR"] == str(s["cwd"] / "tmp") for s in seen)
     assert not (run_dir / "p001" / "data").exists()  # the index copy is deleted after the case
@@ -555,7 +753,7 @@ def test_a_bad_record_is_a_record_error(bench, skill):
 
     def runner(argv, prompt, cwd, env, timeout):
         record = {**rec("same"), "targets": [{"path": OLD}]}
-        out = json.dumps({"result": f"KB-WRITE-RECORD {json.dumps(record)}", "total_cost_usd": 0.1})
+        out = stream(init_event(), {"type": "result", "result": f"KB-WRITE-RECORD {json.dumps(record)}"})
         return rr.AgentOutput(0, out, "", 1.0)
 
     rows, summary, _ = rr.run_cases(cfg, home, set_dir, [CASE], skill=skill, runner=runner)
@@ -585,28 +783,167 @@ def test_a_changed_source_mirror_fails_the_run(bench, skill):
         rr.run_cases(cfg, home, set_dir, [CASE], skill=skill, runner=vandal)
 
 
-@pytest.mark.parametrize("where", ["home", "case", "sibling", "plugin", "guard"])
-def test_a_change_outside_the_case_mirror_fails_the_run(bench, skill, tmp_path, where):
+@pytest.mark.parametrize("where", ["case", "sibling"])
+def test_a_change_of_a_case_home_file_fails_the_run(bench, skill, where):
+    cfg, home, mirror, set_dir = bench
+
+    def vandal(argv, prompt, cwd, env, timeout):
+        {"case": cwd / "config.toml", "sibling": cwd / "evil.txt"}[where].write_text("changed\n")
+        return fake_runner("same", write=False)(argv, prompt, cwd, env, timeout)
+
+    with pytest.raises(rr.SourceChanged, match="case homes"):
+        rr.run_cases(cfg, home, set_dir, [CASE], skill=skill, runner=vandal)
+    (run_dir,) = (set_dir / "runs").iterdir()
+    summary = json.loads((run_dir / "summary.json").read_text())
+    assert not summary["clean"] and list(summary["home_changes"]) == ["p001"]
+
+
+@pytest.mark.parametrize("where", ["home", "other-run", "plugin", "plugin-deleted", "guard"])
+def test_a_change_outside_the_run_is_a_warning(bench, skill, tmp_path, where):
     cfg, home, mirror, set_dir = bench
     guard = tmp_path / "vaults"
     guard.mkdir()
+    plugin = skill.parent.parent.parent
 
     def vandal(argv, prompt, cwd, env, timeout):
-        target = {
-            "home": home / "replay" / "note.txt",
-            "case": cwd / "config.toml",
-            "sibling": cwd / "evil.txt",
-            "plugin": skill.parent.parent.parent / "scripts" / "kb-write.sh",
-            "guard": guard / "x.md",
-        }[where]
-        target.write_text("changed\n")
+        if where == "plugin-deleted":
+            skill.unlink()
+        else:
+            target = {
+                "home": home / "replay" / "note.txt",
+                "other-run": set_dir / "runs" / "other" / "records.jsonl",
+                "plugin": plugin / "scripts" / "kb-write.sh",
+                "guard": guard / "x.md",
+            }[where]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("changed\n")
         return fake_runner("same", write=False)(argv, prompt, cwd, env, timeout)
 
-    with pytest.raises(rr.SourceChanged):
-        rr.run_cases(cfg, home, set_dir, [CASE], skill=skill, runner=vandal, guards=(guard,))
+    rows, summary, _ = rr.run_cases(cfg, home, set_dir, [CASE], skill=skill, runner=vandal, guards=(guard,))
+    assert summary["clean"] and not rows[0]["error"] and rows[0]["audit"]["violations"] == []
+    if where == "other-run":
+        assert summary["outside_warnings"] == []  # another replay run of the same home
+    else:
+        assert len(summary["outside_warnings"]) == 1
+    if where == "plugin-deleted":
+        assert summary["outside_warnings"] == [f"deleted {skill}"]
+
+
+def test_an_audit_violation_fails_the_case_and_the_run(bench, skill, tmp_path):
+    cfg, home, mirror, set_dir = bench
+    outside = tmp_path / "elsewhere.md"
+    runner = fake_runner("supersede", calls=[("Write", {"file_path": str(outside), "content": "x"})])
+    with pytest.raises(rr.SourceChanged, match="audit"):
+        rr.run_cases(cfg, home, set_dir, [CASE], skill=skill, runner=runner)
     (run_dir,) = (set_dir / "runs").iterdir()
     summary = json.loads((run_dir / "summary.json").read_text())
-    assert not summary["clean"] and summary["outside_changes"]
+    assert summary["audit_failures"] == {"p001": [f"Write outside the case mirror: {outside}"]}
+    assert summary["failed_cases"] == ["p001"] and summary["categories"] == {"failed": 1}
+    row = json.loads((run_dir / "records.jsonl").read_text())
+    assert row["score"]["category"] == "failed" and "audit" in row["score"]["reasons"]
+    # a call that the permission rules denied did not run: no violation
+    runner = fake_runner("supersede", calls=[("Write", {"file_path": str(outside), "content": "x"})], denied=[0])
+    rows, summary, _ = rr.run_cases(cfg, home, set_dir, [CASE], skill=skill, runner=runner)
+    assert summary["clean"] and rows[0]["audit"]["denied"] == 1 and rows[0]["score"]["correct"]
+
+
+def test_a_session_with_a_user_plugin_fails_the_run(bench, skill):
+    cfg, home, mirror, set_dir = bench
+    plugins = [{"name": "ragnarok", "source": "ragnarok@ragnarok"}]
+    runner = fake_runner("same", write=False, init=init_event(plugins=plugins))
+    with pytest.raises(rr.SourceChanged, match="ragnarok@ragnarok"):
+        rr.run_cases(cfg, home, set_dir, [CASE], skill=skill, runner=runner)
+
+
+def audit_home(tmp_path):
+    home = tmp_path / "case"
+    plugin = tmp_path / "plugin"
+    closed = (tmp_path / "src", tmp_path / "set" / "cases.jsonl")
+    return rr.CaseHome(home, home / "mirror", home / "tmp", home / "draft.md", home / "mcp.json",
+                       home / "settings.json", None, {}, closed), plugin  # fmt: skip
+
+
+def test_the_audit_allows_the_helper_and_shell_commands_of_the_skill(tmp_path):
+    case, plugin = audit_home(tmp_path)
+    m, t, script = case.mirror, case.tmp, plugin / "scripts" / "kb-write.sh"
+    for command in (
+        f"bash {script} bench {m}",
+        f'bash "{script}" bench "{m}"',
+        f"mktemp -d {t}/kb-write.XXXXXX",
+        f"KB_WRITE_WITHIN={m} bash {script} save {t}/kb-write.a {m}/V/new.md {m}/V/old.md",
+        f'KB_WRITE_WITHIN="{m}" bash "{script}" restore "{t}/kb-write.a"',
+        f'test -e "{m}/V/A note.md"',
+        f"diff -u /dev/null {t}/draft.md",
+        "date -u +%Y%m%dT%H%M%SZ",
+        "ls mirror/V",
+        f"cat {plugin}/skills/kb-write/SKILL.md",
+    ):
+        assert rr.bash_errors(command, case, plugin) == [], command
+
+
+def test_the_audit_finds_other_commands_and_outside_paths(tmp_path):
+    case, plugin = audit_home(tmp_path)
+    m, script = case.mirror, plugin / "scripts" / "kb-write.sh"
+    for command, word in (
+        (f"bash {script} save /tmp/b {m}/V/a.md", "KB_WRITE_WITHIN"),
+        (f"KB_WRITE_WITHIN=/tmp bash {script} save /tmp/b /tmp/a.md", "KB_WRITE_WITHIN"),
+        (f"rm -r {m}", "not an allowed"),
+        ("cat /etc/hosts", "outside"),
+        (f"cat {m}/../../secret.md", "outside"),
+        ("cat ~/notes.md", "~"),
+        (f"ls {m} ; touch x", "compound"),
+        (f"cat {m}/a.md | tee x", "compound"),
+        (f"cat {m}/a.md > {m}/b.md", "compound"),
+        ('mktemp -d "${TMPDIR}/x.XXXXXX"', "expansion"),
+        ("cat 'unclosed", "parsed"),
+    ):
+        errors = rr.bash_errors(command, case, plugin)
+        assert errors and word in errors[0], command
+
+
+def test_the_audit_checks_writes_reads_and_tools(tmp_path):
+    case, plugin = audit_home(tmp_path)
+    out = stream(
+        init_event(),
+        tool_use("Write", 1, file_path=str(case.mirror / "V" / "a.md")),
+        tool_use("Edit", 2, file_path=str(case.home / "settings.json")),
+        tool_use("Read", 3, file_path=str(tmp_path / "set" / "cases.jsonl")),
+        tool_use("Grep", 4, pattern="x", path=str(tmp_path / "src" / "V")),
+        tool_use("Glob", 5, pattern=str(tmp_path / "src") + "/**/*.md"),
+        tool_use("Read", 6, file_path=str(case.draft)),
+        tool_use("WebFetch", 7, url="https://example.com"),
+        tool_use(f"mcp__{rr.SERVER}__search", 8, query="x"),
+        tool_use("Write", 9, file_path="/etc/x"),
+        {"type": "result", "result": "", "permission_denials": [{"tool_use_id": "t9"}]},
+    )
+    audit = rr.audit_agent(out, case, plugin)
+    assert audit["tool_calls"] == 9 and audit["denied"] == 1
+    assert audit["violations"] == [
+        f"Edit outside the case mirror: {case.home / 'settings.json'}",
+        f"Read of a closed path: {tmp_path / 'set' / 'cases.jsonl'}",
+        f"Grep of a closed path: {tmp_path / 'src' / 'V'}",
+        f"Glob of a closed path: {tmp_path / 'src'}/**/*.md",
+        "a tool that the runner did not give: WebFetch",
+    ]
+    assert rr.audit_agent("", case, plugin)["violations"] == []  # no output: nothing ran
+    no_init = rr.audit_agent(stream({"type": "result"}), case, plugin)
+    assert no_init["violations"] == ["the agent output has no init event"]
+
+
+def test_the_session_must_be_the_one_that_the_runner_gave():
+    good = rr.parse_agent_output(stream(init_event(), {"type": "result"}))["session"]
+    assert rr.session_errors(good) == []
+    bad = {
+        **good,
+        "plugins": [*good["plugins"], "ha@ha"],
+        "mcp_servers": [rr.SERVER, "home-assistant"],
+        "permission_mode": "default",
+        "tools": [*good["tools"], "WebFetch", "mcp__home-assistant__ha_restart"],
+    }
+    errors = rr.session_errors(bad)
+    assert len(errors) == 5 and "ha@ha" in errors[0] and "home-assistant" in errors[1] and "default" in errors[2]
+    assert rr.session_errors(None) == ["the agent output has no init event"]
+    assert rr.session_errors({**good, "plugins": ["cc-plugin-x"]})  # a built-in name with no @builtin source
 
 
 def test_the_run_options_are_checked(bench, skill, tmp_path):

@@ -13,17 +13,21 @@ For each case the runner makes a case home under `<set>/runs/<run id>/<case id>/
 The agent is `claude -p` with no user, project or local settings (so no user hook, plugin or permission rule), only
 the case MCP server, the built-in tools that the skill needs, permission rules for the exact helper commands, Write
 and Edit only under the case mirror, and the Bash sandbox with writes only to the case mirror and the case TMPDIR.
-It runs in the case home with a minimal environment, a cost limit and a time limit. The plugin is not loaded: its
-own MCP config points to the real vaults; the agent reads the skill file.
+The source mirror and index, the answer key of the set (`cases.jsonl`, `manifest.json`, score files), the other
+runs, sets and case homes, and the guard folders are closed to its reads. It runs in the case home with a minimal
+environment (plus the auth variables that are set), a cost limit and a time limit. The plugin is not loaded: its own
+MCP config points to the real vaults; the agent reads the skill file.
 
-The runner snapshots the case mirror before and after the agent; the snapshot diff, not the agent's record, gives
-the changed files. The source mirror is compared by sha256 before and after the run. Each file with a modification
-time after the start of the run under the source home (outside the case mirrors, the case TMPDIRs, the server data
-and the runner's own files), the plugin folder and each guard folder is an outside change, and fails the run.
+The fatal checks of a run: the sha256 snapshot of the source mirror before and after the run, the snapshot of the
+runner's files of each case home before and after its agent, and the audit of each agent's transcript (the init
+event shows only the given session; each Write and Edit is under the case mirror; each Bash command has an allowed
+shape and names only paths under the case home or the plugin folder). A file with a new time under the bench home,
+a guard folder, or a change in the plugin folder is only a warning, because another session can write them.
 
 The scorer compares the action and the targets of the agent's final record (`KB-WRITE-RECORD`) with the expected
-values of the case, and checks that the snapshot diff holds exactly the files of that action. The skill can rewrite
-the draft text, so the text is not compared.
+values of the case, checks that the snapshot diff of the case mirror holds exactly the files of that action, and
+checks the content of a supersede or a merge: the `supersedes`, `superseded_by` and `validity` keys of each note,
+in the direction that the skill defines. The skill can rewrite the draft text, so the text is not compared.
 """
 
 from __future__ import annotations
@@ -31,7 +35,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
+import shlex
 import shutil
 import signal
 import subprocess
@@ -58,6 +64,14 @@ EMPTY_DIFF = {"created": [], "changed": [], "deleted": []}
 BUILTIN_TOOLS = "Bash,Read,Write,Edit,Glob,Grep,ToolSearch"
 SHELL_COMMANDS = ("test", "diff", "mktemp", "ls", "cat", "date")
 ENV_KEYS = ("HOME", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL", "TERM")
+# the auth and provider variables of Claude Code, passed through when they are set
+AUTH_ENV_KEYS = (
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_USE_BEDROCK", "ANTHROPIC_BEDROCK_BASE_URL", "AWS_REGION", "AWS_PROFILE", "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_BEARER_TOKEN_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_VERTEX_BASE_URL", "ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION",
+    "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT",
+)  # fmt: skip
 # the folders of a case home that the agent (mirror, tmp) or the MCP server (data, logs) writes
 CASE_WRITABLE = ("mirror", "tmp", "data", "logs")
 # the files of a case home and of a run folder that the runner writes
@@ -68,7 +82,8 @@ RUNNER_FILES = {
 
 
 class SourceChanged(RuntimeError):
-    """A file of the source mirror, or a file outside the case mirrors, changed during the run."""
+    """The run is not clean: a file of the source mirror or a runner file of a case home changed, or the audit of an
+    agent found a violation."""
 
 
 @dataclass
@@ -90,6 +105,7 @@ class CaseHome:
     settings: Path
     as_of: str | None
     index: dict
+    closed: tuple[Path, ...] = ()
 
 
 Runner = Callable[[list[str], str, Path, dict, float], AgentOutput]
@@ -121,9 +137,8 @@ def parse_record(text: str | None) -> tuple[dict | None, str | None]:
     return record, None
 
 
-def parse_agent_output(stdout: str) -> dict:
-    """The answer, cost, turns, permission denials and session facts of the output of `claude -p`: one JSON object
-    (`--output-format json`) or one event per line (`stream-json`), with the result event last."""
+def agent_events(stdout: str) -> list[dict]:
+    """The JSON objects of the output of `claude -p`: one per line (`stream-json`), or one object (`json`)."""
     events = []
     for line in (stdout or "").splitlines():
         try:
@@ -138,12 +153,19 @@ def parse_agent_output(stdout: str) -> dict:
             events = [whole] if isinstance(whole, dict) else []
         except ValueError:
             pass
+    return events
+
+
+def parse_agent_output(stdout: str) -> dict:
+    """The answer, cost, turns, permission denials and session facts of the output of `claude -p`: one JSON object
+    (`--output-format json`) or one event per line (`stream-json`), with the result event last."""
+    events = agent_events(stdout)
     init = next((e for e in events if e.get("type") == "system" and e.get("subtype") == "init"), None)
     result = next((e for e in reversed(events) if e.get("type", "result") == "result"), None)
     session = None
     if init is not None:
         session = {
-            "plugins": [p.get("name") for p in init.get("plugins") or [] if isinstance(p, dict)],
+            "plugins": [p.get("source") or p.get("name") for p in init.get("plugins") or [] if isinstance(p, dict)],
             "mcp_servers": [s.get("name") for s in init.get("mcp_servers") or [] if isinstance(s, dict)],
             "tools": init.get("tools"),
             "permission_mode": init.get("permissionMode"),
@@ -275,10 +297,35 @@ def helper_script(plugin_root: Path) -> Path:
     return plugin_root / "scripts" / "kb-write.sh"
 
 
-def case_settings(mirror: Path, tmp: Path, plugin_root: Path, guards: tuple[Path, ...] = ()) -> dict:
+def closed_reads(cfg: Config, home: Path, case_dir: Path, case_ids: list[str]) -> list[Path]:
+    """The paths that a case agent must not read: the source mirror and its index, every sibling of the case home
+    and of each of its parent folders up to the bench home (the other cases and runs, `cases.jsonl`,
+    `manifest.json`, the score files, the other sets, the source config and data), and the files of the run folder
+    that the runner writes later."""
+    case_dir, top = case_dir.resolve(), home.resolve()
+    run_dir = case_dir.parent
+    closed = {cfg.root.resolve()}
+    data = cfg.index_path.parent.resolve()
+    if case_dir.is_relative_to(data):
+        closed |= {cfg.index_path.resolve(), cfg.index_path.resolve().with_name(cfg.index_path.name + "-wal")}
+    else:
+        closed.add(data)
+    closed |= {run_dir / i for i in case_ids if i != case_dir.name}
+    closed |= {run_dir / "records.jsonl", run_dir / "summary.json"}
+    node = case_dir
+    while node != top and node.is_relative_to(top) and node.parent != node:
+        closed |= {c for c in node.parent.iterdir() if c != node}
+        node = node.parent
+    return sorted(p for p in closed if not case_dir.is_relative_to(p))
+
+
+def case_settings(
+    mirror: Path, tmp: Path, plugin_root: Path, guards: tuple[Path, ...] = (), closed: list[Path] | tuple = ()
+) -> dict:
     """The only settings of a case agent: permission rules for the exact helper and shell commands, Write and Edit
-    under the mirror, and the Bash sandbox with writes only to the mirror and the case TMPDIR. A guard folder that
-    holds neither the case home nor the plugin folder is also closed to reads."""
+    under the mirror, and the Bash sandbox with writes only to the mirror and the case TMPDIR. The closed paths, and
+    each guard folder that holds neither the case home nor the plugin folder, are closed to reads: a Read rule also
+    covers Glob, Grep and the paths of a Bash command."""
     script = helper_script(plugin_root)
     bash = [
         f"Bash(bash {script} bench:*)",
@@ -287,8 +334,9 @@ def case_settings(mirror: Path, tmp: Path, plugin_root: Path, guards: tuple[Path
         f'Bash(KB_WRITE_WITHIN="{mirror}" bash "{script}":*)',
         *(f"Bash({c}:*)" for c in SHELL_COMMANDS),
     ]
-    closed = [g for g in guards if not mirror.is_relative_to(g) and not plugin_root.is_relative_to(g)]
-    # a path rule with a leading // is an absolute path
+    guards_closed = [g for g in guards if not mirror.is_relative_to(g) and not plugin_root.is_relative_to(g)]
+    no_read = [*closed, *guards_closed]
+    # a path rule with a leading // is an absolute path; a closed path can be a file or a folder
     return {
         "permissions": {
             "allow": [
@@ -301,20 +349,28 @@ def case_settings(mirror: Path, tmp: Path, plugin_root: Path, guards: tuple[Path
                 f"Write(/{mirror}/**)",
                 f"Edit(/{mirror}/**)",
             ],  # fmt: skip
-            "deny": [f"Read(/{g}/**)" for g in closed],
+            "deny": [rule for p in no_read for rule in (f"Read(/{p})", f"Read(/{p}/**)")],
         },
         "sandbox": {
             "enabled": True,
             "failIfUnavailable": True,
             "autoAllowBashIfSandboxed": False,
             "allowUnsandboxedCommands": False,
-            "filesystem": {"allowWrite": [str(mirror), str(tmp)], "denyRead": [str(g) for g in closed]},
+            "filesystem": {"allowWrite": [str(mirror), str(tmp)], "denyRead": [str(p) for p in no_read]},
         },
     }
 
 
 def build_case_home(
-    case: dict, cfg: Config, run_dir: Path, form: str, plugin_root: Path, guards: tuple[Path, ...] = ()
+    case: dict,
+    cfg: Config,
+    run_dir: Path,
+    form: str,
+    plugin_root: Path,
+    guards: tuple[Path, ...] = (),
+    *,
+    bench_home: Path | None = None,
+    case_ids: list[str] | None = None,
 ) -> CaseHome:
     """The home of one case under run_dir: the start mirror, its index, config, marker, draft, MCP config, agent
     settings and TMPDIR."""
@@ -349,7 +405,8 @@ def build_case_home(
     server = {"command": mcp_command()[0], "args": mcp_command()[1:], "env": {"RAGNAROK_HOME": str(home)}}
     mcp.write_text(json.dumps({"mcpServers": {SERVER: server}}, indent=2) + "\n")
     settings = home / "settings.json"
-    settings.write_text(json.dumps(case_settings(mirror, tmp, plugin_root, guards), indent=2) + "\n")
+    closed = closed_reads(cfg, bench_home or run_dir, home, case_ids or [case["id"]])
+    settings.write_text(json.dumps(case_settings(mirror, tmp, plugin_root, guards, closed), indent=2) + "\n")
 
     newer = cfg.note_path(case["newer"]) if case.get("newer") else None
     as_of = note_as_of(parse_note(newer.read_text(errors="replace"))[0]) if newer and newer.is_file() else None
@@ -361,7 +418,7 @@ def build_case_home(
     finally:
         conn.close()
     index = {k: v for k, v in result.__dict__.items() if isinstance(v, int | float)}
-    return CaseHome(home, mirror, tmp, draft, mcp, settings, as_of, index)
+    return CaseHome(home, mirror, tmp, draft, mcp, settings, as_of, index, tuple(closed))
 
 
 # --- the agent ---------------------------------------------------------------------------------------------------
@@ -387,8 +444,8 @@ def agent_command(claude: str, case_home: CaseHome, *, budget: float | None, mod
 
 
 def agent_env(case_home: CaseHome) -> dict:
-    """A minimal environment: the login and locale variables that the CLI and its auth need, TMPDIR in the case."""
-    env = {k: os.environ[k] for k in ENV_KEYS if k in os.environ}
+    """A minimal environment: the login, locale and auth variables that the CLI needs, and TMPDIR in the case."""
+    env = {k: os.environ[k] for k in (*ENV_KEYS, *AUTH_ENV_KEYS) if k in os.environ}
     env.update(TMPDIR=str(case_home.tmp), RAGNAROK_HOME=str(case_home.home))
     return env
 
@@ -440,6 +497,124 @@ def subprocess_runner(argv: list[str], prompt: str, cwd: Path, env: dict, timeou
     return AgentOutput(proc.returncode, out, err, time.monotonic() - start)
 
 
+# --- the audit of the agent ---------------------------------------------------------------------------------------
+
+WRITE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+READ_TOOLS = ("Read", "Glob", "Grep")
+SHELL_OPERATORS = set("();<>|&")
+
+
+def _norm(path: str, cwd: Path) -> Path:
+    return Path(os.path.normpath(path if path.startswith("/") else cwd / path))
+
+
+def session_errors(session: dict | None) -> list[str]:
+    """The differences of the init event of the agent from the session that the runner gave: only the built-in
+    `cc-plugin-*` plugins, only the case MCP server and its tools, the built-in tools of the case, `dontAsk`."""
+    if session is None:
+        return ["the agent output has no init event"]
+    errors = []
+    for plugin in session.get("plugins") or []:
+        if not (str(plugin).startswith("cc-plugin-") and str(plugin).endswith("@builtin")):
+            errors.append(f"the plugin {plugin} is not a built-in plugin")
+    if session.get("mcp_servers") != [SERVER]:
+        errors.append(f"the MCP servers are {session.get('mcp_servers')}, not [{SERVER}]")
+    if session.get("permission_mode") != "dontAsk":
+        errors.append(f"the permission mode is {session.get('permission_mode')}, not dontAsk")
+    tools = [str(t) for t in session.get("tools") or []]
+    builtin = sorted(t for t in tools if not t.startswith("mcp__"))
+    if builtin != sorted(BUILTIN_TOOLS.split(",")):
+        errors.append(f"the built-in tools are {builtin}, not {BUILTIN_TOOLS}")
+    other = sorted(t for t in tools if t.startswith("mcp__") and not t.startswith(f"mcp__{SERVER}__"))
+    if other:
+        errors.append(f"tools of another MCP server: {other}")
+    return errors
+
+
+def bash_errors(command: str, case_home: CaseHome, plugin_root: Path) -> list[str]:
+    """The differences of a Bash command from the allowed shapes: `bash <script> bench ...`,
+    `KB_WRITE_WITHIN=<mirror> bash <script> ...` or one of the shell commands, with no operator or expansion, and
+    each path under the case home or the plugin folder (or /dev/null)."""
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        words = list(lexer)
+    except ValueError:
+        return [f"the command cannot be parsed: {command}"]
+    if not words:
+        return ["an empty command"]
+    if "\n" in command or any(set(w) <= SHELL_OPERATORS or "$" in w or "`" in w for w in words):
+        return [f"a compound command or an expansion: {command}"]
+    script = str(helper_script(plugin_root))
+    if words[0].startswith("KB_WRITE_WITHIN="):
+        if _norm(words[0].split("=", 1)[1], case_home.home) != case_home.mirror:
+            return [f"KB_WRITE_WITHIN is not the case mirror: {command}"]
+        words = words[1:]
+        if words[:2] != ["bash", script] or len(words) < 3:
+            return [f"not an allowed command: {command}"]
+    elif words[:2] == ["bash", script]:
+        if words[2:3] != ["bench"]:
+            return [f"the helper runs without KB_WRITE_WITHIN: {command}"]
+    elif words[0] not in SHELL_COMMANDS:
+        return [f"not an allowed command: {command}"]
+    errors = []
+    for word in words[1:]:
+        value = word.split("=", 1)[1] if word.startswith("-") and "=" in word else word
+        if value.startswith("~"):
+            errors.append(f"a path with ~: {command}")
+        elif ("/" in value or value in (".", "..")) and value != "/dev/null":
+            path = _norm(value, case_home.home)
+            if not (path.is_relative_to(case_home.home) or path.is_relative_to(plugin_root)):
+                errors.append(f"the path {value} is outside the case home: {command}")
+    return errors
+
+
+def audit_agent(stdout: str, case_home: CaseHome, plugin_root: Path) -> dict:
+    """The check of the transcript of the agent: the session of the init event, and each tool call that was not
+    denied. A Write or Edit outside the case mirror, a Bash command of another shape or with a path outside the case
+    home, a read of a closed path and a tool that the runner did not give are violations."""
+    events = agent_events(stdout)
+    if not events:
+        return {"tool_calls": 0, "denied": 0, "violations": []}
+    init = next((e for e in events if e.get("type") == "system" and e.get("subtype") == "init"), None)
+    violations = session_errors(parse_agent_output(stdout)["session"] if init else None)
+    calls = [
+        block
+        for e in events
+        if e.get("type") == "assistant"
+        for block in (e.get("message") or {}).get("content") or []
+        if isinstance(block, dict) and block.get("type") == "tool_use"
+    ]
+    denied = {
+        d.get("tool_use_id")
+        for e in events
+        if e.get("type") == "result"
+        for d in e.get("permission_denials") or []
+        if isinstance(d, dict)
+    }
+    allowed_tools = set(BUILTIN_TOOLS.split(","))
+    home = case_home.home
+    for call in calls:
+        if call.get("id") in denied:
+            continue
+        name, args = str(call.get("name")), call.get("input") or {}
+        if name in WRITE_TOOLS:
+            path = args.get("file_path") or args.get("notebook_path") or ""
+            if not path or not _norm(str(path), home).is_relative_to(case_home.mirror):
+                violations.append(f"{name} outside the case mirror: {path}")
+        elif name == "Bash":
+            violations += bash_errors(str(args.get("command") or ""), case_home, plugin_root)
+        elif name in READ_TOOLS:
+            for value in (args.get("file_path"), args.get("path"), args.get("pattern") if name == "Glob" else None):
+                if isinstance(value, str) and value.startswith("/"):
+                    path = _norm(value.split("*", 1)[0] or "/", home)
+                    if any(path.is_relative_to(c) for c in case_home.closed):
+                        violations.append(f"{name} of a closed path: {value}")
+        elif name not in allowed_tools and not name.startswith(f"mcp__{SERVER}__"):
+            violations.append(f"a tool that the runner did not give: {name}")
+    return {"tool_calls": len(calls), "denied": len(denied & {c.get("id") for c in calls}), "violations": violations}
+
+
 # --- the scorer --------------------------------------------------------------------------------------------------
 
 
@@ -481,7 +656,119 @@ def check_writes(action: str | None, targets: set[str], diff: dict) -> tuple[lis
     return extra, missing
 
 
-def score(case: dict, record: dict | None, diff: dict) -> dict:
+@dataclass
+class NoteTexts:
+    """The text of a note key before the agent (the start state of the case) and after it (the case mirror), or None
+    when the note does not exist; and the date of the claims of the candidate text."""
+
+    before: Callable[[str], str | None]
+    after: Callable[[str], str | None]
+    as_of: str | None = None
+
+
+def mirror_texts(cfg: Config, case: dict, mirror: Path, as_of: str | None) -> NoteTexts:
+    """The note texts of a case: before from the source mirror in the start state, after from the case mirror."""
+    state = case.get("start_state") or {}
+
+    def before(key: str) -> str | None:
+        path = cfg.root / key
+        if key == state.get("exclude") or not path.is_file():
+            return None
+        return strip_keys(path.read_text(errors="replace"), (state.get("remove_keys") or {}).get(key) or [])
+
+    def after(key: str) -> str | None:
+        path = mirror / key
+        return path.read_text(errors="replace") if path.is_file() else None
+
+    return NoteTexts(before, after, as_of)
+
+
+def link_names(value) -> list[str]:
+    """The targets of the wiki-links of a frontmatter value (a string or a list); a plain string is a path."""
+    items = value if isinstance(value, list) else [value] if value else []
+    names = []
+    for item in items:
+        found = re.findall(r"\[\[([^\]|#]+)", str(item))
+        names += [f.strip() for f in found] if found else [str(item).strip()]
+    return [n for n in names if n]
+
+
+def links_to(names: list[str], key: str) -> bool:
+    """One of the link targets resolves to the note key: the same path, or a path suffix (a basename link)."""
+    stem = key.removesuffix(".md")
+    for name in names:
+        name = name.removesuffix(".md").strip("/")
+        if stem == name or stem.endswith("/" + name):
+            return True
+    return False
+
+
+def _plain(text: str) -> str:
+    return "\n".join(line.rstrip() for line in text.strip().splitlines())
+
+
+def _replaced_errors(key: str, fm: dict, by: str, by_fm: dict) -> list[tuple[str, str]]:
+    """A note that the run replaces by the note `by`: `superseded_by` to it, and `validity: superseded` when the note
+    has a validity or is a state or a proposal."""
+    errors = []
+    if not links_to(link_names(fm.get("superseded_by")), by):
+        errors.append(("missing-superseded-by", f"{key} has no superseded_by {by}"))
+    if links_to(link_names(fm.get("supersedes")), by) or links_to(link_names(by_fm.get("superseded_by")), key):
+        errors.append(("supersede-direction", f"{key} supersedes {by}, not the reverse"))
+    if ("validity" in fm or fm.get("class") in ("state", "proposal")) and fm.get("validity") != "superseded":
+        errors.append(("validity", f"{key} has validity {fm.get('validity')}, not superseded"))
+    return errors
+
+
+def check_effect(action: str | None, targets: set[str], diff: dict, notes: NoteTexts) -> list[tuple[str, str]]:
+    """The (reason, detail) errors of the content of the writes of a supersede or a merge (step 5 of the skill).
+    supersede: the created note lists each target in `supersedes` and has no `superseded_by`; each target has
+    `superseded_by` the created note. merge: one target (the merge target) has no `superseded_by` and lists each
+    other target in `supersedes`; each other target has `superseded_by` the merge target; a state merge target has
+    the `as_of` of the candidate text. A changed note that differs only in white space is a no-op edit."""
+    errors: list[tuple[str, str]] = []
+    for key in diff["changed"]:
+        old, new = notes.before(key), notes.after(key)
+        if old is not None and new is not None and _plain(old) == _plain(new):
+            errors.append(("no-op-edit", f"{key} differs only in white space"))
+
+    def fm(key: str) -> dict:
+        text = notes.after(key)
+        return parse_note(text)[0] if text is not None else {}
+
+    if action == "supersede":
+        created = [p for p in diff["created"] if is_note(p)]
+        if len(created) != 1:
+            return errors  # check_writes reports it
+        new = created[0]
+        new_fm = fm(new)
+        if new_fm.get("superseded_by"):
+            errors.append(("supersede-direction", f"the created note {new} has superseded_by"))
+        listed = link_names(new_fm.get("supersedes"))
+        for key in sorted(targets):
+            if not links_to(listed, key):
+                errors.append(("missing-supersedes", f"{new} does not list {key} in supersedes"))
+            errors += _replaced_errors(key, fm(key), new, new_fm)
+    elif action == "merge":
+        heads = sorted(t for t in targets if not fm(t).get("superseded_by"))
+        if len(heads) != 1:
+            return [*errors, ("merge-target", f"{len(heads)} targets have no superseded_by; a merge has one target")]
+        head = heads[0]
+        head_fm = fm(head)
+        listed = link_names(head_fm.get("supersedes"))
+        for key in sorted(targets - {head}):
+            if not links_to(listed, key):
+                errors.append(("missing-supersedes", f"{head} does not list {key} in supersedes"))
+            errors += _replaced_errors(key, fm(key), head, head_fm)
+        head_as_of = note_as_of({"as_of": head_fm.get("as_of")})
+        if head_fm.get("class") == "state" and notes.as_of and head_as_of != notes.as_of:
+            errors.append(("as-of", f"the merge target {head} has as_of {head_fm.get('as_of')}, not {notes.as_of}"))
+    return errors
+
+
+def score(case: dict, record: dict | None, diff: dict, notes: NoteTexts | None = None) -> dict:
+    """The score of one case. A supersede or a merge needs the note texts (notes) for the check of its content;
+    without them it is not correct (`effect-unchecked`)."""
     expected, expected_targets = expected_of(case)
     action = record.get("action") if record else None
     targets = set(record.get("targets") or []) if record else set()
@@ -490,7 +777,10 @@ def score(case: dict, record: dict | None, diff: dict) -> dict:
     extra, missing = check_writes(action, targets, diff) if record else ([], [])
     flag_ok = record is not None and record.get("written") is (action in WRITE_ACTIONS)
     written_ok = record is not None and not extra and not missing and flag_ok
-    correct = action_ok and target_ok and written_ok
+    effect: list[tuple[str, str]] = []
+    if record is not None and action in ("supersede", "merge"):
+        effect = check_effect(action, targets, diff, notes) if notes else [("effect-unchecked", "no note texts")]
+    correct = action_ok and target_ok and written_ok and not effect
     merge_for_supersede = expected == "supersede" and action == "merge"
     reasons = []
     if record is not None:
@@ -500,6 +790,7 @@ def score(case: dict, record: dict | None, diff: dict) -> dict:
         reasons += ["extra-writes"] if extra else []
         reasons += ["missing-writes"] if missing else []
         reasons += [] if flag_ok else ["written-flag"]
+        reasons += list(dict.fromkeys(reason for reason, _ in effect))
     if record is None:
         category = "failed"
     elif action == "refused" or record.get("outcome") == "refused":
@@ -520,6 +811,7 @@ def score(case: dict, record: dict | None, diff: dict) -> dict:
         "extra_targets": sorted(targets - set(expected_targets)),
         "extra_writes": extra,
         "missing_writes": missing,
+        "effect_errors": [detail for _, detail in effect],
         "action_ok": action_ok,
         "target_ok": target_ok,
         "written_ok": written_ok,
@@ -568,10 +860,13 @@ def format_summary(summary: dict) -> str:
     lines.append(f"cost: ${summary['cost_usd']:.2f}")
     if "clean" in summary:
         lines.append(
-            "source mirror unchanged, no outside change"
+            "clean: source mirror and case homes unchanged, audit passed"
             if summary["clean"]
-            else f"OUTSIDE CHANGES: mirror {summary['source_mirror_changes']}, files {summary['outside_changes']}"
+            else f"NOT CLEAN: mirror {summary['source_mirror_changes']}, case homes {summary['home_changes']},"
+            f" audit {summary['audit_failures']}"
         )
+        if summary.get("outside_warnings"):
+            lines.append(f"warning: {len(summary['outside_warnings'])} files changed outside the run, see summary.json")
     return "\n".join(lines)
 
 
@@ -595,7 +890,7 @@ def _new_row(case: dict, form: str) -> dict:
     return {
         "case": case.get("id"), "kind": case.get("kind"), "positive_kind": case.get("positive_kind"), "form": form,
         "as_of": None, "home": None, "index": None, "record": None, "record_error": None, "diff": EMPTY_DIFF,
-        "home_changes": None, "session": None, "exit_code": None, "timed_out": False, "cost_usd": None,
+        "home_changes": None, "session": None, "audit": None, "exit_code": None, "timed_out": False, "cost_usd": None,
         "turns": None, "duration_s": None, "permission_denials": None, "error": None,
     }  # fmt: skip
 
@@ -614,13 +909,18 @@ def run_case(
     runner: Runner,
     guards: tuple[Path, ...] = (),
     keep_home: bool = False,
+    bench_home: Path | None = None,
+    case_ids: list[str] | None = None,
 ) -> dict:
-    """One case: build its home, run the agent, diff the mirror, score. Any error gives a failed row."""
+    """One case: build its home, run the agent, diff the mirror, audit the transcript, score. Any error gives a
+    failed row; an audit violation fails the case."""
     row = _new_row(case, form)
     case_home = None
     try:
         plugin_root = plugin_root_of(skill)
-        case_home = build_case_home(case, cfg, run_dir, form, plugin_root, guards)
+        case_home = build_case_home(
+            case, cfg, run_dir, form, plugin_root, guards, bench_home=bench_home, case_ids=case_ids
+        )
         row.update(as_of=case_home.as_of, home=str(case_home.home), index=case_home.index)
         argv = agent_command(claude, case_home, budget=budget, model=model)
         prompt = agent_prompt(case_home, skill, plugin_root)
@@ -648,7 +948,12 @@ def run_case(
         row["record"], row["record_error"] = record, agent["error"] or error
         if out.timed_out:
             row["error"] = f"the agent passed the time limit of {timeout:g} s"
-        row["score"] = score(case, record, row["diff"])
+        row["audit"] = audit_agent(out.stdout, case_home, plugin_root)
+        notes = mirror_texts(cfg, case, case_home.mirror, case_home.as_of)
+        row["score"] = score(case, record, row["diff"], notes)
+        if row["audit"]["violations"]:
+            reasons = [*row["score"]["reasons"], "audit"]
+            row["score"] = {**row["score"], "correct": False, "category": "failed", "reasons": reasons}
     except Exception as e:  # one case must not stop the run
         row["error"] = f"{type(e).__name__}: {e}"
         row["score"] = score(case, None, EMPTY_DIFF) if "kind" in case else {"correct": False, "category": "failed"}
@@ -677,7 +982,8 @@ def run_cases(
     runner: Runner | None = None,
 ) -> tuple[list[dict], dict, Path]:
     """Run each case; write records.jsonl and summary.json into the run folder. Raise SourceChanged (after the
-    files are written) when the source mirror changed or a file changed outside the case mirrors."""
+    files are written) when the source mirror changed, a runner file of a case home changed, or the audit of an
+    agent found a violation. A new file time under the bench home, the plugin folder or a guard is a warning."""
     runner = runner or subprocess_runner
     check_bench(home)
     if parallel < 1:
@@ -698,6 +1004,7 @@ def run_cases(
 
     start_ns = time.time_ns() - 1_000_000_000  # a margin for the time resolution of the file system
     mirror_before = snapshot(cfg.root)
+    plugin_before = snapshot(plugin_root)
     run_dir.mkdir(parents=True)
     lock = threading.Lock()
     records = run_dir / "records.jsonl"
@@ -705,7 +1012,8 @@ def run_cases(
 
     def one(case: dict) -> dict:
         row = run_case(case, cfg, run_dir, form=form, skill=skill, claude=claude, model=model, budget=budget,
-                       timeout=timeout, runner=runner, guards=guards, keep_home=keep_homes)  # fmt: skip
+                       timeout=timeout, runner=runner, guards=guards, keep_home=keep_homes, bench_home=home,
+                       case_ids=ids)  # fmt: skip
         with lock, records.open("a") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
         return row
@@ -716,21 +1024,28 @@ def run_cases(
     finally:
         mirror_changes = diff_snapshots(mirror_before, snapshot(cfg.root))
         mirror_changes = mirror_changes if any(mirror_changes.values()) else {}
+        home_changes = {r["case"]: r["home_changes"] for r in rows if r.get("home_changes")}
+        audit_failures = {r["case"]: r["audit"]["violations"] for r in rows if (r.get("audit") or {}).get("violations")}
+        # warnings: a file with a new time under the bench home, the plugin folder and the guards (another session
+        # can write them), and the snapshot diff of the plugin folder (it also shows a deleted file)
         homes = [run_dir / i for i in ids]
         skip_dirs = {h / d for h in homes for d in CASE_WRITABLE}
+        skip_dirs |= {r.resolve() for r in home.glob("replay/*/runs/*") if r.resolve() != run_dir}
         skip_files = {h / f for h in homes for f in RUNNER_FILES} | {run_dir / f for f in RUNNER_FILES}
-        outside = []
-        for root in (home.resolve(), plugin_root.resolve(), *guards):
-            outside += changed_since(root, start_ns, skip_dirs, skip_files)
-        outside += [f"{r['home']}: {r['home_changes']}" for r in rows if r.get("home_changes")]
-        outside = sorted(set(outside))
+        warnings = []
+        for root in (home.resolve(), *guards):
+            warnings += changed_since(root, start_ns, skip_dirs, skip_files)
+        plugin_changes = diff_snapshots(plugin_before, snapshot(plugin_root))
+        warnings += [f"{kind} {plugin_root / p}" for kind, paths in plugin_changes.items() for p in paths]
         summary = {
             **summarize(rows),
-            "clean": not mirror_changes and not outside,
+            "clean": not mirror_changes and not home_changes and not audit_failures,
             "source_mirror_changes": mirror_changes,
-            "outside_changes": outside,
+            "home_changes": home_changes,
+            "audit_failures": audit_failures,
+            "outside_warnings": sorted(set(warnings)),
             "guards": [str(g) for g in guards],
-            "failed_cases": [r["case"] for r in rows if r["error"]],
+            "failed_cases": [r["case"] for r in rows if r["error"] or r["case"] in audit_failures],
             "run_id": run_dir.name,
             "set": str(set_dir),
             "form": form,
@@ -744,7 +1059,7 @@ def run_cases(
         (run_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
     if not summary["clean"]:
         raise SourceChanged(
-            f"files outside the case mirrors changed: mirror {json.dumps(mirror_changes)}, files {outside}"
-            f" (see {run_dir / 'summary.json'})"
+            f"the run is not clean: source mirror {json.dumps(mirror_changes)}, case homes {json.dumps(home_changes)},"
+            f" audit {json.dumps(audit_failures)} (see {run_dir / 'summary.json'})"
         )
     return rows, summary, run_dir
