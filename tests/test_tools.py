@@ -239,7 +239,7 @@ def test_server_search_takes_a_subject(tools):
     assert paths("find_entities", {"name": "garage"}) == ["Home/Entities/Garage.md"]
 
 
-def test_server_lists_the_seven_tools(tools):
+def test_server_lists_the_eight_tools(tools):
     server = build(tools=tools)
     names = {t.name for t in asyncio.run(server.list_tools())}
     assert names == {
@@ -250,6 +250,7 @@ def test_server_lists_the_seven_tools(tools):
         "open_note",
         "find_by_jira",
         "find_entities",
+        "validate",
     }
 
 

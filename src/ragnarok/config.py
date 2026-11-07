@@ -60,6 +60,14 @@ class VaultRules:
 
 
 @dataclass
+class WriteConfig:
+    """The local rules of the write path: the [write] table."""
+
+    # frontmatter keys outside the model that `validate` does not report as unknown
+    known_keys: list[str] = field(default_factory=list)
+
+
+@dataclass
 class Config:
     root: Path = field(default_factory=lambda: Path("~/Documents/Vaults").expanduser())
     vaults: list[str] = field(default_factory=list)
@@ -87,6 +95,7 @@ class Config:
     # data_dir holds index.db, backups/ and proposals/; without index_path the index is data_dir/index.db
     data_dir: Path | None = None
     index_path: Path | None = None
+    write: WriteConfig = field(default_factory=WriteConfig)
 
     def __post_init__(self):
         if self.index_path is None:
@@ -94,6 +103,17 @@ class Config:
             self.index_path = self.data_dir / "index.db"
         elif self.data_dir is None:
             self.data_dir = self.index_path.parent
+
+    def note_key(self, raw: str) -> str:
+        """The key `<vault>/<path in the vault>` of a path that is relative to the vault root or absolute."""
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            return path.as_posix()
+        path = path.resolve()
+        for vault in self.vaults:
+            if path.is_relative_to(base := self.vault_dir(vault).resolve()):
+                return f"{vault}/{path.relative_to(base).as_posix()}"
+        return path.relative_to(self.root.resolve()).as_posix()
 
     def vault_dir(self, vault: str) -> Path:
         return self.vault_paths.get(vault) or self.root / vault
@@ -146,6 +166,8 @@ def load_config(path: Path | None = None) -> Config:
             value = {vault: path.parent / Path(folder).expanduser() for vault, folder in value.items()}
         elif key == "vault_rules":
             value = {vault: VaultRules(**rules) for vault, rules in value.items()}
+        elif key == "write":
+            value = WriteConfig(**value)
         values[key] = value
     return Config(**values)
 
@@ -155,7 +177,7 @@ def dump_config(cfg: Config, **paths: Path | str) -> str:
     lines = [f"{key} = {json.dumps(str(value))}" for key, value in paths.items()]
     for f in fields(Config):
         value = getattr(cfg, f.name)
-        if f.name in PATH_KEYS or f.name in ("vault_paths", "vault_rules") or f.name in paths:
+        if f.name in PATH_KEYS or f.name in ("vault_paths", "vault_rules", "write") or f.name in paths:
             continue
         lines.append(f"{f.name} = {json.dumps(sorted(value) if isinstance(value, set) else value)}")
     if cfg.vault_paths:
@@ -164,4 +186,7 @@ def dump_config(cfg: Config, **paths: Path | str) -> str:
     for vault, rules in cfg.vault_rules.items():
         lines.append(f"\n[vault_rules.{json.dumps(vault)}]")
         lines += [f"{key} = {json.dumps(value)}" for key, value in asdict(rules).items()]
+    if cfg.write.known_keys:
+        lines.append("\n[write]")
+        lines.append(f"known_keys = {json.dumps(cfg.write.known_keys)}")
     return "\n".join(lines) + "\n"

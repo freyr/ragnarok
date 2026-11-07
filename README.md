@@ -102,7 +102,7 @@ change of the configuration applies at the next `ragnarok index` or MCP tool cal
 
 ## Use in Claude Code
 
-The server gives seven tools:
+The server gives eight tools:
 
 | Tool | What it does |
 |---|---|
@@ -113,6 +113,7 @@ The server gives seven tools:
 | `open_note` | The text of a note or of one section, with its links and backlinks. A note of more than 4,000 words gives an outline: each section with its heading path, words and first sentence. |
 | `find_by_jira` | The notes that contain a ticket key, for example `ABC-123`. |
 | `find_entities` | The entity notes (`type: entity`), with kind and aliases. |
+| `validate` | Checks notes, or a draft before a write, against the knowledge-base frontmatter model: the values, the required keys, the links, the reference targets and the identity keys. |
 
 The plugin adds the guidance below to each session itself, with the plugin tool names
 `mcp__plugin_ragnarok_ragnarok__*`. Without the plugin, Claude Code loads MCP tools on demand. To make Claude
@@ -172,6 +173,7 @@ It changes only `config.toml` and adds frontmatter keys. It never moves, renames
 | `project_markers` | A folder that holds one of these files is a project folder (default `DRIVERS.md`, `SUMMARY.md`). |
 | `jira_prefixes` | The ticket prefixes that `find_by_jira` knows. |
 | `[vault_rules.<vault>]` | The path rules of one vault: which folder gives the area and the project. |
+| `[write]` | `known_keys`: frontmatter keys outside the knowledge-base model that `validate` does not report as unknown. The default is an empty list. |
 
 ### Note metadata
 
@@ -208,6 +210,7 @@ Without frontmatter, the path rules give the metadata. The default rules work fo
 | `ragnarok serve` | Runs the MCP server on stdio. Claude Code starts it. |
 | `ragnarok backfill propose\|export\|merge\|apply <vault> [file...]` | Proposes, describes and applies missing frontmatter keys. The order is `propose`, `export`, Claude writes descriptions, `merge <vault> <file>...`, you examine the proposal, `apply`. |
 | `ragnarok survey <vault> [--json]` | Prints the folders, frontmatter keys, marker files, name patterns and ticket prefixes of a vault folder. Run it before you write `[vault_rules.<vault>]`. It prints no note text. |
+| `ragnarok validate [<path>...] [--json]` | Checks notes against the knowledge-base frontmatter model, their links, their reference targets and the identity keys. With no path, it checks all notes of the index and prints the counts of broken links (M1), double identity (M3) and notes with no error (M4). The exit code is 1 when there is an error. |
 | `ragnarok eval mechanical\|pool\|agent` | Runs an evaluation on the question sets in `data/eval/sets/`. |
 
 Run each command with `uvx ragnarok-mcp`, for example `uvx ragnarok-mcp search "boiler"`, or with `uv run` in the

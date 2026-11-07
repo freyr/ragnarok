@@ -19,6 +19,7 @@ COMMANDS = {
     "eval": "Run the evaluation sets",
     "init": "Set up this computer: config, Ollama, model, index and the MCP server in Claude Code",
     "doctor": "Check the six parts of the setup and print the fix for each failure",
+    "validate": "Check notes against the frontmatter model, the links and the identity keys",
 }
 
 
@@ -63,18 +64,14 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("vault", help="a folder name under the vault root; it need not be in the config yet")
     sv.add_argument("--top", type=int, default=30, help="the number of rows in each list (default 30)")
     sv.add_argument("--json", action="store_true", help="print one JSON object")
+    vp = parsers["validate"]
+    vp.add_argument("paths", nargs="*", help="note paths, relative to the vault root or absolute (default all notes)")
+    vp.add_argument("--json", action="store_true", help="print one JSON object")
     return parser
 
 
 def _relative(cfg, raw: str) -> str:
-    path = Path(raw).expanduser()
-    if not path.is_absolute():
-        return path.as_posix()
-    path = path.resolve()
-    for vault in cfg.vaults:
-        if path.is_relative_to(base := cfg.vault_dir(vault).resolve()):
-            return f"{vault}/{path.relative_to(base).as_posix()}"
-    return path.relative_to(cfg.root.resolve()).as_posix()
+    return cfg.note_key(raw)
 
 
 def cmd_inspect(cfg, args) -> int:
@@ -347,6 +344,37 @@ def cmd_survey(cfg, args) -> int:
     return 0
 
 
+def cmd_validate(cfg, args) -> int:
+    from .index import IndexMismatch, connect
+    from .validate import check_index, check_paths, format_text
+
+    if not cfg.index_path.exists():
+        print(f"No index at {cfg.index_path}. Run `ragnarok index`.", file=sys.stderr)
+        return 1
+    keys = []
+    for raw in args.paths:
+        try:
+            keys.append(cfg.note_key(raw))
+        except ValueError:
+            keys.append(raw)
+    missing = [k for k in keys if not cfg.note_path(k).is_file()]
+    for rel in missing:
+        print(f"not a note: {rel}", file=sys.stderr)
+    if missing:
+        return 1
+    try:
+        conn = connect(cfg)
+    except IndexMismatch as e:
+        print(e, file=sys.stderr)
+        return 1
+    try:
+        report = check_paths(cfg, conn, keys) if keys else check_index(cfg, conn)
+    finally:
+        conn.close()
+    print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2) if args.json else format_text(report))
+    return 1 if report.errors else 0
+
+
 def _config_file(args) -> Path:
     from .config import config_path
 
@@ -392,6 +420,7 @@ HANDLERS = {
     "index": cmd_index,
     "status": cmd_status,
     "search": cmd_search,
+    "validate": cmd_validate,
 }
 
 

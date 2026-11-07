@@ -460,7 +460,10 @@ class _Paths:
         self.vault_of = {nid: vault for nid, vault, _ in notes}
         self.path_of = {nid: path for nid, _, path in notes}
 
-    def find(self, target: str, from_note: int | None, among: set[int] | None = None) -> int | None:
+    def find(
+        self, target: str, from_note: int | None, among: set[int] | None = None, from_path: str | None = None
+    ) -> int | None:
+        """The note of a link target. from_path is the path of a note with the link that is not in the index."""
         key = _link_key(target).strip("/")
         candidates = [
             n
@@ -469,8 +472,11 @@ class _Paths:
         ]
         if not candidates:
             return None
-        home = self.vault_of.get(from_note)
-        folders = self.path_of.get(from_note, "").split("/")[:-1]
+        if from_note is None and from_path:
+            home, folders = from_path.split("/")[0], _link_key(from_path).split("/")[:-1]
+        else:
+            home = self.vault_of.get(from_note)
+            folders = self.path_of.get(from_note, "").split("/")[:-1]
         return min(candidates, key=lambda n: (n[1] != home, -_common_folders(folders, n[2]), len(n[2])))[0]
 
 
@@ -501,14 +507,14 @@ class _Resolver:
         found = self.by_alias.get(normalize_alias(text), set())
         return next(iter(found)) if len(found) == 1 else None
 
-    def entity(self, text: str, from_note: int | None) -> int | None:
+    def entity(self, text: str, from_note: int | None, from_path: str | None = None) -> int | None:
         """A `subject` or an `owner`: an entity note only."""
-        found = self.paths.find(text, from_note, self.entities)
+        found = self.paths.find(text, from_note, self.entities, from_path)
         return found if found is not None else self._alias(text)
 
-    def note(self, text: str, from_note: int | None) -> int | None:
+    def note(self, text: str, from_note: int | None, from_path: str | None = None) -> int | None:
         """A `supersedes` or a `superseded_by`: any note, or an entity note by its alias."""
-        found = self.paths.find(text, from_note)
+        found = self.paths.find(text, from_note, None, from_path)
         return found if found is not None else self._alias(text)
 
 

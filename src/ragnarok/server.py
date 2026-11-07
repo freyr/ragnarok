@@ -20,7 +20,7 @@ from .tools import Tools
 
 log = logging.getLogger("ragnarok.server")
 
-EXPECTED = (EmbedError, IndexMismatch, PrivateNotAllowed, FileNotFoundError, LookupError)
+EXPECTED = (EmbedError, IndexMismatch, PrivateNotAllowed, FileNotFoundError, LookupError, ValueError)
 
 INSTRUCTIONS = (
     "Search the user's Obsidian vaults ({vaults}). "
@@ -235,5 +235,20 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
         in any case. Use a title or an alias as the subject filter of search.
         """
         return get().find_entities(kind=kind, name=name)
+
+    @server.tool()
+    @timed
+    def validate(paths: list[str] | None = None, draft: str | None = None, path: str | None = None) -> dict:
+        """Check notes, or a draft before a write, against the knowledge-base frontmatter model.
+
+        paths: note paths (as in search results). draft: the frontmatter and the body as one Markdown text; path is
+        its intended note path. Errors: wrong values of class, validity, as_of, subject, task, supersedes,
+        superseded_by and owner; a missing class, or a missing validity for a state or a proposal; a wiki-link that
+        resolves to no note (outside code); a subject or owner that is not an entity note, or a reference target that
+        does not exist; a superseded_by target that does not list the note in supersedes; two current state notes with
+        one identity key (type, primary subject, task). Warnings: unknown frontmatter keys.
+        Each issue has path, check (1 to 7), severity, kind and message.
+        """
+        return get().validate(paths=paths, draft=draft, path=path)
 
     return server
