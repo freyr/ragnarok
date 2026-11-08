@@ -42,8 +42,7 @@ GENERIC = {"readme", "summary", "index", "overview", "dashboard", "brief", "deci
 SAME_AREA = {"dashboard"}  # a generic name that a link fix keeps when the target is in the area of the source
 FIX_LINKS, FIX_YAML, USER = "ragnarok fix links", "ragnarok fix yaml", "the user"
 KB_WRITE_KINDS = ("double-identity", "bad-superseded-by", "bad-supersedes", "no-matching-supersedes")
-KB_CONVERT_KINDS = ("no-class", "no-validity", "no-as-of", "no-subject")
-BROKEN_LINK = re.compile(r"link \[\[(.*)\]\] resolves to no note")
+BROKEN_LINK = re.compile(r"link \[\[(.*)\]\] resolves to no note", re.DOTALL)
 
 
 def area_of(path: str) -> tuple[str, str]:
@@ -100,6 +99,7 @@ class Result:
     gate: dict
     vault: str | None = None  # the scope: one vault, or all vaults
     area: str | None = None
+    gaps: list[tuple[str, str]] = field(default_factory=list)  # (path, key) of each missing required key
 
     def label(self, vault: str, area: str) -> str:
         """The name of an area: with one vault in scope the area alone, else `<vault>/<area>`."""
@@ -130,18 +130,23 @@ def _reason(cfg: Config, issue: Issue) -> str | None:
     return None
 
 
-def _count(values: Values, note: _Note, reasons: list[str | None]) -> None:
+def _count(values: Values, note: _Note, reasons: list[str | None]) -> list[str]:
+    """Add the note to the values. Returns the required keys that the note lacks."""
     errors = [r for i, r in zip(note.issues, reasons, strict=True) if i.severity == ERROR]
     values.notes += 1
     values.errors += len(errors)
     values.accepted += sum(r is not None for r in errors)
     defect = any(r is not None and i.kind in FRONTMATTER_DEFECTS for i, r in zip(note.issues, reasons, strict=True))
+    missing = []
     if defect:
-        return
+        return missing
     for key, needed in required(note.fm, note.meta.entity).items():
         if needed:
             values.need[key] += 1
             values.have[key] += _present(note.fm.get(key))
+            if not _present(note.fm.get(key)):
+                missing.append(key)
+    return missing
 
 
 def gate(cfg: Config, total: Values) -> dict:
@@ -169,18 +174,18 @@ def health(cfg: Config, conn: sqlite3.Connection, vault: str | None = None, area
     mark_doubles(notes)
     areas: dict[tuple[str, str], Values] = {}
     total = Values()
-    issues = []
+    issues, gaps = [], []
     for note in notes:
         v, a = area_of(note.path)
         if (vault is not None and v != vault) or (area is not None and a != area):
             continue
         reasons = [_reason(cfg, i) for i in note.issues]
         _count(areas.setdefault((v, a), Values()), note, reasons)
-        _count(total, note, reasons)
+        gaps += [(note.path, key) for key in _count(total, note, reasons)]
         issues += [(i, r) for i, r in zip(note.issues, reasons, strict=True) if i.severity == ERROR]
     issues.sort(key=lambda ir: (ir[0].path, ir[0].check))
     areas = dict(sorted(areas.items()))
-    return Result(areas, total, issues, gate(cfg, total), vault, area)
+    return Result(areas, total, issues, gate(cfg, total), vault, area, gaps)
 
 
 # --- the worklist ------------------------------------------------------------------------------------------------
@@ -203,6 +208,14 @@ def note_names(conn: sqlite3.Connection) -> dict[str, list[str]]:
     return names
 
 
+def excluded(cfg: Config, source: str, kind: str) -> bool:
+    """True when no automatic fix of this issue kind applies to the note: it is in an `assets` folder or under an
+    accept rule of the kind."""
+    return "assets" in source.split("/")[1:-1] or any(
+        kind in r.kinds and fnmatchcase(source, r.glob) for r in cfg.health.accept
+    )
+
+
 def link_decision(cfg: Config, names: dict[str, list[str]], source: str, target: str) -> LinkDecision:
     """Decide the fix of one broken link: `source` is the key of the note with the link, `target` the link text.
 
@@ -211,9 +224,7 @@ def link_decision(cfg: Config, names: dict[str, list[str]], source: str, target:
     or in an `assets` folder. The edit itself, which keeps `!`, `|alias`, `#heading` and `^block`, is the fixer's.
     """
     vault, area = area_of(source)
-    if "assets" in source.split("/")[1:-1] or any(
-        "broken-link" in r.kinds and fnmatchcase(source, r.glob) for r in cfg.health.accept
-    ):
+    if excluded(cfg, source, "broken-link"):
         return LinkDecision(False, reason="accepted-or-assets")
     name = _link_key(target.strip()).rstrip("/").rsplit("/", 1)[-1]
     found = names.get(name, [])
@@ -225,6 +236,11 @@ def link_decision(cfg: Config, names: dict[str, list[str]], source: str, target:
     if name in GENERIC and not (name in SAME_AREA and area_of(same[0]) == (vault, area)):
         return LinkDecision(False, reason="generic-name")
     return LinkDecision(True, target=same[0])
+
+
+def yaml_decision(cfg: Config, source: str, text: str) -> int | None:
+    """The line to fix in the frontmatter of the note `source`, or None when the user must decide."""
+    return None if excluded(cfg, source, "bad-yaml") else yaml_line(text)
 
 
 def yaml_line(text: str) -> int | None:
@@ -269,17 +285,20 @@ class Work:
     detail: str
     fix: str
     target: str | None = None  # a link fix: the note that the link names after the fix
-    reason: str | None = None  # a link for the user: why
+    reason: str | None = None  # a link or YAML defect for the user: why
+    label: bool = False  # a missing required key, not a validate error
 
     def as_dict(self) -> dict:
-        return {k: getattr(self, k) for k in ("path", "vault", "area", "kind", "detail", "fix", "target", "reason")}
+        keys = ("path", "vault", "area", "kind", "detail", "fix", "target", "reason", "label")
+        return {k: getattr(self, k) for k in keys}
 
     def text(self) -> str:
-        return f"{self.path}: {self.kind} {self.detail}  fix: {self.fix}"
+        return f"{self.path}: {self.kind} {self.detail}  fix: {self.fix}".replace("\n", " ")
 
 
 def worklist(cfg: Config, conn: sqlite3.Connection, result: Result) -> list[Work]:
-    """One line for each error that is not accepted, with its fix, sorted by area, then fix."""
+    """One line for each error that is not accepted and one for each missing required key, with the fix for it,
+    sorted by area, then fix."""
     names = note_names(conn)
     out = []
     for issue, reason in result.issues:
@@ -295,14 +314,20 @@ def worklist(cfg: Config, conn: sqlite3.Connection, result: Result) -> list[Work
             work.detail = f"[[{link}]] -> {decision.target}" if decision.auto else f"[[{link}]] ({decision.reason})"
             work.fix = FIX_LINKS if decision.auto else USER
         elif issue.kind == "bad-yaml":
-            file = cfg.note_path(issue.path)
-            if yaml_line(file.read_text(errors="replace")) is not None:
+            if yaml_decision(cfg, issue.path, cfg.note_path(issue.path).read_text(errors="replace")) is not None:
                 work.fix = FIX_YAML
+            elif excluded(cfg, issue.path, "bad-yaml"):
+                work.reason = "accepted-or-assets"
         elif issue.kind in KB_WRITE_KINDS:
             work.fix = "kb-write"
-        elif issue.kind in KB_CONVERT_KINDS:
-            work.fix = f"kb-convert {area}"
         out.append(work)
+    for path, key in result.gaps:
+        vault, area = area_of(path)
+        out.append(
+            Work(
+                path, vault, area, f"no-{key.replace('_', '-')}", f"{key} is missing", f"kb-convert {area}", label=True
+            )
+        )
     return sorted(out, key=lambda w: (w.vault, w.area, w.fix, w.path, w.kind))
 
 

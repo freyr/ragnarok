@@ -255,6 +255,11 @@ WORK_NOTES = {
     "V/Src/links.md": REC
     + "---\n[[Old/Heat pump guide]] [[Old/Old guide]] [[Old/README]] [[Old/Twin]] [[Old/Heat pump gide]]"
     + " [[Old/Folder]] [[Old/Nowhere]] [[Old/Only in W]] ![[Old/Heat pump guide.md#Top|Guide]]\n",
+    "V/Src/cut.md": REC
+    + "---\n[[Old/Heat pump gu\n- class: x]] [[@name]] [[1-on-1 {{date}}]] [[Board.base]] [[Only in W!]]\n",
+    "V/Fixtures/assets/cut.md": REC + "---\n[[Old/Heat pump gu\n- class: x]]\n",
+    "V/Fixtures/assets/yaml.md": REC + "title: Foo: bar\n---\n",
+    "V/Labels/bare.md": "---\ntype: guide\n---\n# Bare\n",
     "V/Astro/src.md": REC + "---\n[[Old/Dashboard]]\n",
     "V/Other/src.md": REC + "---\n[[Old/Dashboard]]\n",
     "V/Fixtures/assets/fx.md": REC + "---\n[[Old/Heat pump guide]]\n",
@@ -299,6 +304,7 @@ def work(wcfg, tmp_path, capsys, *args):
 def test_worklist_gives_one_fix_for_each_link_class(wcfg, tmp_path, capsys):
     lines = work(wcfg, tmp_path, capsys)
     links = {(w["detail"].split("]]")[0] + "]]", w["path"]): w for w in lines if w["kind"] == "broken-link"}
+    assert len(links) == len([w for w in lines if w["kind"] == "broken-link"])
     src, astro = "V/Src/links.md", "V/Astro/src.md"
     fix, user = "ragnarok fix links", "the user"
     expected = {
@@ -313,15 +319,22 @@ def test_worklist_gives_one_fix_for_each_link_class(wcfg, tmp_path, capsys):
         ("[[Old/Nowhere]]", src): (user, "no-candidate"),
         ("[[Old/Only in W]]", src): (user, "cross-vault-only"),
         ("[[Old/Heat pump guide]]", "V/Fixtures/assets/fx.md"): (user, "accepted-or-assets"),
+        ("[[Old/Heat pump gu\n- class: x]]", "V/Src/cut.md"): (user, "no-candidate"),  # cut link text
+        ("[[Old/Heat pump gu\n- class: x]]", "V/Fixtures/assets/cut.md"): (user, "accepted-or-assets"),
+        ("[[@name]]", "V/Src/cut.md"): (user, "no-candidate"),  # placeholders
+        ("[[1-on-1 {{date}}]]", "V/Src/cut.md"): (user, "no-candidate"),
+        ("[[Board.base]]", "V/Src/cut.md"): (user, "no-candidate"),  # the validator false positive
+        ("[[Only in W!]]", "V/Src/cut.md"): (user, "no-candidate"),  # punctuation differs, note in another vault
     }
     assert {k: (v["fix"], v["target"] or v["reason"]) for k, v in links.items()} == expected
-    assert not [w for w in lines if w["path"] == "V/Skip/src.md"]  # accepted: no line
+    assert not [w for w in lines if w["path"] == "V/Skip/src.md" and not w["label"]]  # accepted: no line
 
 
 def test_worklist_maps_the_other_kinds(wcfg, tmp_path, capsys):
     lines = work(wcfg, tmp_path, capsys)
-    other = {(w["path"], w["kind"]): w["fix"] for w in lines if w["kind"] != "broken-link"}
+    other = {(w["path"], w["kind"]): w["fix"] for w in lines if w["kind"] != "broken-link" and not w["label"]}
     assert other == {
+        ("V/Fixtures/assets/yaml.md", "bad-yaml"): "the user",  # a fixture is never fixed
         ("V/Y/fixable.md", "bad-yaml"): "ragnarok fix yaml",
         ("V/Y/quoted.md", "bad-yaml"): "the user",
         ("V/Y/multiline.md", "bad-yaml"): "the user",
@@ -338,10 +351,29 @@ def test_worklist_maps_the_other_kinds(wcfg, tmp_path, capsys):
 def test_worklist_has_one_line_for_each_not_accepted_error_sorted_by_area_then_fix(wcfg, tmp_path, capsys):
     _, out = run(wcfg, tmp_path, capsys, "--worklist", "--json", health=WORK_TOML)
     data = json.loads(out.out)
-    assert len(data["worklist"]) == data["total"]["structural_errors"]["not_accepted"]
+    errors = [w for w in data["worklist"] if not w["label"]]
+    assert len(errors) == data["total"]["structural_errors"]["not_accepted"]
     keys = [(w["vault"], w["area"], w["fix"]) for w in data["worklist"]]
     assert keys == sorted(keys)
     assert "worklist" not in json.loads(run(wcfg, tmp_path, capsys, "--json", health=WORK_TOML)[1].out)
+
+
+def test_worklist_has_a_label_line_for_each_missing_required_key(wcfg, tmp_path, capsys):
+    lines = work(wcfg, tmp_path, capsys)
+    bare = [(w["kind"], w["fix"], w["detail"]) for w in lines if w["path"] == "V/Labels/bare.md"]
+    assert sorted(bare) == [
+        ("no-class", "kb-convert Labels", "class is missing"),
+        ("no-subject", "kb-convert Labels", "subject is missing"),
+    ]
+    assert all(w["label"] for w in lines if w["path"] == "V/Labels/bare.md")
+    # an entity needs no subject (only its class is missing); a record with as_of needs no validity
+    kinds = {
+        p: {w["kind"] for w in lines if w["label"] and w["path"] == p}
+        for p in ("V/Entities/Heat pump.md", "V/Guides/Heat pump guide.md")
+    }
+    assert kinds == {"V/Entities/Heat pump.md": {"no-class"}, "V/Guides/Heat pump guide.md": {"no-subject"}}
+    # a note with bad YAML that is not accepted counts, as in the coverage
+    assert {w["kind"] for w in lines if w["label"] and w["path"] == "V/Y/bracket.md"} == {"no-class", "no-subject"}
 
 
 def test_worklist_text_has_one_line_for_each_defect(wcfg, tmp_path, capsys):
@@ -349,6 +381,9 @@ def test_worklist_text_has_one_line_for_each_defect(wcfg, tmp_path, capsys):
     line = "V/Src/links.md: broken-link [[Old/Heat pump guide]] -> V/Guides/Heat pump guide.md  fix: ragnarok fix links"
     assert line in out.out.splitlines()
     assert "V/Y/quoted.md: bad-yaml" in out.out
+    assert "V/Labels/bare.md: no-class class is missing  fix: kb-convert Labels" in out.out.splitlines()
+    cut = [x for x in out.out.splitlines() if x.startswith("V/Src/cut.md: broken-link [[Old/Heat pump gu")]
+    assert cut == ["V/Src/cut.md: broken-link [[Old/Heat pump gu - class: x]] (no-candidate)  fix: the user"]
     assert "fix: " not in run(wcfg, tmp_path, capsys, "--vault", "V", health=WORK_TOML)[1].out
 
 
