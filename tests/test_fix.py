@@ -196,6 +196,27 @@ def test_the_re_read_check_skips_a_note_whose_old_link_is_gone(fcfg, tmp_path, c
     assert [row[0] for row in log_rows(run_dir)] == ["path", "V/Astro/src.md"]
 
 
+def test_a_note_deleted_after_the_plan_is_skipped_and_the_run_goes_on(fcfg, tmp_path, capsys, monkeypatch):
+    baseline = fcfg.data_dir / "health" / "baseline.json"
+    baseline.parent.mkdir(parents=True)
+    baseline.write_text("{}")
+    plan = fix_module.plan_links
+
+    def plan_then_delete(*args):
+        changes = plan(*args)
+        (fcfg.root / SRC).unlink()  # another session deletes or moves the note
+        return changes
+
+    monkeypatch.setattr(fix_module, "plan_links", plan_then_delete)
+    code, out = fix(fcfg, tmp_path, capsys, "links", "--vault", "V")
+    assert code == 0, out.err
+    assert f"skipped: {SRC} (the note is not there any more)" in out.out.splitlines()
+    assert text(fcfg, "V/Astro/src.md") == REC + "---\nSee [[Dashboard|the board]].\n"
+    assert "validate: fixed links that resolve to no note: 0" in out.out
+    assert "baseline: 1 notes updated" in out.out
+    assert list(json.loads(baseline.read_text())) == ["V/Astro/src.md"]
+
+
 def test_the_changed_notes_go_into_the_baseline(fcfg, tmp_path, capsys):
     baseline = fcfg.data_dir / "health" / "baseline.json"
     baseline.parent.mkdir(parents=True)

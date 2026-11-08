@@ -57,6 +57,7 @@ class Run:
     written: list[str] = field(default_factory=list)  # the note keys written
     recent: list[str] = field(default_factory=list)  # skipped: changed in the last 10 minutes
     gone: list[str] = field(default_factory=list)  # skipped: the old text is not there any more
+    missing: list[str] = field(default_factory=list)  # skipped: the note was deleted or moved during the run
     folder: Path | None = None  # the backup folder of the run
 
 
@@ -219,14 +220,18 @@ def apply(cfg: Config, changes: list[Change], dry_run: bool = False) -> Run:
             csv.writer(f, delimiter="\t").writerow(["path", "old", "new"])
     for path, items in by_note.items():
         file = cfg.note_path(path)
-        if now - file.stat().st_mtime < MIN_AGE:
-            run.recent.append(path)
+        try:
+            if now - file.stat().st_mtime < MIN_AGE:
+                run.recent.append(path)
+                continue
+            if dry_run:
+                continue
+            backup = run.folder / path
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(file, backup)
+        except FileNotFoundError:
+            run.missing.append(path)
             continue
-        if dry_run:
-            continue
-        backup = run.folder / path
-        backup.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(file, backup)
         text = _read(cfg, path)
         new = _edit(text, items) if text is not None else None
         if new is None:
@@ -272,6 +277,7 @@ def format_changes(kind: str, run: Run, dry_run: bool) -> list[str]:
             lines.append(f"{c.path}: line {c.line + 1}: {c.old} -> {c.new}")
     lines += [f"skipped: {p} (changed in the last {MIN_AGE // 60} minutes)" for p in run.recent]
     lines += [f"skipped: {p} (the old text is not there any more)" for p in run.gone]
+    lines += [f"skipped: {p} (the note is not there any more)" for p in run.missing]
     notes = len({c.path for c in run.changes})
     tail = " (dry run, nothing written)" if dry_run else f", {len(run.written)} notes written"
     lines.append(f"{kind}: {len(run.changes)} in {notes} notes{tail}")
