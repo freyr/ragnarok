@@ -22,6 +22,10 @@ A W10 text with `{{apply-date}}` has no single hash: when the live note matches 
 as any ISO date, the entry holds the hash of the live note; else it holds the hash of the template, which no live
 note equals, so the note is changed.
 
+The seed takes one more rule, with a cutoff time: a note that differs from its W10 entry, or has none, and whose
+mtime is at or before the cutoff gets the hash of the live note (source `pre-cutoff-live`). mtime is used at the
+seed, once, and never at the drift check.
+
 The worklist gives each error that is not accepted one fix. `link_decision` is the one function that decides
 between `ragnarok fix links` and the user; the fixer of the links calls the same function.
 """
@@ -42,6 +46,7 @@ import yaml
 
 from .config import Config
 from .index import _link_key
+from .metadata import iter_notes
 from .validate import ERROR, Issue, _Context, _label, _Note, mark_doubles
 
 TOP = "(top)"
@@ -281,12 +286,15 @@ class Seed:
     proposed_changed: list[str]  # the proposed texts that the live note does not equal
     before: int  # the notes that only `real-before.txt` holds
     before_changed: list[str]
+    pre_cutoff: int = 0  # the notes with the live hash, as the cutoff rule says
 
 
-def seed_baseline(cfg: Config, w10: Path) -> Seed:
+def seed_baseline(cfg: Config, w10: Path, cutoff: datetime) -> Seed:
     """The first baseline from the W10 records: `<area>/proposed/<note key>.proposed` for each converted note, then
     the `real-before.txt` hashes (`<sha256>  ./<path in the area>`) of the notes that the conversion did not change.
-    The vault of an area is the first folder of its proposed keys. `<area>/skipped/` is not read."""
+    The vault of an area is the first folder of its proposed keys. `<area>/skipped/` is not read.
+    Then each note of these vaults that differs from its entry, or has none, and has an mtime at or before
+    `cutoff` (a naive time is local time) gets the live hash."""
     areas = sorted(a for a in w10.iterdir() if (a / "proposed").is_dir())
     if not areas:
         raise ValueError(f"no area with a proposed folder in {w10}")
@@ -324,7 +332,17 @@ def seed_baseline(cfg: Config, w10: Path) -> Seed:
                 entries[key] = {"sha256": digest, "date": date, "source": "real-before"}
                 if file_hash(cfg.note_path(key)) != digest:
                     before_changed.append(key)
-    return Seed(entries, len(areas), proposed, proposed_changed, len(entries) - proposed, before_changed)
+    before = len(entries) - proposed
+    limit, pre_cutoff = cutoff.timestamp(), 0
+    for key in iter_notes(cfg):
+        if key.split("/")[0] not in vaults.values():
+            continue
+        live = cfg.note_path(key)
+        digest = file_hash(live)
+        if (key not in entries or entries[key]["sha256"] != digest) and live.stat().st_mtime <= limit:
+            entries[key] = {"sha256": digest, "date": date, "source": "pre-cutoff-live"}
+            pre_cutoff += 1
+    return Seed(entries, len(areas), proposed, proposed_changed, before, before_changed, pre_cutoff)
 
 
 # --- the worklist ------------------------------------------------------------------------------------------------

@@ -1,6 +1,8 @@
 import hashlib
 import json
+import os
 import re
+import time
 
 import pytest
 from test_index import FakeEmbedder
@@ -451,7 +453,8 @@ def dcfg(cfg, tmp_path):
 
 def seed(cfg, tmp_path, capsys, *args):
     path = config_file(cfg, tmp_path, DRIFT_TOML)
-    code = main(["--config", str(path), "health", "baseline", "seed", *args])
+    cutoff = [] if "--cutoff" in args else ["--cutoff", "2000-01-01T00:00:00"]  # before every file: no live hash
+    code = main(["--config", str(path), "health", "baseline", "seed", *args, *cutoff])
     return code, capsys.readouterr()
 
 
@@ -477,6 +480,7 @@ def test_seed_writes_the_hash_and_the_date_of_each_note(dcfg, tmp_path, capsys):
     assert "proposed texts: 4 in 1 areas, equal to the live note: 2, changed: 2" in out.out
     assert f"  {LOG}\n" in out.out and f"  {CHANGED}\n" in out.out
     assert "real-before only: 2, equal to the live note: 1, changed: 1" in out.out
+    assert "pre-cutoff-live: 0" in out.out
     # the baseline stays fixed: a second seed does not overwrite it
     before = (dcfg.data_dir / "health" / "baseline.json").read_text()
     code, out = seed(dcfg, tmp_path, capsys, "--from", str(tmp_path / "w10"))
@@ -550,3 +554,37 @@ def test_an_edit_after_the_seed_makes_a_changed_note_and_update_baseline_takes_i
 def test_update_baseline_does_nothing_without_a_baseline(dcfg):
     assert health_module.update_baseline(dcfg, [GUIDE]) == 0
     assert not (dcfg.data_dir / "health").exists()
+
+
+def age(cfg, key, iso):
+    stamp = time.mktime(time.strptime(iso, "%Y-%m-%dT%H:%M:%S"))
+    os.utime(cfg.root / key, (stamp, stamp))
+
+
+def test_seed_takes_the_live_hash_of_a_note_at_or_before_the_cutoff(dcfg, tmp_path, capsys):
+    for key in (LOG, ENTITY, GUIDE):
+        age(dcfg, key, "2026-01-01T00:00:00")
+    age(dcfg, TOP, "2026-06-01T00:00:00")  # at the cutoff
+    code, out = seed(dcfg, tmp_path, capsys, "--from", str(tmp_path / "w10"), "--cutoff", "2026-06-01T00:00:00")
+    assert code == 0
+    data = {k: (v["sha256"], v["source"]) for k, v in baseline(dcfg).items()}
+    # differs from its W10 entry, or has none, and is not newer than the cutoff
+    assert data[LOG] == (sha(NOTES[LOG]), "pre-cutoff-live")
+    assert data[ENTITY] == (sha(NOTES[ENTITY]), "pre-cutoff-live")
+    assert data[TOP] == (sha(NOTES[TOP]), "pre-cutoff-live")
+    assert data[GUIDE] == (sha(NOTES[GUIDE]), "proposed")  # equal to its W10 entry: unchanged
+    # newer than the cutoff: the current rules (a changed text stays changed, a new path stays new)
+    assert data[CHANGED] == (sha(TEMPLATE_CHANGED), "proposed-unmatched")
+    assert BAD not in data and LINK not in data
+    assert "pre-cutoff-live: 3" in out.out
+    indexed(dcfg)
+    _, out = run(dcfg, tmp_path, capsys, "--vault", "V", "--json", health=DRIFT_TOML)
+    # changed, newer, bad and link: all pass (bad and link have accepted errors)
+    assert json.loads(out.out)["total"]["drift"] == {"changed": 4, "passing": 4, "share": 1.0}
+
+
+def test_seed_needs_a_cutoff(dcfg, tmp_path, capsys):
+    path = config_file(dcfg, tmp_path, DRIFT_TOML)
+    with pytest.raises(SystemExit):
+        main(["--config", str(path), "health", "baseline", "seed", "--from", str(tmp_path / "w10")])
+    assert "--cutoff" in capsys.readouterr().err

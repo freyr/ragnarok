@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from .config import load_config
@@ -84,6 +85,13 @@ def build_parser() -> argparse.ArgumentParser:
     hbs = hb.add_subparsers(dest="baseline_action", required=True)
     seed = hbs.add_parser("seed", help="write data/health/baseline.json from the W10 records")
     seed.add_argument("--from", type=Path, required=True, dest="w10", help="the W10 folder: one folder for each area")
+    seed.add_argument(
+        "--cutoff",
+        type=datetime.fromisoformat,
+        required=True,
+        help="ISO datetime (local time): a note that differs from the W10 text or is not in it, with an mtime"
+        " at or before this time, gets the live hash",
+    )
     seed.description = (
         "Reads <area>/proposed/*.proposed and <area>/real-before.txt of each area. A text with {{apply-date}}"
         " is equal to a live note that has any ISO date there. Stops when a baseline exists."
@@ -448,7 +456,7 @@ def cmd_health_baseline_seed(cfg, args) -> int:
         print(f"ragnarok health: baseline exists at {path}; the baseline stays fixed", file=sys.stderr)
         return 1
     try:
-        seed = seed_baseline(cfg, args.w10)
+        seed = seed_baseline(cfg, args.w10, args.cutoff)
     except (OSError, ValueError) as e:
         print(f"ragnarok health: {e}", file=sys.stderr)
         return 1
@@ -465,6 +473,7 @@ def cmd_health_baseline_seed(cfg, args) -> int:
         f" changed: {len(seed.before_changed)}"
     )
     print("".join(f"  {key}\n" for key in seed.before_changed), end="")
+    print(f"pre-cutoff-live: {seed.pre_cutoff}")
     return 0
 
 
