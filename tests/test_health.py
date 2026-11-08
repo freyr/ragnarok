@@ -3,6 +3,7 @@ import json
 import pytest
 from test_index import FakeEmbedder
 
+from ragnarok import health as health_module
 from ragnarok import validate
 from ragnarok.cli import main
 from ragnarok.config import AcceptRule, Config, HealthConfig, dump_config, load_config
@@ -232,3 +233,133 @@ def test_health_changes_no_note(cfg, tmp_path, capsys):
     before = {rel: (cfg.root / rel).read_bytes() for rel in NOTES}
     run(cfg, tmp_path, capsys, "--vault", "V", "--save")
     assert {rel: (cfg.root / rel).read_bytes() for rel in NOTES} == before
+
+
+# --- the worklist ------------------------------------------------------------------------------------------------
+
+REC = "---\nclass: record\nas_of: 2026-01-01\n"
+STATE = "---\nclass: state\nvalidity: current\nas_of: 2026-01-01\nsubject: ['[[Heat pump]]']\n---\n# State\n"
+
+WORK_NOTES = {
+    "V/Entities/Heat pump.md": "---\ntype: entity\nkind: device\n---\n# Heat pump\n",
+    # the targets
+    "V/Guides/Heat pump guide.md": REC + "---\n",
+    "V/_archive/Old guide.md": REC + "---\n",
+    "V/Docs/README.md": REC + "---\n",
+    "V/A/Twin.md": REC + "---\n",
+    "V/_archive/Twin.md": REC + "---\n",
+    "V/Astro/Sub/Dashboard.md": REC + "---\n",
+    "V/Folder/inner.md": REC + "---\n",
+    "W/Notes/Only in W.md": REC + "---\n",
+    # one link of each class of the research
+    "V/Src/links.md": REC
+    + "---\n[[Old/Heat pump guide]] [[Old/Old guide]] [[Old/README]] [[Old/Twin]] [[Old/Heat pump gide]]"
+    + " [[Old/Folder]] [[Old/Nowhere]] [[Old/Only in W]] ![[Old/Heat pump guide.md#Top|Guide]]\n",
+    "V/Astro/src.md": REC + "---\n[[Old/Dashboard]]\n",
+    "V/Other/src.md": REC + "---\n[[Old/Dashboard]]\n",
+    "V/Fixtures/assets/fx.md": REC + "---\n[[Old/Heat pump guide]]\n",
+    "V/Skip/src.md": REC + "---\n[[Old/Heat pump guide]]\n",
+    # the other kinds
+    "V/Y/fixable.md": REC + "title: Foo: bar\n---\n",
+    "V/Y/quoted.md": REC + 'title: "a": b\n---\n',
+    "V/Y/multiline.md": REC + "title: Foo: bar\n  more\n---\n",
+    "V/Y/nested.md": REC + "meta:\n  title: Foo: bar\n---\n",
+    "V/Y/bracket.md": "---\nclass: [state\n---\n",
+    "V/K/one.md": STATE,
+    "V/K/two.md": STATE,
+    "V/K/supersedes.md": REC + "supersedes: nothing\n---\n",
+    "V/K/ghost.md": REC + "subject: ['[[Ghost]]']\n---\n",
+}
+WORK_TOML = """
+[health]
+accept = [
+  { glob = "V/Skip/**", kinds = ["broken-link"], reason = "skipped" },
+]
+"""
+
+
+@pytest.fixture
+def wcfg(tmp_path):
+    root = tmp_path / "vaults"
+    for rel, text in WORK_NOTES.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    cfg = Config(root=root, index_path=tmp_path / "index.db", vaults=["V", "W"], dimension=8)
+    indexed(cfg)
+    return cfg
+
+
+def work(wcfg, tmp_path, capsys, *args):
+    code, out = run(wcfg, tmp_path, capsys, "--worklist", "--json", *args, health=WORK_TOML)
+    assert code == 0
+    return json.loads(out.out)["worklist"]
+
+
+def test_worklist_gives_one_fix_for_each_link_class(wcfg, tmp_path, capsys):
+    lines = work(wcfg, tmp_path, capsys)
+    links = {(w["detail"].split("]]")[0] + "]]", w["path"]): w for w in lines if w["kind"] == "broken-link"}
+    src, astro = "V/Src/links.md", "V/Astro/src.md"
+    fix, user = "ragnarok fix links", "the user"
+    expected = {
+        ("[[Old/Heat pump guide]]", src): (fix, "V/Guides/Heat pump guide.md"),  # stale prefix, unique, specific
+        ("[[Old/Old guide]]", src): (fix, "V/_archive/Old guide.md"),  # _archive counts
+        ("[[Old/Dashboard]]", astro): (fix, "V/Astro/Sub/Dashboard.md"),  # Dashboard in the same area
+        ("[[Old/Dashboard]]", "V/Other/src.md"): (user, "generic-name"),  # Dashboard in another area
+        ("[[Old/README]]", src): (user, "generic-name"),
+        ("[[Old/Twin]]", src): (user, "several-candidates"),
+        ("[[Old/Heat pump gide]]", src): (user, "no-candidate"),  # similar name only
+        ("[[Old/Folder]]", src): (user, "no-candidate"),  # a folder
+        ("[[Old/Nowhere]]", src): (user, "no-candidate"),
+        ("[[Old/Only in W]]", src): (user, "cross-vault-only"),
+        ("[[Old/Heat pump guide]]", "V/Fixtures/assets/fx.md"): (user, "accepted-or-assets"),
+    }
+    assert {k: (v["fix"], v["target"] or v["reason"]) for k, v in links.items()} == expected
+    assert not [w for w in lines if w["path"] == "V/Skip/src.md"]  # accepted: no line
+
+
+def test_worklist_maps_the_other_kinds(wcfg, tmp_path, capsys):
+    lines = work(wcfg, tmp_path, capsys)
+    other = {(w["path"], w["kind"]): w["fix"] for w in lines if w["kind"] != "broken-link"}
+    assert other == {
+        ("V/Y/fixable.md", "bad-yaml"): "ragnarok fix yaml",
+        ("V/Y/quoted.md", "bad-yaml"): "the user",
+        ("V/Y/multiline.md", "bad-yaml"): "the user",
+        ("V/Y/nested.md", "bad-yaml"): "the user",
+        ("V/Y/bracket.md", "bad-yaml"): "the user",
+        ("V/K/one.md", "double-identity"): "kb-write",
+        ("V/K/two.md", "double-identity"): "kb-write",
+        ("V/K/supersedes.md", "bad-supersedes"): "kb-write",
+        ("V/K/supersedes.md", "missing-target"): "the user",
+        ("V/K/ghost.md", "missing-target"): "the user",
+    }
+
+
+def test_worklist_has_one_line_for_each_not_accepted_error_sorted_by_area_then_fix(wcfg, tmp_path, capsys):
+    _, out = run(wcfg, tmp_path, capsys, "--worklist", "--json", health=WORK_TOML)
+    data = json.loads(out.out)
+    assert len(data["worklist"]) == data["total"]["structural_errors"]["not_accepted"]
+    keys = [(w["vault"], w["area"], w["fix"]) for w in data["worklist"]]
+    assert keys == sorted(keys)
+    assert "worklist" not in json.loads(run(wcfg, tmp_path, capsys, "--json", health=WORK_TOML)[1].out)
+
+
+def test_worklist_text_has_one_line_for_each_defect(wcfg, tmp_path, capsys):
+    _, out = run(wcfg, tmp_path, capsys, "--worklist", "--vault", "V", health=WORK_TOML)
+    line = "V/Src/links.md: broken-link [[Old/Heat pump guide]] -> V/Guides/Heat pump guide.md  fix: ragnarok fix links"
+    assert line in out.out.splitlines()
+    assert "V/Y/quoted.md: bad-yaml" in out.out
+    assert "fix: " not in run(wcfg, tmp_path, capsys, "--vault", "V", health=WORK_TOML)[1].out
+
+
+def test_link_decision_is_the_function_of_the_worklist_and_the_fixer(wcfg):
+    conn = connect(wcfg)
+    names = health_module.note_names(conn)
+    conn.close()
+    auto = health_module.link_decision(wcfg, names, "V/Src/links.md", "Old/Heat pump guide.md")
+    assert (auto.auto, auto.target, auto.reason) == (True, "V/Guides/Heat pump guide.md", None)
+    # a case difference and the extension do not matter
+    assert health_module.link_decision(wcfg, names, "V/Src/links.md", "old/HEAT PUMP GUIDE").auto
+    wcfg.health = HealthConfig(accept=[AcceptRule(glob="V/Skip/**", kinds=["broken-link"], reason="skipped")])
+    skip = health_module.link_decision(wcfg, names, "V/Skip/src.md", "Old/Heat pump guide")
+    assert (skip.auto, skip.reason) == (False, "accepted-or-assets")

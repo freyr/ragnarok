@@ -74,6 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     hp.add_argument("--vault", help="one vault (default all vaults)")
     hp.add_argument("--area", help="one area: the first folder under the vault, or (top)")
     hp.add_argument("--json", action="store_true", help="print one JSON object")
+    hp.add_argument("--worklist", action="store_true", help="add one line for each error, with the fix for it")
     hp.add_argument("--save", action="store_true", help="add one line for each area to data/health/history.jsonl")
     hp.description = (
         "Scans the vaults for changes first. The exit code is 0 when the run completes, also on a gate fail."
@@ -432,7 +433,7 @@ def cmd_validate(cfg, args) -> int:
 
 def cmd_health(cfg, args) -> int:
     from .embed import EmbedError, OllamaEmbedder
-    from .health import format_text, health, save
+    from .health import format_text, format_worklist, health, save, worklist
     from .index import IndexMismatch, connect, update
 
     if args.vault is not None and args.vault not in cfg.vaults:
@@ -450,6 +451,7 @@ def cmd_health(cfg, args) -> int:
         for warning in update(cfg, conn, OllamaEmbedder(cfg)).warnings:
             print(f"ragnarok health: {warning}", file=sys.stderr)
         result = health(cfg, conn, args.vault, args.area)
+        works = worklist(cfg, conn, result) if args.worklist else None
     except EmbedError as e:
         print(f"ragnarok health: the scan of the vaults failed: {e}", file=sys.stderr)
         return 1
@@ -458,7 +460,13 @@ def cmd_health(cfg, args) -> int:
     if not result.areas:
         print("ragnarok health: no notes in the scope", file=sys.stderr)
         return 1
-    print(json.dumps(result.as_dict(), ensure_ascii=False, indent=2) if args.json else format_text(result))
+    if args.json:
+        data = result.as_dict()
+        if works is not None:
+            data["worklist"] = [w.as_dict() for w in works]
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+    else:
+        print(format_text(result) + ("\n" + format_worklist(works) if works is not None else ""))
     if args.save:
         save(cfg, result)
     return 0
