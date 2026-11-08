@@ -98,6 +98,18 @@ def build_parser() -> argparse.ArgumentParser:
         "Reads <area>/proposed/*.proposed and <area>/real-before.txt of each area. A text with {{apply-date}}"
         " is equal to a live note that has any ISO date there. Stops when a baseline exists."
     )
+    ha = hsub.add_parser("audit", help="the label audit: a sample of the labeled notes, marked by hand")
+    has = ha.add_subparsers(dest="audit_action", required=True)
+    al = has.add_parser("labels", help="write data/health/audit-<stamp>.md, a table of the labels of a sample")
+    al.add_argument("--sample", type=int, default=60, help="the sample size (default 60)")
+    al.add_argument("--seed", type=int, default=0, help="the seed of the sample (default 0)")
+    al.description = (
+        "Samples the notes with an explicit class, never a private note, stratified by area: the largest remainder"
+        " of the area shares, and at least 1 note for each area when the sample size allows."
+    )
+    asc = has.add_parser("score", help="the correct share and the Wilson interval of a marked sheet")
+    asc.add_argument("sheet", type=Path, help="a sheet with ok or wrong: <correct value> in each verdict cell")
+    asc.description = "Rejects a sheet with unmarked rows. Adds the record to data/health/audit-records.jsonl."
     xp = parsers["fix"]
     xp.add_argument("kind", choices=["links", "yaml"])
     xp.add_argument("--vault", help="one vault (default all vaults)")
@@ -492,6 +504,31 @@ def cmd_health_baseline_seed(cfg, args) -> int:
     return 0
 
 
+def cmd_health_audit(cfg, args) -> int:
+    from .health import sample_notes, score_sheet, write_sheet
+
+    if args.audit_action == "labels":
+        if args.sample < 1:
+            print("ragnarok health: --sample must be at least 1", file=sys.stderr)
+            return 1
+        sample = sample_notes(cfg, args.sample, args.seed)
+        if not sample:
+            print("ragnarok health: no labeled notes", file=sys.stderr)
+            return 1
+        print(f"sheet: {write_sheet(cfg, sample, args.sample, args.seed)} ({len(sample)} notes)")
+        return 0
+    try:
+        record = score_sheet(cfg, args.sheet)
+    except (OSError, ValueError) as e:
+        print(f"ragnarok health: {e}", file=sys.stderr)
+        return 1
+    print(
+        f"correct: {record['correct']}/{record['n']} {record['share']:.1%},"
+        f" Wilson 95% interval {record['low']:.1%} to {record['high']:.1%}"
+    )
+    return 0
+
+
 def cmd_health(cfg, args) -> int:
     from .embed import EmbedError, OllamaEmbedder
     from .health import format_text, format_worklist, health, save, worklist
@@ -499,6 +536,8 @@ def cmd_health(cfg, args) -> int:
 
     if args.topic == "baseline":
         return cmd_health_baseline_seed(cfg, args)
+    if args.topic == "audit":
+        return cmd_health_audit(cfg, args)
     if args.vault is not None and args.vault not in cfg.vaults:
         print(f"Unknown vault {args.vault}. The vaults are {', '.join(cfg.vaults)}.", file=sys.stderr)
         return 1

@@ -126,6 +126,7 @@ def test_health_gives_errors_and_coverage_for_each_area_and_the_totals(cfg, tmp_
         "coverage.as_of": {"value": 0.5, "target": 0.5, "result": "pass"},
         "coverage.subject": {"value": 0.6, "target": 0.5, "result": "pass"},
         "drift": {"value": None, "target": None, "result": "no baseline"},
+        "correctness": {"value": None, "target": 0.9, "result": "no audit"},
         "result": "fail",
     }
     issues = {(i["path"], i["kind"]): i for i in data["issues"]}
@@ -631,3 +632,169 @@ def test_the_baseline_is_written_through_a_temp_file(dcfg, tmp_path, capsys, mon
     monkeypatch.undo()
     assert health_module.update_baseline(dcfg, [LOG]) == 1
     assert sorted(p.name for p in (dcfg.data_dir / "health").iterdir()) == ["baseline.json"]  # no temp file is left
+
+
+# --- the label audit ----------------------------------------------------------------------------------------------
+
+AREAS = {"Big": 12, "Mid": 6, "Small": 2, "One": 1}  # labeled notes in each area, before pipe.md
+
+
+@pytest.fixture
+def audit_cfg(tmp_path):
+    root = tmp_path / "vaults"
+    for area, count in AREAS.items():
+        for i in range(count):
+            path = root / "V" / area / f"n{i:02}.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                f"---\nclass: state\nvalidity: current\nas_of: 2026-01-0{i % 9 + 1}\ntype: guide\n"
+                f"subject: ['[[S{i}]]']\n---\n# n{i}\n"
+            )
+    (root / "V" / "Big" / "unlabeled.md").write_text("---\ntype: guide\n---\n# no class\n")
+    (root / "V" / "Secret").mkdir()
+    for i in range(10):
+        (root / "V" / "Secret" / f"p{i}.md").write_text("---\nclass: record\nas_of: 2026-01-01\n---\n# p\n")
+    (root / "V" / "Big" / "pipe.md").write_text("---\nclass: record\nas_of: 2026-01-01\nsubject: none\n---\n# p\n")
+    return Config(
+        root=root, index_path=tmp_path / "index.db", vaults=["V"], dimension=8, private_patterns=["V/Secret/**"]
+    )
+
+
+def audit(cfg, tmp_path, capsys, *args, health=HEALTH_TOML):
+    code = main(["--config", str(config_file(cfg, tmp_path, health)), "health", "audit", *args])
+    return code, capsys.readouterr()
+
+
+def sheet_rows(path):
+    """(path, cells) of each table row of a sheet, with the header and the separator left out."""
+    rows = []
+    for line in path.read_text().splitlines():
+        if line.startswith("|") and not line.startswith("| path") and not line.startswith("|--"):
+            cells = [c.strip() for c in line.strip().strip("|").split(" | ")]
+            rows.append(cells)
+    return rows
+
+
+def make_sheet(cfg, tmp_path, capsys, n, seed=1):
+    code, out = audit(cfg, tmp_path, capsys, "labels", "--sample", str(n), "--seed", str(seed))
+    assert code == 0, out.err
+    (sheet,) = (cfg.data_dir / "health").glob("audit-2*.md")
+    return sheet
+
+
+def mark(sheet, verdicts):
+    """Fill the verdict cell of the rows in order; a verdict None leaves the cell empty."""
+    lines, k = [], 0
+    for line in sheet.read_text().splitlines():
+        if line.startswith("|") and not line.startswith("| path") and not line.startswith("|--"):
+            v = verdicts[k]
+            k += 1
+            line = line.rstrip("|").rstrip() + f" {v or ''} |"
+        lines.append(line)
+    sheet.write_text("\n".join(lines) + "\n")
+
+
+def test_the_sample_is_the_same_for_the_same_seed_and_differs_for_another(audit_cfg, tmp_path, capsys):
+    sheet = make_sheet(audit_cfg, tmp_path, capsys, 8, seed=1)
+    first = [r[0] for r in sheet_rows(sheet)]
+    sheet.unlink()
+    assert [r[0] for r in sheet_rows(make_sheet(audit_cfg, tmp_path, capsys, 8, seed=1))] == first
+    sheet.unlink()
+    assert [r[0] for r in sheet_rows(make_sheet(audit_cfg, tmp_path, capsys, 8, seed=2))] != first
+
+
+def test_the_sample_is_stratified_by_area_with_one_note_for_each_area(audit_cfg, tmp_path, capsys):
+    # 22 labeled notes (Big 13, with pipe.md); n = 11 gives the exact shares 6.5, 3, 1, 0.5. Largest
+    # remainder: Big 7 (0.5 tie to the first key), Mid 3, Small 1, One 0 -> One takes 1 from the largest, Big 6.
+    sheet = make_sheet(audit_cfg, tmp_path, capsys, 11)
+    counts = {}
+    for cells in sheet_rows(sheet):
+        area = cells[0].split("/")[1]
+        counts[area] = counts.get(area, 0) + 1
+    assert counts == {"Big": 6, "Mid": 3, "Small": 1, "One": 1}
+
+
+def test_the_sample_leaves_out_private_notes_and_notes_with_no_class(audit_cfg, tmp_path, capsys):
+    sheet = make_sheet(audit_cfg, tmp_path, capsys, 100)  # more than there are: all labeled notes
+    paths = [r[0] for r in sheet_rows(sheet)]
+    assert len(paths) == 22
+    assert not any("Secret" in p for p in paths)
+    assert "V/Big/unlabeled.md" not in paths
+    assert "V/Big/pipe.md" in paths
+
+
+def test_the_sheet_gives_the_labels_and_an_empty_verdict_last(audit_cfg, tmp_path, capsys):
+    sheet = make_sheet(audit_cfg, tmp_path, capsys, 100)
+    text = sheet.read_text()
+    assert "| path | class | validity | as_of | subject | subject_reason | type | verdict |" in text
+    rows = {r[0]: r for r in sheet_rows(sheet)}
+    assert rows["V/Mid/n01.md"] == ["V/Mid/n01.md", "state", "current", "2026-01-02", "[[S1]]", "", "guide", ""]
+    assert rows["V/Big/pipe.md"][1:5] == ["record", "", "2026-01-01", "none"]
+
+
+def test_the_default_sample_is_60(audit_cfg, tmp_path, capsys):
+    code, _ = audit(audit_cfg, tmp_path, capsys, "labels")
+    assert code == 0
+    (sheet,) = (audit_cfg.data_dir / "health").glob("audit-2*.md")
+    assert len(sheet_rows(sheet)) == 22  # fewer labeled notes than 60: all of them
+
+
+def test_score_gives_the_share_and_the_wilson_interval_and_saves_a_record(audit_cfg, tmp_path, capsys):
+    sheet = make_sheet(audit_cfg, tmp_path, capsys, 10)
+    mark(sheet, ["ok"] * 8 + ["wrong: record", "wrong: state"])
+    code, out = audit(audit_cfg, tmp_path, capsys, "score", str(sheet))
+    assert code == 0
+    assert "8/10" in out.out and "80.0%" in out.out
+    # Wilson 95% interval of 8 out of 10, from the published formula: 0.4902 to 0.9433
+    assert "49.0%" in out.out and "94.3%" in out.out
+    (record,) = [
+        json.loads(x) for x in (audit_cfg.data_dir / "health" / "audit-records.jsonl").read_text().splitlines()
+    ]
+    assert record["sheet"] == str(sheet) and record["n"] == 10 and record["correct"] == 8
+    assert record["share"] == 0.8
+    assert record["low"] == pytest.approx(0.4902, abs=1e-4) and record["high"] == pytest.approx(0.9433, abs=1e-4)
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", record["date"])
+
+
+def test_score_with_all_ok(audit_cfg, tmp_path, capsys):
+    sheet = make_sheet(audit_cfg, tmp_path, capsys, 10)
+    mark(sheet, ["OK"] * 10)
+    audit(audit_cfg, tmp_path, capsys, "score", str(sheet))
+    (record,) = [
+        json.loads(x) for x in (audit_cfg.data_dir / "health" / "audit-records.jsonl").read_text().splitlines()
+    ]
+    assert record["share"] == 1.0
+    assert record["low"] == pytest.approx(0.7225, abs=1e-4) and record["high"] == 1.0
+
+
+def test_score_rejects_a_sheet_with_unmarked_rows_and_lists_them(audit_cfg, tmp_path, capsys):
+    sheet = make_sheet(audit_cfg, tmp_path, capsys, 5)
+    paths = [r[0] for r in sheet_rows(sheet)]
+    mark(sheet, ["ok", None, "ok", "maybe", "ok"])
+    code, out = audit(audit_cfg, tmp_path, capsys, "score", str(sheet))
+    assert code == 1
+    assert paths[1] in out.err and paths[3] in out.err
+    assert paths[0] not in out.err
+    assert not (audit_cfg.data_dir / "health" / "audit-records.jsonl").exists()
+
+
+def test_health_shows_the_correctness_of_the_last_audit_record(audit_cfg, tmp_path, capsys):
+    folder = audit_cfg.data_dir / "health"
+    folder.mkdir(parents=True)
+    old = {"date": "2026-01-01", "sheet": "a", "n": 10, "correct": 10, "share": 1.0, "low": 0.7225, "high": 1.0}
+    new = {"date": "2026-02-02", "sheet": "b", "n": 10, "correct": 8, "share": 0.8, "low": 0.4902, "high": 0.9433}
+    (folder / "audit-records.jsonl").write_text(json.dumps(old) + "\n" + json.dumps(new) + "\n")
+    indexed(audit_cfg)
+    _, out = run(audit_cfg, tmp_path, capsys, "--json")
+    assert json.loads(out.out)["gate"]["correctness"] == {
+        "value": 0.8,
+        "target": 0.9,
+        "result": "fail",  # the point value is compared, not the interval
+        "low": 0.4902,
+        "high": 0.9433,
+        "date": "2026-02-02",
+    }
+    _, text = run(audit_cfg, tmp_path, capsys)
+    assert "correctness: 80.0% (49.0%-94.3%, 2026-02-02)  target 90.0%  fail" in text.out
+    _, out = run(audit_cfg, tmp_path, capsys, "--json", health="")
+    assert json.loads(out.out)["gate"]["correctness"]["result"] == "no target"

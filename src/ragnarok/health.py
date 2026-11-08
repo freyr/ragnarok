@@ -36,6 +36,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
 import re
 import sqlite3
 from dataclasses import dataclass, field
@@ -48,7 +49,8 @@ import yaml
 
 from .config import Config
 from .index import _link_key
-from .metadata import iter_notes
+from .metadata import is_private, iter_notes, parse_note
+from .replay import wilson
 from .validate import ERROR, Issue, _Context, _label, _Note, mark_doubles
 
 TOP = "(top)"
@@ -199,6 +201,12 @@ def gate(cfg: Config, total: Values) -> dict:
         judge("drift", total.drift_share(), targets.get("drift"), lambda v, t: v is None or v >= t)
     else:
         out["drift"] = {"value": None, "target": targets.get("drift"), "result": "no baseline"}
+    record = last_audit(cfg)
+    if record is None:
+        out["correctness"] = {"value": None, "target": targets.get("correctness"), "result": "no audit"}
+    else:
+        judge("correctness", record["share"], targets.get("correctness"), lambda v, t: v >= t)
+        out["correctness"].update(low=record["low"], high=record["high"], date=record["date"])
     judged = [g["result"] for g in out.values() if g["result"] in ("pass", "fail")]
     out["result"] = "no target" if not judged else "fail" if "fail" in judged else "pass"
     return out
@@ -540,6 +548,12 @@ def format_text(result: Result) -> str:
         if name == "drift":
             value = _drift(result.total)
             target = "-" if target is None else f"{target:.1%}"
+        if name == "correctness":
+            if g["result"] == "no audit":
+                lines.append("  correctness: no audit")
+                continue
+            value = f"{value:.1%} ({g['low']:.1%}-{g['high']:.1%}, {g['date']})"
+            target = "-" if target is None else f"{target:.1%}"
         if name.startswith("coverage."):
             value = "-" if value is None else f"{value:.1%}"
             target = "-" if target is None else f"{target:.1%}"
@@ -557,3 +571,135 @@ def save(cfg: Config, result: Result) -> None:
     with (folder / "history.jsonl").open("a") as f:
         for row in result.rows():
             f.write(json.dumps({"time": time, **row}, ensure_ascii=False) + "\n")
+
+
+# --- the label audit --------------------------------------------------------------------------------------------
+
+AUDIT_HEADER = ("path", "class", "validity", "as_of", "subject", "subject_reason", "type", "verdict")
+VERDICT = re.compile(r"ok|wrong:\s*\S.*", re.IGNORECASE)
+CELL_SPLIT = re.compile(r"(?<!\\)\|")
+
+
+def audit_records_path(cfg: Config) -> Path:
+    return cfg.data_dir / "health" / "audit-records.jsonl"
+
+
+def last_audit(cfg: Config) -> dict | None:
+    """The last line of the audit records, or None when there is no record."""
+    path = audit_records_path(cfg)
+    lines = path.read_text().splitlines() if path.is_file() else []
+    return json.loads(lines[-1]) if lines else None
+
+
+def labeled_notes(cfg: Config) -> dict[str, dict]:
+    """Each note with an explicit `class` that is not private, as {key: frontmatter}. Read from the files."""
+    notes = {}
+    for key in iter_notes(cfg):
+        if is_private(cfg, key):
+            continue
+        fm, _ = parse_note(cfg.note_path(key).read_text(errors="replace"))
+        if _present(fm.get("class")):
+            notes[key] = fm
+    return notes
+
+
+def allocate(sizes: dict[tuple[str, str], int], n: int) -> dict[tuple[str, str], int]:
+    """The share of the sample for each area. The rule:
+    - n at least the number of notes: each note;
+    - else the largest remainder of n * size / total (a tie goes to the first area in key order);
+    - with n at least the number of areas, an area with a share of 0 takes 1 from the area with the largest share."""
+    total = sum(sizes.values())
+    if n >= total:
+        return dict(sizes)
+    quota = {k: n * s // total for k, s in sizes.items()}
+    by_remainder = sorted(sizes, key=lambda k: (-(n * sizes[k] % total), k))
+    for k in by_remainder[: n - sum(quota.values())]:
+        quota[k] += 1
+    if n >= len(sizes):
+        for k in sorted(k for k, q in quota.items() if q == 0):
+            donor = max(sorted(quota), key=lambda d: quota[d])
+            quota[donor] -= 1
+            quota[k] = 1
+    return quota
+
+
+def sample_notes(cfg: Config, n: int, seed: int) -> list[tuple[str, dict]]:
+    """The sample of the labeled notes, stratified by area (see `allocate`), sorted by path."""
+    notes = labeled_notes(cfg)
+    groups: dict[tuple[str, str], list[str]] = {}
+    for key in sorted(notes):
+        groups.setdefault(area_of(key), []).append(key)
+    quota = allocate({k: len(v) for k, v in groups.items()}, n)
+    rng = random.Random(seed)
+    chosen = [key for area in sorted(groups) for key in rng.sample(groups[area], quota[area])]
+    return [(key, notes[key]) for key in sorted(chosen)]
+
+
+def _cell(value) -> str:
+    if isinstance(value, list):
+        value = ", ".join(str(v) for v in value)
+    return "" if value is None else str(value).replace("|", "\\|").replace("\n", " ")
+
+
+def write_sheet(cfg: Config, sample: list[tuple[str, dict]], n: int, seed: int) -> Path:
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    folder = cfg.data_dir / "health"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"audit-{stamp}.md"
+    lines = [
+        f"# Label audit {stamp}",
+        "",
+        f"Sample {len(sample)} (requested {n}), seed {seed}. Write `ok` or `wrong: <correct value>` in the last cell"
+        " of each row. Then run `ragnarok health audit score <this file>`.",
+        "",
+        "| " + " | ".join(AUDIT_HEADER) + " |",
+        "|" + "|".join("---" for _ in AUDIT_HEADER) + "|",
+    ]
+    for key, fm in sample:
+        cells = [key, *(fm.get(k) for k in AUDIT_HEADER[1:-1])]
+        lines.append("| " + " | ".join(_cell(c) for c in cells) + " |  |")
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def read_sheet(path: Path) -> list[tuple[str, str]]:
+    """(note path, verdict) for each row of the table of a sheet."""
+    rows = []
+    for line in path.read_text().splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip().replace("\\|", "|") for c in CELL_SPLIT.split(line.strip())[1:-1]]
+        if len(cells) != len(AUDIT_HEADER) or cells[0] in ("path", "---"):
+            continue
+        rows.append((cells[0], cells[-1]))
+    return rows
+
+
+def score_sheet(cfg: Config, path: Path) -> dict:
+    """The record of a marked sheet, saved to the audit records. Raises ValueError, with the rows that have no
+    verdict `ok` or `wrong: <value>` listed, when the sheet is not fully marked."""
+    rows = read_sheet(path)
+    if not rows:
+        raise ValueError(f"{path} has no rows")
+    unmarked = [key for key, verdict in rows if not VERDICT.fullmatch(verdict)]
+    if unmarked:
+        raise ValueError(
+            f"{len(unmarked)} rows have no verdict (ok or wrong: <correct value>):\n"
+            + "\n".join(f"  {key}" for key in unmarked)
+        )
+    correct = sum(verdict.lower() == "ok" for _, verdict in rows)
+    low, high = wilson(correct, len(rows))
+    record = {
+        "date": _today(),
+        "sheet": str(path),
+        "n": len(rows),
+        "correct": correct,
+        "share": round(correct / len(rows), 4),
+        "low": round(low, 4),
+        "high": round(high, 4),
+    }
+    out = audit_records_path(cfg)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("a") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record
