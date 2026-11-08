@@ -23,6 +23,7 @@ COMMANDS = {
     "doctor": "Check the six parts of the setup and print the fix for each failure",
     "validate": "Check notes against the frontmatter model, the links and the identity keys",
     "health": "Print the structural errors and the label coverage for each area, with the gate on the totals",
+    "fix": "Fix the broken links and the bad YAML that the rules of the worklist fix automatically",
     "find-collisions": "Print the notes that a note or a draft can collide with",
     "replay": "Build the replay set of the write path, score R1 on it, or run the kb-write skill on it",
 }
@@ -96,6 +97,16 @@ def build_parser() -> argparse.ArgumentParser:
     seed.description = (
         "Reads <area>/proposed/*.proposed and <area>/real-before.txt of each area. A text with {{apply-date}}"
         " is equal to a live note that has any ISO date there. Stops when a baseline exists."
+    )
+    xp = parsers["fix"]
+    xp.add_argument("kind", choices=["links", "yaml"])
+    xp.add_argument("--vault", help="one vault (default all vaults)")
+    xp.add_argument("--area", help="one area: the first folder under the vault, or (top)")
+    xp.add_argument("--exclude-area", help="leave out one area")
+    xp.add_argument("--dry-run", action="store_true", help="print the changes and write nothing")
+    xp.description = (
+        "Scans the vaults for changes first. Skips a note changed in the last 10 minutes. Writes a backup and"
+        " log.tsv to data/fix-backups/<stamp>/, then runs validate on the changed notes and updates the baseline."
     )
     fp = parsers["find-collisions"]
     fp.add_argument("path", help="a note path, relative to the vault root or absolute; - reads a draft from stdin")
@@ -524,6 +535,44 @@ def cmd_health(cfg, args) -> int:
     return 0
 
 
+def cmd_fix(cfg, args) -> int:
+    from .embed import EmbedError, OllamaEmbedder
+    from .fix import apply, format_changes, logged_paths, plan_links, plan_yaml, unresolved
+    from .health import update_baseline
+    from .index import IndexMismatch, connect, update
+
+    if args.vault is not None and args.vault not in cfg.vaults:
+        print(f"Unknown vault {args.vault}. The vaults are {', '.join(cfg.vaults)}.", file=sys.stderr)
+        return 1
+    if not cfg.index_path.exists():
+        print(f"No index at {cfg.index_path}. Run `ragnarok index`.", file=sys.stderr)
+        return 1
+    try:
+        conn = connect(cfg)
+    except IndexMismatch as e:
+        print(e, file=sys.stderr)
+        return 1
+    try:
+        for warning in update(cfg, conn, OllamaEmbedder(cfg)).warnings:
+            print(f"ragnarok fix: {warning}", file=sys.stderr)
+        plan = plan_links if args.kind == "links" else plan_yaml
+        run = apply(cfg, plan(cfg, conn, args.vault, args.area, args.exclude_area), args.dry_run)
+        print("\n".join(format_changes(args.kind, run, args.dry_run)))
+        if run.folder is None:
+            return 0
+        print(f"backup and log: {run.folder}")
+        failed = unresolved(cfg, conn, run)
+    except EmbedError as e:
+        print(f"ragnarok fix: the scan of the vaults failed: {e}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+    what = "fixed links that resolve to no note" if args.kind == "links" else "fixed notes with bad YAML"
+    print(f"validate: {what}: {failed}")
+    print(f"baseline: {update_baseline(cfg, logged_paths(run.folder))} notes updated")
+    return 1 if failed else 0
+
+
 def cmd_find_collisions(cfg, args) -> int:
     from .collisions import find_collisions, format_text
     from .embed import EmbedError, OllamaEmbedder
@@ -736,6 +785,7 @@ HANDLERS = {
     "search": cmd_search,
     "validate": cmd_validate,
     "health": cmd_health,
+    "fix": cmd_fix,
     "find-collisions": cmd_find_collisions,
     "replay": cmd_replay,
 }
