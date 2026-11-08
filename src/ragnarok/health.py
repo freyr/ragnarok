@@ -515,11 +515,8 @@ def _drift(values: Values) -> str:
 
 
 def format_text(result: Result) -> str:
-    """The error issues (accepted ones marked), a table of the areas and the totals, then the gate."""
-    lines = [
-        f"{i.path}: {i.severity} [{i.check}] {i.message}" + (f" (accepted: {r})" if r is not None else "")
-        for i, r in result.issues
-    ]
+    """A table of the areas and the totals, then the gate. The issues are in the worklist and the JSON output."""
+    lines = []
     rows = [(result.label(v, a), values) for (v, a), values in result.areas.items()] + [(TOTAL, result.total)]
     width = max(len(name) for name, _ in rows)
     header = ["notes", "errors", "accepted", *KEYS, "drift"]
