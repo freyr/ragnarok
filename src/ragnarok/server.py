@@ -243,7 +243,8 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
 
         paths: note paths (as in search results). draft: the frontmatter and the body as one Markdown text; path is
         its intended note path. Errors: wrong values of class, validity, as_of, subject, task, supersedes,
-        superseded_by and owner; a missing class, or a missing validity for a state or a proposal; a wiki-link that
+        superseded_by and owner; a subject_reason that is missing for subject: none (a note with no subject) or
+        given with another subject; a missing class, or a missing validity for a state or a proposal; a wiki-link that
         resolves to no note (outside code); a subject or owner that is not an entity note, or a reference target that
         does not exist; a superseded_by target that does not list the note in supersedes; two current state notes with
         one identity key (type, primary subject, task). Warnings: unknown frontmatter keys.

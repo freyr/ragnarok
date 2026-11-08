@@ -84,6 +84,13 @@ def test_a_note_with_all_model_keys_has_no_issue(cfg):
         ("class: state\nvalidity: current\nas_of: 2026-01-05 10:00:00\n", "bad-as-of"),
         ("class: state\nvalidity: current\nsubject: '[[Heat pump]]'\n", "bad-subject"),
         ("class: state\nvalidity: current\nsubject: [Heat pump]\n", "bad-subject"),
+        ("class: state\nvalidity: current\nsubject: None\n", "bad-subject"),  # only the lower case none
+        ("class: state\nvalidity: current\nsubject: [none]\n", "bad-subject"),
+        ("class: state\nvalidity: current\nsubject: none\n", "no-subject-reason"),
+        ("class: state\nvalidity: current\nsubject: none\nsubject_reason: ' '\n", "no-subject-reason"),
+        ("class: state\nvalidity: current\nsubject: none\nsubject_reason: [a, b]\n", "bad-subject-reason"),
+        ("class: state\nvalidity: current\nsubject: ['[[Heat pump]]']\nsubject_reason: x\n", "bad-subject-reason"),
+        ("class: state\nvalidity: current\nsubject_reason: x\n", "bad-subject-reason"),
         ("class: record\nsupersedes: '[[boiler]]'\n", "bad-supersedes"),
         ("class: state\nvalidity: superseded\nsuperseded_by: ['[[boiler]]', '[[Anna]]']\n", "bad-superseded-by"),
         ("class: state\nvalidity: current\nowner: Anna\n", "bad-owner"),
@@ -93,6 +100,23 @@ def test_a_note_with_all_model_keys_has_no_issue(cfg):
 def test_a_wrong_value_of_the_model_is_an_error(cfg, lines, kind):
     report = check_note(cfg, f"---\n{lines}---\n# Note\n")
     assert found(report, 1) == [(NOTE, 1, kind)]
+
+
+NO_SUBJECT = (
+    "---\ntype: guide\nclass: state\nvalidity: current\nsubject: none\nsubject_reason: index note, only links\n"
+    "---\n# S\n"
+)
+
+
+def test_subject_none_with_a_reason_is_no_issue_and_no_identity_key(cfg):
+    write(cfg, {NOTE: NO_SUBJECT, TWIN: NO_SUBJECT})
+    conn = index(cfg)
+    assert validate.check_paths(cfg, conn, [NOTE, TWIN]).issues == []  # no bad-subject, missing-target, unknown key
+    report = validate.check_index(cfg, conn)
+    assert report.issues == []  # two current state notes with no subject are no double identity
+    assert report.counts["m3"] == 0
+    ctx = validate._Context(cfg, conn)
+    assert ctx.note(NO_SUBJECT, NOTE, strict=True).identity is None
 
 
 def test_an_unquoted_wiki_link_is_a_link(cfg):

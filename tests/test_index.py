@@ -396,6 +396,16 @@ def test_a_missing_target_is_kept_unresolved(cfg):
     assert refs(conn, "Home/Heating/notes/boiler.md") == [("subject", "Nothing here", None)]
 
 
+def test_subject_none_gives_no_reference_row_and_no_subject(cfg):
+    (cfg.root / "Home/Heating/notes/boiler.md").write_text(
+        "---\nsubject: none\nsubject_reason: index note\nowner: '[[Nothing here]]'\n---\n# Boiler\n"
+    )
+    conn, _, _ = build(cfg)
+    assert refs(conn, "Home/Heating/notes/boiler.md") == [("owner", "Nothing here", None)]
+    row = conn.execute("SELECT subject FROM notes WHERE path = ?", ("Home/Heating/notes/boiler.md",)).fetchone()
+    assert row == (None,)
+
+
 def test_subject_and_owner_resolve_only_to_entities_and_supersedes_to_any_note(cfg):
     (cfg.root / "Home/Entities").mkdir()
     (cfg.root / HEAT_PUMP).write_text(ENTITY)

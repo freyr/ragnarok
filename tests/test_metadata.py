@@ -308,6 +308,8 @@ def test_an_explicit_class_wins_over_the_default(vault):
         ([["boiler"], ["pump"]], ["boiler", "pump"]),  # unquoted wiki-links are nested lists in YAML
         (None, []),
         ([], []),
+        ("none", []),  # no subject: the value none is not a link
+        ("None", ["None"]),  # only the lower case none
     ],
 )
 def test_subject_targets_come_from_frontmatter(vault, value, expected):

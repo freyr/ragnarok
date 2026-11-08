@@ -1,7 +1,7 @@
 """Check notes against the knowledge-base frontmatter model, their links, their reference targets and the identity keys.
 
 The checks:
-1. the keys and values of the model (errors);
+1. the keys and values of the model (errors); `subject: none` needs a `subject_reason`;
 2. the required keys `class`, and `validity` for a state or a proposal (errors, only for a draft or a given path);
 3. keys outside the model, the existing keys and the configured known keys (warnings);
 4. each wiki-link of the body (outside code) and of the frontmatter resolves to a note (errors);
@@ -24,7 +24,7 @@ import frontmatter
 
 from .config import Config
 from .index import ENTITY_KEYS, REF_KEYS, WIKI_LINK, _link_key, _Resolver
-from .metadata import NoteMeta, link_targets, normalize_alias, read_note, resolve
+from .metadata import NO_SUBJECT, NoteMeta, link_targets, normalize_alias, read_note, resolve, subject_targets
 
 VALIDITY = {
     "state": ("current", "superseded"),
@@ -32,7 +32,9 @@ VALIDITY = {
     "record": (),
 }
 ALL_VALIDITY = ("current", "superseded", "open", "accepted", "rejected")
-MODEL_KEYS = ("class", "validity", "as_of", "subject", "task", "supersedes", "superseded_by", "owner")
+MODEL_KEYS = (
+    "class", "validity", "as_of", "subject", "subject_reason", "task", "supersedes", "superseded_by", "owner",
+)  # fmt: skip
 EXISTING_KEYS = ("project", "area", "type", "status", "description")
 ENTITY_ONLY_KEYS = ("kind", "aliases", "facts")  # known only on an entity note
 OWNER_KINDS = ("person", "team")
@@ -244,13 +246,26 @@ class _Context:
         if as_of is not None and not _iso_date(as_of):
             note.add(1, "bad-as-of", f"as_of {str(as_of)!r} is not an ISO date (YYYY-MM-DD)")
         for key in ("subject", "supersedes"):
-            if fm.get(key) is not None and _links(fm[key]) is None:
+            value = fm.get(key)
+            if value is not None and not (key == "subject" and value == NO_SUBJECT) and _links(value) is None:
                 note.add(1, f"bad-{key}", f"{key} is not a list of wiki-links")
+        self._subject_reason(note, fm)
         for key in ("owner", "superseded_by"):
             if fm.get(key) is not None and _link(fm[key]) is None:
                 note.add(1, f"bad-{key.replace('_', '-')}", f"{key} is not one wiki-link")
         if fm.get("task") is not None and not isinstance(fm["task"], str):
             note.add(1, "bad-task", "task is not a short text")
+
+    def _subject_reason(self, note: _Note, fm: dict) -> None:
+        """Check 1: `subject: none` needs a `subject_reason`; another subject has none."""
+        reason = fm.get("subject_reason")
+        if fm.get("subject") != NO_SUBJECT:
+            if reason is not None:
+                note.add(1, "bad-subject-reason", "subject_reason is only for subject: none")
+        elif reason is not None and not isinstance(reason, str):
+            note.add(1, "bad-subject-reason", "subject_reason is not a short text")
+        elif reason is None or not reason.strip():
+            note.add(1, "no-subject-reason", "subject: none needs a subject_reason")
 
     def _required(self, note: _Note, fm: dict, strict: bool) -> None:
         """Check 2: class, and validity for a state or a proposal. Outside strict mode, only the label count."""
@@ -288,7 +303,7 @@ class _Context:
         """Check 5: each reference target exists. Returns the note of superseded_by and the primary subject."""
         found: dict[str, list[int | None]] = {}
         for key in REF_KEYS:
-            for target in link_targets(fm.get(key)):
+            for target in (subject_targets if key == "subject" else link_targets)(fm.get(key)):
                 if key in ENTITY_KEYS:
                     to = self.resolver.entity(target, note.note_id, note.path)
                     what = "entity note"

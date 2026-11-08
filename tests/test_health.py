@@ -216,6 +216,18 @@ def test_an_accepted_bad_validity_fixture_is_out_of_the_coverage_count(cfg, tmp_
     }
 
 
+def test_subject_none_with_a_reason_counts_as_a_subject(cfg, tmp_path, capsys):
+    (cfg.root / "V/Index").mkdir()
+    (cfg.root / "V/Index/i.md").write_text(
+        "---\nclass: record\nas_of: 2026-02-01\nsubject: none\nsubject_reason: index note\n---\n# Index\n"
+    )
+    indexed(cfg)
+    _, out = run(cfg, tmp_path, capsys, "--vault", "V", "--json")
+    index = {a["area"]: a for a in json.loads(out.out)["areas"]}["Index"]
+    assert index["structural_errors"] == {"errors": 0, "accepted": 0, "not_accepted": 0}
+    assert index["coverage"]["subject"] == cov(1, 1)
+
+
 def test_save_adds_one_line_for_each_area_and_the_totals(cfg, tmp_path, capsys):
     indexed(cfg)
     run(cfg, tmp_path, capsys, "--vault", "V", "--save")

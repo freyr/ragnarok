@@ -109,6 +109,7 @@ TYPE_MAP = {
 # letters that NFKD does not decompose and that have a clear Latin base
 _FOLD = str.maketrans({"ł": "l", "ø": "o", "đ": "d", "ħ": "h", "ß": "ss", "æ": "ae", "œ": "oe"})
 
+NO_SUBJECT = "none"  # `subject: none`, with `subject_reason`: a note with no subject
 JIRA_RE = re.compile(r"\b([A-Z][A-Z0-9]{1,9})-(\d+)\b")
 
 
@@ -361,7 +362,7 @@ def resolve(
         validity=validity,
         as_of=as_of,
         superseded_by=superseded_by,
-        subject=link_targets(fm.get("subject")),
+        subject=subject_targets(fm.get("subject")),
         owner=link_targets(fm.get("owner")),
         supersedes=link_targets(fm.get("supersedes")),
         entity=entity,
@@ -397,6 +398,11 @@ def link_targets(value) -> list[str]:
         return [t for item in value for t in link_targets(item)]
     target = _target(value)
     return [target] if target else []
+
+
+def subject_targets(value) -> list[str]:
+    """The targets of the `subject` links. The value `none` (a note with no subject) is not a link."""
+    return [] if value == NO_SUBJECT else link_targets(value)
 
 
 def kb_labels(fm: dict) -> tuple[str | None, str | None, str | None, str | None]:

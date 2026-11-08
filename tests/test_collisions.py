@@ -102,8 +102,9 @@ def test_identity_candidates_have_the_same_key_in_any_class(cfg, conn):
     assert "identity" not in found.get(PUMP, {"reasons": []})["reasons"]
 
 
-def test_a_draft_with_no_subject_has_no_identity_candidates(cfg, conn):
-    draft = "---\ntype: guide\ntask: defrost\n---\n# Defrost\nThe boiler defrost cycle.\n"
+@pytest.mark.parametrize("subject", ["", "subject: none\nsubject_reason: a cycle, no device\n"])
+def test_a_draft_with_no_subject_has_no_identity_candidates(cfg, conn, subject):
+    draft = f"---\ntype: guide\n{subject}task: defrost\n---\n# Defrost\nThe boiler defrost cycle.\n"
     assert all("identity" not in c["reasons"] for c in run(cfg, conn, draft=draft))
 
 
