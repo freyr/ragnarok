@@ -978,7 +978,7 @@ def test_health_shows_the_open_conflicts_and_the_m3_groups(scfg, tmp_path, capsy
             conflict(SE, SA),  # open, in two areas
             conflict(SB, S_OLD),  # old is superseded: closed
             conflict(SC, SE),
-            conflict(SE, SC, verdict="unrelated"),  # the last line of the pair has no contradicts: closed
+            conflict(SE, SC, verdict="unrelated", a_sha="3" * 64),  # judged again after a hash changed: closed
             conflict(SE, SB, b_sha="2" * 64) | {"b": "V/Heating/gone.md"},  # no such note: closed
             conflict(SA, S_DEFAULT),  # no explicit class: closed
         ],
@@ -1008,6 +1008,27 @@ def test_health_shows_the_open_conflicts_and_the_m3_groups(scfg, tmp_path, capsy
     assert "  consistency.open_conflicts: 3  target 0  fail" in text.out
     _, out = run(scfg, tmp_path, capsys, "--vault", "V", "--area", "Astro", "--json")
     assert json.loads(out.out)["total"]["consistency"] == {"m3": 0, "open_conflicts": 1}
+
+
+def test_a_later_verdict_closes_a_conflict_only_after_a_hash_changed(scfg, tmp_path, capsys):
+    # spec part 5: closed "when a hash changed and kb-sweep on that one pair gives no contradicts"
+    write_conflicts(
+        scfg,
+        [
+            conflict(SA, SB, a_sha="1" * 64),
+            conflict(SA, SB, verdict="unrelated", a_sha="1" * 64),  # same hashes: no change, stays open
+            conflict(SE, SA, a_sha="1" * 64),
+            conflict(SE, SA, verdict="overlaps"),  # a hash changed since the contradicts: closed
+            conflict(SA, SC),
+            conflict(SA, SC, verdict="overlaps", b_sha="4" * 64),
+            conflict(SA, SC, b_sha="4" * 64),  # contradicts again: open again
+        ],
+    )
+    _, out = run(scfg, tmp_path, capsys, "--vault", "V", "--json")
+    data = json.loads(out.out)
+    assert sorted((c["a"], c["b"]) for c in data["conflicts"]) == sorted(
+        [tuple(sorted((SA, SB))), tuple(sorted((SA, SC)))]
+    )
 
 
 def test_an_empty_conflicts_file_gives_no_open_conflict(scfg, tmp_path, capsys):

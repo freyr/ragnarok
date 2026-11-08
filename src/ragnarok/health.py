@@ -45,9 +45,10 @@ pair (`a` < `b` by path), also when both ends found it:
   `date` (YYYY-MM-DD);
 - optional: `reason` (the text of the verdict), `sweep` (the name of the sweep file);
 - no other key. A bad line stops `health` with the file, the line number and the reason.
-The last line of a pair decides. A pair is an open conflict when its last verdict is `contradicts` and both notes
-are state + current now. It closes when one note is not state + current (or not in the index), or when a later line
-of the pair has another verdict: kb-sweep writes it when it judges the pair again after a hash changed. A
+A pair is an open conflict from its last `contradicts` line while both notes are state + current. It closes when one
+note is not state + current (or not in the index), or when a later line of the pair has another verdict and other
+hashes than that `contradicts` line: kb-sweep judged the pair again after a hash changed (spec part 5). A later
+verdict with the same hashes does not close it; only kb-write, with the approval of the user, changes a note. A
 `contradicts` whose hashes differ from the live notes stays open and asks for that check (`recheck`). With no
 conflicts file, open conflicts show `no sweep`, also when a sweep file exists: kb-sweep creates the file.
 
@@ -893,10 +894,19 @@ def open_conflicts(cfg: Config, notes: dict[str, _Note]) -> list[dict] | None:
     lines = read_conflicts(cfg)
     if lines is None:
         return None
-    last = {(c["a"], c["b"]): c for c in lines}
+    standing: dict[tuple[str, str], dict] = {}
+    for c in lines:
+        key = (c["a"], c["b"])
+        if c["verdict"] == "contradicts":
+            standing[key] = c
+        elif key in standing and (c["a_sha256"], c["b_sha256"]) != (
+            standing[key]["a_sha256"],
+            standing[key]["b_sha256"],
+        ):
+            del standing[key]  # judged again after a hash changed, with no contradicts
     out = []
-    for (a, b), c in sorted(last.items()):
-        if c["verdict"] != "contradicts" or not all(p in notes and current_state(notes[p].fm) for p in (a, b)):
+    for (a, b), c in sorted(standing.items()):
+        if not all(p in notes and current_state(notes[p].fm) for p in (a, b)):
             continue
         recheck = c["a_sha256"] != file_hash(cfg.note_path(a)) or c["b_sha256"] != file_hash(cfg.note_path(b))
         out.append({"a": a, "b": b, "date": c["date"], "recheck": recheck})
