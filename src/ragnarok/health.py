@@ -14,18 +14,28 @@ A note with no explicit class, or a class outside the three, fails `class` and n
 The `[health] accept` rules mark issues as accepted: they show with their reason and do not count. A note with an
 accepted frontmatter defect (`bad-yaml`, `bad-validity`) is out of the coverage count.
 
+Drift is the share of the notes that are changed since the conversion and pass the model. The baseline
+`data/health/baseline.json` holds, for each note path, the SHA-256 of the text, the date and the source of the entry.
+A note is changed when its hash differs from the baseline or its path is not in the baseline. Only a vault with an
+entry in the baseline counts. A note passes when it lacks no required key and has no error that is not accepted.
+A W10 text with `{{apply-date}}` has no single hash: when the live note matches the text with each placeholder read
+as any ISO date, the entry holds the hash of the live note; else it holds the hash of the template, which no live
+note equals, so the note is changed.
+
 The worklist gives each error that is not accepted one fix. `link_decision` is the one function that decides
 between `ragnarok fix links` and the user; the fixer of the links calls the same function.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from fnmatch import fnmatchcase
+from pathlib import Path
 
 import frontmatter
 import yaml
@@ -43,6 +53,8 @@ SAME_AREA = {"dashboard"}  # a generic name that a link fix keeps when the targe
 FIX_LINKS, FIX_YAML, USER = "ragnarok fix links", "ragnarok fix yaml", "the user"
 KB_WRITE_KINDS = ("double-identity", "bad-superseded-by", "bad-supersedes", "no-matching-supersedes")
 BROKEN_LINK = re.compile(r"link \[\[(.*)\]\] resolves to no note", re.DOTALL)
+APPLY_DATE = b"{{apply-date}}"
+ISO_DATE = rb"\d{4}-\d{2}-\d{2}"
 
 
 def area_of(path: str) -> tuple[str, str]:
@@ -75,9 +87,15 @@ class Values:
     accepted: int = 0
     have: dict[str, int] = field(default_factory=lambda: dict.fromkeys(KEYS, 0))
     need: dict[str, int] = field(default_factory=lambda: dict.fromkeys(KEYS, 0))
+    baseline: bool = False  # a baseline file exists, so the drift fields hold values
+    changed: int = 0  # the notes that differ from the baseline or are not in it
+    passing: int = 0  # the changed notes that pass the model
 
     def share(self, key: str) -> float | None:
         return round(self.have[key] / self.need[key], 4) if self.need[key] else None
+
+    def drift_share(self) -> float | None:
+        return round(self.passing / self.changed, 4) if self.changed else None
 
     def as_dict(self) -> dict:
         return {
@@ -88,6 +106,9 @@ class Values:
                 "not_accepted": self.errors - self.accepted,
             },
             "coverage": {k: {"have": self.have[k], "need": self.need[k], "share": self.share(k)} for k in KEYS},
+            "drift": {"changed": self.changed, "passing": self.passing, "share": self.drift_share()}
+            if self.baseline
+            else None,
         }
 
 
@@ -163,7 +184,11 @@ def gate(cfg: Config, total: Values) -> dict:
     judge("structural_errors", total.errors - total.accepted, targets.get("structural_errors"), lambda v, t: v <= t)
     for key in KEYS:
         judge(f"coverage.{key}", total.share(key), targets.get("coverage"), lambda v, t: v is None or v >= t)
-    judged = [g["result"] for g in out.values() if g["result"] != "no target"]
+    if total.baseline:
+        judge("drift", total.drift_share(), targets.get("drift"), lambda v, t: v is None or v >= t)
+    else:
+        out["drift"] = {"value": None, "target": targets.get("drift"), "result": "no baseline"}
+    judged = [g["result"] for g in out.values() if g["result"] in ("pass", "fail")]
     out["result"] = "no target" if not judged else "fail" if "fail" in judged else "pass"
     return out
 
@@ -172,20 +197,134 @@ def health(cfg: Config, conn: sqlite3.Connection, vault: str | None = None, area
     """The values of the notes of the index in the scope. Check 7 runs over all notes, as in `validate`."""
     notes = list(_Context(cfg, conn).index_notes())
     mark_doubles(notes)
+    base = load_baseline(cfg)
+    base_vaults = {path.split("/")[0] for path in base or {}}
     areas: dict[tuple[str, str], Values] = {}
-    total = Values()
+    total = Values(baseline=base is not None)
     issues, gaps = [], []
     for note in notes:
         v, a = area_of(note.path)
         if (vault is not None and v != vault) or (area is not None and a != area):
             continue
         reasons = [_reason(cfg, i) for i in note.issues]
-        _count(areas.setdefault((v, a), Values()), note, reasons)
-        gaps += [(note.path, key) for key in _count(total, note, reasons)]
+        values = areas.setdefault((v, a), Values(baseline=base is not None))
+        missing = _count(values, note, reasons)
+        _count(total, note, reasons)
+        gaps += [(note.path, key) for key in missing]
+        if base is not None and v in base_vaults and changed(cfg, base, note.path):
+            open_errors = [i for i, r in zip(note.issues, reasons, strict=True) if i.severity == ERROR and r is None]
+            ok = not missing and not open_errors
+            for each in (values, total):
+                each.changed += 1
+                each.passing += ok
         issues += [(i, r) for i, r in zip(note.issues, reasons, strict=True) if i.severity == ERROR]
     issues.sort(key=lambda ir: (ir[0].path, ir[0].check))
     areas = dict(sorted(areas.items()))
     return Result(areas, total, issues, gate(cfg, total), vault, area, gaps)
+
+
+# --- the drift baseline -----------------------------------------------------------------------------------------
+
+
+def baseline_path(cfg: Config) -> Path:
+    return cfg.data_dir / "health" / "baseline.json"
+
+
+def file_hash(path: Path) -> str | None:
+    """The SHA-256 of the bytes of the file, or None when it is not a file."""
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+
+
+def load_baseline(cfg: Config) -> dict[str, dict] | None:
+    """note key -> {sha256, date, source}, or None when there is no baseline file."""
+    path = baseline_path(cfg)
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def write_baseline(cfg: Config, data: dict[str, dict]) -> None:
+    path = baseline_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dict(sorted(data.items())), ensure_ascii=False, indent=1) + "\n")
+
+
+def changed(cfg: Config, baseline: dict[str, dict], path: str) -> bool:
+    """True when the note differs from the baseline or its path is not in the baseline."""
+    entry = baseline.get(path)
+    return entry is None or entry["sha256"] != file_hash(cfg.note_path(path))
+
+
+def _today() -> str:
+    return datetime.now(UTC).date().isoformat()
+
+
+def update_baseline(cfg: Config, paths: list[str]) -> int:
+    """Write the current hash of each note key in `paths` that has a file. Returns the number written.
+    With no baseline file nothing is written: the baseline starts only with the seed."""
+    data = load_baseline(cfg)
+    if data is None:
+        return 0
+    written = 0
+    for path in paths:
+        digest = file_hash(cfg.note_path(path))
+        if digest is not None:
+            data[path] = {"sha256": digest, "date": _today(), "source": "update"}
+            written += 1
+    write_baseline(cfg, data)
+    return written
+
+
+@dataclass
+class Seed:
+    entries: dict[str, dict]
+    areas: int
+    proposed: int
+    proposed_changed: list[str]  # the proposed texts that the live note does not equal
+    before: int  # the notes that only `real-before.txt` holds
+    before_changed: list[str]
+
+
+def seed_baseline(cfg: Config, w10: Path) -> Seed:
+    """The first baseline from the W10 records: `<area>/proposed/<note key>.proposed` for each converted note, then
+    the `real-before.txt` hashes (`<sha256>  ./<path in the area>`) of the notes that the conversion did not change.
+    The vault of an area is the first folder of its proposed keys. `<area>/skipped/` is not read."""
+    areas = sorted(a for a in w10.iterdir() if (a / "proposed").is_dir())
+    if not areas:
+        raise ValueError(f"no area with a proposed folder in {w10}")
+    date = _today()
+    entries: dict[str, dict] = {}
+    vaults: dict[Path, str] = {}
+    proposed_changed = []
+    for area in areas:
+        for file in sorted((area / "proposed").rglob("*.proposed")):
+            key = file.relative_to(area / "proposed").as_posix().removesuffix(".proposed")
+            vaults[area] = key.split("/")[0]
+            text = file.read_bytes()
+            live = cfg.note_path(key)
+            live_bytes = live.read_bytes() if live.is_file() else None
+            if APPLY_DATE not in text:
+                digest, source, equal = hashlib.sha256(text).hexdigest(), "proposed", live_bytes == text
+            else:
+                pattern = re.compile(ISO_DATE.join(re.escape(p) for p in text.split(APPLY_DATE)), re.DOTALL)
+                equal = live_bytes is not None and pattern.fullmatch(live_bytes) is not None
+                if equal:
+                    digest, source = hashlib.sha256(live_bytes).hexdigest(), "proposed-live"
+                else:
+                    digest, source = hashlib.sha256(text).hexdigest(), "proposed-unmatched"
+            entries[key] = {"sha256": digest, "date": date, "source": source}
+            if not equal:
+                proposed_changed.append(key)
+    proposed = len(entries)
+    before_changed = []
+    for area, vault in vaults.items():
+        lines = (area / "real-before.txt").read_text().splitlines() if (area / "real-before.txt").is_file() else []
+        for line in lines:
+            digest, _, rel = line.partition("  ")
+            key = f"{vault}/{area.name}/{rel.removeprefix('./')}"
+            if rel and key.endswith(".md") and key not in entries:
+                entries[key] = {"sha256": digest, "date": date, "source": "real-before"}
+                if file_hash(cfg.note_path(key)) != digest:
+                    before_changed.append(key)
+    return Seed(entries, len(areas), proposed, proposed_changed, len(entries) - proposed, before_changed)
 
 
 # --- the worklist ------------------------------------------------------------------------------------------------
@@ -340,6 +479,13 @@ def _pct(values: Values, key: str) -> str:
     return "-" if share is None else f"{values.have[key]}/{values.need[key]} {share:.1%}"
 
 
+def _drift(values: Values) -> str:
+    if not values.baseline:
+        return "no baseline"
+    share = values.drift_share()
+    return "-" if share is None else f"{values.passing}/{values.changed} {share:.1%}"
+
+
 def format_text(result: Result) -> str:
     """The error issues (accepted ones marked), a table of the areas and the totals, then the gate."""
     lines = [
@@ -348,17 +494,23 @@ def format_text(result: Result) -> str:
     ]
     rows = [(result.label(v, a), values) for (v, a), values in result.areas.items()] + [(TOTAL, result.total)]
     width = max(len(name) for name, _ in rows)
-    header = ["notes", "errors", "accepted", *KEYS]
+    header = ["notes", "errors", "accepted", *KEYS, "drift"]
     lines.append(f"{'area':{width}}  " + "  ".join(f"{h:>8}" if i < 3 else f"{h:>16}" for i, h in enumerate(header)))
     for name, values in rows:
         cells = [f"{values.notes:>8}", f"{values.errors:>8}", f"{values.accepted:>8}"]
-        cells += [f"{_pct(values, key):>16}" for key in KEYS]
+        cells += [f"{_pct(values, key):>16}" for key in KEYS] + [f"{_drift(values):>16}"]
         lines.append(f"{name:{width}}  " + "  ".join(cells))
     lines.append("gate on the totals:")
     for name, g in result.gate.items():
         if name == "result":
             continue
         value, target = g["value"], g["target"]
+        if g["result"] == "no baseline":
+            lines.append(f"  {name}: no baseline")
+            continue
+        if name == "drift":
+            value = _drift(result.total)
+            target = "-" if target is None else f"{target:.1%}"
         if name.startswith("coverage."):
             value = "-" if value is None else f"{value:.1%}"
             target = "-" if target is None else f"{target:.1%}"

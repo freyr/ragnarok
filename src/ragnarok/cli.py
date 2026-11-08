@@ -79,6 +79,15 @@ def build_parser() -> argparse.ArgumentParser:
     hp.description = (
         "Scans the vaults for changes first. The exit code is 0 when the run completes, also on a gate fail."
     )
+    hsub = hp.add_subparsers(dest="topic")
+    hb = hsub.add_parser("baseline", help="the drift baseline")
+    hbs = hb.add_subparsers(dest="baseline_action", required=True)
+    seed = hbs.add_parser("seed", help="write data/health/baseline.json from the W10 records")
+    seed.add_argument("--from", type=Path, required=True, dest="w10", help="the W10 folder: one folder for each area")
+    seed.description = (
+        "Reads <area>/proposed/*.proposed and <area>/real-before.txt of each area. A text with {{apply-date}}"
+        " is equal to a live note that has any ISO date there. Stops when a baseline exists."
+    )
     fp = parsers["find-collisions"]
     fp.add_argument("path", help="a note path, relative to the vault root or absolute; - reads a draft from stdin")
     fp.description = (
@@ -431,11 +440,41 @@ def cmd_validate(cfg, args) -> int:
     return 1 if report.errors else 0
 
 
+def cmd_health_baseline_seed(cfg, args) -> int:
+    from .health import baseline_path, seed_baseline, write_baseline
+
+    path = baseline_path(cfg)
+    if path.exists():
+        print(f"ragnarok health: baseline exists at {path}; the baseline stays fixed", file=sys.stderr)
+        return 1
+    try:
+        seed = seed_baseline(cfg, args.w10)
+    except (OSError, ValueError) as e:
+        print(f"ragnarok health: {e}", file=sys.stderr)
+        return 1
+    write_baseline(cfg, seed.entries)
+    equal = seed.proposed - len(seed.proposed_changed)
+    print(f"baseline: {len(seed.entries)} notes written to {path}")
+    print(
+        f"proposed texts: {seed.proposed} in {seed.areas} areas, equal to the live note: {equal},"
+        f" changed: {len(seed.proposed_changed)}"
+    )
+    print("".join(f"  {key}\n" for key in seed.proposed_changed), end="")
+    print(
+        f"real-before only: {seed.before}, equal to the live note: {seed.before - len(seed.before_changed)},"
+        f" changed: {len(seed.before_changed)}"
+    )
+    print("".join(f"  {key}\n" for key in seed.before_changed), end="")
+    return 0
+
+
 def cmd_health(cfg, args) -> int:
     from .embed import EmbedError, OllamaEmbedder
     from .health import format_text, format_worklist, health, save, worklist
     from .index import IndexMismatch, connect, update
 
+    if args.topic == "baseline":
+        return cmd_health_baseline_seed(cfg, args)
     if args.vault is not None and args.vault not in cfg.vaults:
         print(f"Unknown vault {args.vault}. The vaults are {', '.join(cfg.vaults)}.", file=sys.stderr)
         return 1

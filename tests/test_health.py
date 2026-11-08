@@ -1,4 +1,6 @@
+import hashlib
 import json
+import re
 
 import pytest
 from test_index import FakeEmbedder
@@ -121,6 +123,7 @@ def test_health_gives_errors_and_coverage_for_each_area_and_the_totals(cfg, tmp_
         "coverage.validity": {"value": 0.5, "target": 0.5, "result": "pass"},
         "coverage.as_of": {"value": 0.5, "target": 0.5, "result": "pass"},
         "coverage.subject": {"value": 0.6, "target": 0.5, "result": "pass"},
+        "drift": {"value": None, "target": None, "result": "no baseline"},
         "result": "fail",
     }
     issues = {(i["path"], i["kind"]): i for i in data["issues"]}
@@ -148,6 +151,8 @@ def test_without_targets_and_accept_list_all_errors_count_and_no_target_shows(cf
     assert data["total"]["coverage"]["class"] == cov(4, 7)  # the bad YAML fixture counts and fails class
     assert data["gate"]["structural_errors"] == {"value": 3, "target": None, "result": "no target"}
     assert data["gate"]["coverage.subject"]["result"] == "no target"
+    assert data["gate"]["drift"] == {"value": None, "target": None, "result": "no baseline"}
+    assert data["total"]["drift"] is None and data["areas"][0]["drift"] is None  # no baseline file: no failure
     assert data["gate"]["result"] == "no target"  # with nothing to judge, the gate neither passes nor fails
 
 
@@ -167,6 +172,7 @@ def test_text_output_marks_accepted_issues_and_the_gate(cfg, tmp_path, capsys):
     assert f"{LINK}: error [4] link [[gone]] resolves to no note (accepted: fixtures)" in out.out
     assert f"{LOG}: error [4] link [[nowhere]] resolves to no note\n" in out.out
     assert "result: fail" in out.out
+    assert "  drift: no baseline" in out.out
     assert "no target" not in out.out
 
 
@@ -398,3 +404,149 @@ def test_link_decision_is_the_function_of_the_worklist_and_the_fixer(wcfg):
     wcfg.health = HealthConfig(accept=[AcceptRule(glob="V/Skip/**", kinds=["broken-link"], reason="skipped")])
     skip = health_module.link_decision(wcfg, names, "V/Skip/src.md", "Old/Heat pump guide")
     assert (skip.auto, skip.reason) == (False, "accepted-or-assets")
+
+
+# --- the drift baseline ------------------------------------------------------------------------------------------
+
+DATED = "V/Heating/dated.md"
+CHANGED = "V/Heating/changed.md"
+NEWER = "V/Heating/newer.md"
+OLD_GUIDE = "---\nclass: state\nvalidity: current\nas_of: 2025-12-01\nsubject: ['[[Heat pump]]']\n---\n# Old guide\n"
+LIVE_DATED = "---\nclass: record\nas_of: 2026-03-01\nsubject: ['[[Heat pump]]']\n---\n# Dated\nCorrection 2026-03-01.\n"
+TEMPLATE_DATED = LIVE_DATED.replace("2026-03-01", "{{apply-date}}")
+LIVE_CHANGED = "---\nclass: record\nas_of: 2026-03-02\nsubject: ['[[Heat pump]]']\n---\n# Changed by hand\n"
+TEMPLATE_CHANGED = LIVE_CHANGED.replace("2026-03-02", "{{apply-date}}").replace("by hand", "by the conversion")
+PROPOSED_LOG = NOTES[LOG].replace("# Log", "# Log before the edit")
+DRIFT_TOML = HEALTH_TOML + "drift = 0.6\n"
+
+
+def sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def write_proposed(w10, area, key, text, folder="proposed"):
+    path = w10 / area / folder / f"{key}.proposed"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+@pytest.fixture
+def dcfg(cfg, tmp_path):
+    """The live notes of NOTES plus three notes of the area Heating; the W10 folder is tmp_path / "w10"."""
+    for key, text in {DATED: LIVE_DATED, CHANGED: LIVE_CHANGED, NEWER: LIVE_DATED}.items():
+        (cfg.root / key).write_text(text)
+    w10 = tmp_path / "w10"
+    write_proposed(w10, "Heating", GUIDE, NOTES[GUIDE])  # equal to the live note
+    write_proposed(w10, "Heating", LOG, PROPOSED_LOG)  # the live note changed after the conversion
+    write_proposed(w10, "Heating", DATED, TEMPLATE_DATED)  # equal with the date read as any date
+    write_proposed(w10, "Heating", CHANGED, TEMPLATE_CHANGED)  # the live note differs and has another date
+    write_proposed(w10, "Heating", "V/Heating/skipped.md", "skipped\n", folder="skipped/proposed")  # not applied
+    (w10 / "Heating" / "real-before.txt").write_text(
+        f"{sha(NOTES[BOILER])}  ./boiler.md\n"  # a note that the conversion did not change
+        f"{sha(OLD_GUIDE)}  ./guide.md\n"  # the text before the conversion: the proposed text wins
+        f"{sha('gone')}  ./gone.md\n"  # a note that no longer exists: kept, harmless
+    )
+    return cfg
+
+
+def seed(cfg, tmp_path, capsys, *args):
+    path = config_file(cfg, tmp_path, DRIFT_TOML)
+    code = main(["--config", str(path), "health", "baseline", "seed", *args])
+    return code, capsys.readouterr()
+
+
+def baseline(cfg):
+    return json.loads((cfg.data_dir / "health" / "baseline.json").read_text())
+
+
+def test_seed_writes_the_hash_and_the_date_of_each_note(dcfg, tmp_path, capsys):
+    code, out = seed(dcfg, tmp_path, capsys, "--from", str(tmp_path / "w10"))
+    assert code == 0
+    data = baseline(dcfg)
+    assert {k: (v["sha256"], v["source"]) for k, v in data.items()} == {
+        GUIDE: (sha(NOTES[GUIDE]), "proposed"),
+        LOG: (sha(PROPOSED_LOG), "proposed"),
+        # the date is read as any date: the live note matches, so its hash is the baseline
+        DATED: (sha(LIVE_DATED), "proposed-live"),
+        # the live note does not match the template: the template hash never equals a live note
+        CHANGED: (sha(TEMPLATE_CHANGED), "proposed-unmatched"),
+        "V/Heating/boiler.md": (sha(NOTES[BOILER]), "real-before"),
+        "V/Heating/gone.md": (sha("gone"), "real-before"),
+    }
+    assert all(re.fullmatch(r"\d{4}-\d{2}-\d{2}", v["date"]) for v in data.values())
+    assert "proposed texts: 4 in 1 areas, equal to the live note: 2, changed: 2" in out.out
+    assert f"  {LOG}\n" in out.out and f"  {CHANGED}\n" in out.out
+    assert "real-before only: 2, equal to the live note: 1, changed: 1" in out.out
+    # the baseline stays fixed: a second seed does not overwrite it
+    before = (dcfg.data_dir / "health" / "baseline.json").read_text()
+    code, out = seed(dcfg, tmp_path, capsys, "--from", str(tmp_path / "w10"))
+    assert code == 1
+    assert "baseline exists" in out.err
+    assert (dcfg.data_dir / "health" / "baseline.json").read_text() == before
+
+
+def test_seed_needs_the_w10_folder(dcfg, tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        seed(dcfg, tmp_path, capsys)
+    capsys.readouterr()
+    (tmp_path / "empty").mkdir()
+    code, out = seed(dcfg, tmp_path, capsys, "--from", str(tmp_path / "empty"))
+    assert code == 1
+    assert "no area with a proposed folder" in out.err
+    assert not (dcfg.data_dir / "health" / "baseline.json").exists()
+
+
+def drift(data, area):
+    return {a["area"]: a for a in data["areas"]}[area]["drift"]
+
+
+def test_health_reports_the_changed_notes_and_the_drift_share(dcfg, tmp_path, capsys):
+    seed(dcfg, tmp_path, capsys, "--from", str(tmp_path / "w10"))
+    indexed(dcfg)
+    code, out = run(dcfg, tmp_path, capsys, "--vault", "V", "--json", health=DRIFT_TOML)
+    assert code == 0
+    data = json.loads(out.out)
+    # Heating: log (broken link), changed (valid), newer (new, valid); dated and guide equal the baseline
+    assert drift(data, "Heating") == {"changed": 3, "passing": 2, "share": 0.6667}
+    # not in the baseline: entity (no class), top (no validity); bad (accepted bad YAML) and link (accepted error) pass
+    assert drift(data, "Entities") == {"changed": 1, "passing": 0, "share": 0.0}
+    assert drift(data, "Fixtures") == {"changed": 2, "passing": 2, "share": 1.0}
+    assert drift(data, "(top)") == {"changed": 1, "passing": 0, "share": 0.0}
+    assert data["total"]["drift"] == {"changed": 7, "passing": 4, "share": 0.5714}
+    assert data["gate"]["drift"] == {"value": 0.5714, "target": 0.6, "result": "fail"}
+    assert data["gate"]["result"] == "fail"
+    _, out = run(dcfg, tmp_path, capsys, "--vault", "V", health=DRIFT_TOML)
+    assert "  drift: 4/7 57.1%  target 60.0%  fail" in out.out
+
+
+def test_drift_is_no_target_without_the_target_and_counts_only_baseline_vaults(dcfg, tmp_path, capsys):
+    seed(dcfg, tmp_path, capsys, "--from", str(tmp_path / "w10"))
+    (dcfg.root / "W").mkdir()
+    (dcfg.root / "W/other.md").write_text(NOTES[GUIDE])
+    dcfg.vaults.append("W")
+    indexed(dcfg)
+    _, out = run(dcfg, tmp_path, capsys, "--json", health=HEALTH_TOML)
+    data = json.loads(out.out)
+    assert data["gate"]["drift"] == {"value": 0.5714, "target": None, "result": "no target"}
+    assert data["total"]["drift"]["changed"] == 7  # the note of W is not counted: W has no baseline entry
+
+
+def test_an_edit_after_the_seed_makes_a_changed_note_and_update_baseline_takes_it_back(dcfg, tmp_path, capsys):
+    seed(dcfg, tmp_path, capsys, "--from", str(tmp_path / "w10"))
+    (dcfg.root / GUIDE).write_text(NOTES[GUIDE] + "An edit.\n")
+    (dcfg.root / LOG).write_text(PROPOSED_LOG)  # back to the baseline text
+    indexed(dcfg)
+    _, out = run(dcfg, tmp_path, capsys, "--vault", "V", "--area", "Heating", "--json")
+    assert drift(json.loads(out.out), "Heating") == {"changed": 3, "passing": 3, "share": 1.0}  # guide, changed, newer
+    assert health_module.update_baseline(dcfg, [GUIDE, NEWER, "V/Heating/nothing.md"]) == 2
+    data = baseline(dcfg)
+    assert (data[GUIDE]["sha256"], data[GUIDE]["source"]) == (sha(NOTES[GUIDE] + "An edit.\n"), "update")
+    assert data[NEWER]["sha256"] == sha(LIVE_DATED)
+    assert "V/Heating/nothing.md" not in data
+    _, out = run(dcfg, tmp_path, capsys, "--vault", "V", "--area", "Heating", "--json")
+    assert drift(json.loads(out.out), "Heating") == {"changed": 1, "passing": 1, "share": 1.0}  # only `changed`
+
+
+def test_update_baseline_does_nothing_without_a_baseline(dcfg):
+    assert health_module.update_baseline(dcfg, [GUIDE]) == 0
+    assert not (dcfg.data_dir / "health").exists()
