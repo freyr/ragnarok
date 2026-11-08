@@ -18,6 +18,7 @@ Drift is the share of the notes that are changed since the conversion and pass t
 `data/health/baseline.json` holds, for each note path, the SHA-256 of the text, the date and the source of the entry.
 A note is changed when its hash differs from the baseline or its path is not in the baseline. Only a vault with an
 entry in the baseline counts. A note passes when it lacks no required key and has no error that is not accepted.
+A changed note with an accepted frontmatter defect is out of the drift count, as in coverage.
 A W10 text with `{{apply-date}}` has no single hash: when the live note matches the text with each placeholder read
 as any ISO date, the entry holds the hash of the live note; else it holds the hash of the template, which no live
 note equals, so the note is changed.
@@ -34,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
 from dataclasses import dataclass, field
@@ -156,15 +158,19 @@ def _reason(cfg: Config, issue: Issue) -> str | None:
     return None
 
 
+def _defect(note: _Note, reasons: list[str | None]) -> bool:
+    """True when the note has an accepted frontmatter defect: it is out of the coverage and drift counts."""
+    return any(r is not None and i.kind in FRONTMATTER_DEFECTS for i, r in zip(note.issues, reasons, strict=True))
+
+
 def _count(values: Values, note: _Note, reasons: list[str | None]) -> list[str]:
     """Add the note to the values. Returns the required keys that the note lacks."""
     errors = [r for i, r in zip(note.issues, reasons, strict=True) if i.severity == ERROR]
     values.notes += 1
     values.errors += len(errors)
     values.accepted += sum(r is not None for r in errors)
-    defect = any(r is not None and i.kind in FRONTMATTER_DEFECTS for i, r in zip(note.issues, reasons, strict=True))
     missing = []
-    if defect:
+    if _defect(note, reasons):
         return missing
     for key, needed in required(note.fm, note.meta.entity).items():
         if needed:
@@ -216,7 +222,7 @@ def health(cfg: Config, conn: sqlite3.Connection, vault: str | None = None, area
         missing = _count(values, note, reasons)
         _count(total, note, reasons)
         gaps += [(note.path, key) for key in missing]
-        if base is not None and v in base_vaults and changed(cfg, base, note.path):
+        if base is not None and v in base_vaults and not _defect(note, reasons) and changed(cfg, base, note.path):
             open_errors = [i for i, r in zip(note.issues, reasons, strict=True) if i.severity == ERROR and r is None]
             ok = not missing and not open_errors
             for each in (values, total):
@@ -249,7 +255,9 @@ def load_baseline(cfg: Config) -> dict[str, dict] | None:
 def write_baseline(cfg: Config, data: dict[str, dict]) -> None:
     path = baseline_path(cfg)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(dict(sorted(data.items())), ensure_ascii=False, indent=1) + "\n")
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_text(json.dumps(dict(sorted(data.items())), ensure_ascii=False, indent=1) + "\n")
+    os.replace(temp, path)
 
 
 def changed(cfg: Config, baseline: dict[str, dict], path: str) -> bool:
@@ -287,6 +295,7 @@ class Seed:
     before: int  # the notes that only `real-before.txt` holds
     before_changed: list[str]
     pre_cutoff: int = 0  # the notes with the live hash, as the cutoff rule says
+    differ: list[str] = field(default_factory=list)  # the entries that differ from the live note, at the end
 
 
 def seed_baseline(cfg: Config, w10: Path, cutoff: datetime) -> Seed:
@@ -342,7 +351,8 @@ def seed_baseline(cfg: Config, w10: Path, cutoff: datetime) -> Seed:
         if (key not in entries or entries[key]["sha256"] != digest) and live.stat().st_mtime <= limit:
             entries[key] = {"sha256": digest, "date": date, "source": "pre-cutoff-live"}
             pre_cutoff += 1
-    return Seed(entries, len(areas), proposed, proposed_changed, before, before_changed, pre_cutoff)
+    differ = [key for key, entry in entries.items() if entry["sha256"] != file_hash(cfg.note_path(key))]
+    return Seed(entries, len(areas), proposed, proposed_changed, before, before_changed, pre_cutoff, differ)
 
 
 # --- the worklist ------------------------------------------------------------------------------------------------

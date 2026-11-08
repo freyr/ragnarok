@@ -512,15 +512,16 @@ def test_health_reports_the_changed_notes_and_the_drift_share(dcfg, tmp_path, ca
     data = json.loads(out.out)
     # Heating: log (broken link), changed (valid), newer (new, valid); dated and guide equal the baseline
     assert drift(data, "Heating") == {"changed": 3, "passing": 2, "share": 0.6667}
-    # not in the baseline: entity (no class), top (no validity); bad (accepted bad YAML) and link (accepted error) pass
+    # not in the baseline: entity (no class), top (no validity); link (accepted error) passes; bad (accepted bad YAML)
+    # is out of the count, as in coverage
     assert drift(data, "Entities") == {"changed": 1, "passing": 0, "share": 0.0}
-    assert drift(data, "Fixtures") == {"changed": 2, "passing": 2, "share": 1.0}
+    assert drift(data, "Fixtures") == {"changed": 1, "passing": 1, "share": 1.0}
     assert drift(data, "(top)") == {"changed": 1, "passing": 0, "share": 0.0}
-    assert data["total"]["drift"] == {"changed": 7, "passing": 4, "share": 0.5714}
-    assert data["gate"]["drift"] == {"value": 0.5714, "target": 0.6, "result": "fail"}
+    assert data["total"]["drift"] == {"changed": 6, "passing": 3, "share": 0.5}
+    assert data["gate"]["drift"] == {"value": 0.5, "target": 0.6, "result": "fail"}
     assert data["gate"]["result"] == "fail"
     _, out = run(dcfg, tmp_path, capsys, "--vault", "V", health=DRIFT_TOML)
-    assert "  drift: 4/7 57.1%  target 60.0%  fail" in out.out
+    assert "  drift: 3/6 50.0%  target 60.0%  fail" in out.out
 
 
 def test_drift_is_no_target_without_the_target_and_counts_only_baseline_vaults(dcfg, tmp_path, capsys):
@@ -531,8 +532,8 @@ def test_drift_is_no_target_without_the_target_and_counts_only_baseline_vaults(d
     indexed(dcfg)
     _, out = run(dcfg, tmp_path, capsys, "--json", health=HEALTH_TOML)
     data = json.loads(out.out)
-    assert data["gate"]["drift"] == {"value": 0.5714, "target": None, "result": "no target"}
-    assert data["total"]["drift"]["changed"] == 7  # the note of W is not counted: W has no baseline entry
+    assert data["gate"]["drift"] == {"value": 0.5, "target": None, "result": "no target"}
+    assert data["total"]["drift"]["changed"] == 6  # the note of W is not counted: W has no baseline entry
 
 
 def test_an_edit_after_the_seed_makes_a_changed_note_and_update_baseline_takes_it_back(dcfg, tmp_path, capsys):
@@ -577,10 +578,17 @@ def test_seed_takes_the_live_hash_of_a_note_at_or_before_the_cutoff(dcfg, tmp_pa
     assert data[CHANGED] == (sha(TEMPLATE_CHANGED), "proposed-unmatched")
     assert BAD not in data and LINK not in data
     assert "pre-cutoff-live: 3" in out.out
+    # the counts of the written file: the entries by source and the entries that differ from the live note
+    assert (
+        "entries by source: pre-cutoff-live 3, proposed 1, proposed-live 1, proposed-unmatched 1, real-before 2"
+        in out.out
+    )
+    assert "entries that differ from the live note: 2\n" in out.out
+    assert out.out.endswith(f"  {CHANGED}\n  V/Heating/gone.md\n")
     indexed(dcfg)
     _, out = run(dcfg, tmp_path, capsys, "--vault", "V", "--json", health=DRIFT_TOML)
-    # changed, newer, bad and link: all pass (bad and link have accepted errors)
-    assert json.loads(out.out)["total"]["drift"] == {"changed": 4, "passing": 4, "share": 1.0}
+    # changed, newer and link pass; bad has an accepted frontmatter defect and is out of the count
+    assert json.loads(out.out)["total"]["drift"] == {"changed": 3, "passing": 3, "share": 1.0}
 
 
 def test_seed_needs_a_cutoff(dcfg, tmp_path, capsys):
@@ -588,3 +596,19 @@ def test_seed_needs_a_cutoff(dcfg, tmp_path, capsys):
     with pytest.raises(SystemExit):
         main(["--config", str(path), "health", "baseline", "seed", "--from", str(tmp_path / "w10")])
     assert "--cutoff" in capsys.readouterr().err
+
+
+def test_the_baseline_is_written_through_a_temp_file(dcfg, tmp_path, capsys, monkeypatch):
+    seed(dcfg, tmp_path, capsys, "--from", str(tmp_path / "w10"))
+    before = (dcfg.data_dir / "health" / "baseline.json").read_text()
+
+    def stop(src, dst):
+        raise OSError("stop")
+
+    monkeypatch.setattr("ragnarok.health.os.replace", stop)
+    with pytest.raises(OSError):
+        health_module.update_baseline(dcfg, [LOG])
+    assert (dcfg.data_dir / "health" / "baseline.json").read_text() == before  # never half written
+    monkeypatch.undo()
+    assert health_module.update_baseline(dcfg, [LOG]) == 1
+    assert sorted(p.name for p in (dcfg.data_dir / "health").iterdir()) == ["baseline.json"]  # no temp file is left

@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -463,17 +464,20 @@ def cmd_health_baseline_seed(cfg, args) -> int:
     write_baseline(cfg, seed.entries)
     equal = seed.proposed - len(seed.proposed_changed)
     print(f"baseline: {len(seed.entries)} notes written to {path}")
+    sources = Counter(entry["source"] for entry in seed.entries.values())
+    print("entries by source: " + ", ".join(f"{name} {n}" for name, n in sorted(sources.items())))
     print(
         f"proposed texts: {seed.proposed} in {seed.areas} areas, equal to the live note: {equal},"
-        f" changed: {len(seed.proposed_changed)}"
+        f" changed: {len(seed.proposed_changed)} (before the cutoff rule)"
     )
     print("".join(f"  {key}\n" for key in seed.proposed_changed), end="")
     print(
         f"real-before only: {seed.before}, equal to the live note: {seed.before - len(seed.before_changed)},"
-        f" changed: {len(seed.before_changed)}"
+        f" changed: {len(seed.before_changed)} (before the cutoff rule)"
     )
-    print("".join(f"  {key}\n" for key in seed.before_changed), end="")
     print(f"pre-cutoff-live: {seed.pre_cutoff}")
+    print(f"entries that differ from the live note: {len(seed.differ)}")
+    print("".join(f"  {key}\n" for key in seed.differ), end="")
     return 0
 
 
