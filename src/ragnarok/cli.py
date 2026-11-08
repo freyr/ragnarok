@@ -433,7 +433,7 @@ def cmd_validate(cfg, args) -> int:
 def cmd_health(cfg, args) -> int:
     from .embed import EmbedError, OllamaEmbedder
     from .health import format_text, health, save
-    from .index import SCAN_LIMIT, IndexMismatch, connect, update
+    from .index import IndexMismatch, connect, update
 
     if args.vault is not None and args.vault not in cfg.vaults:
         print(f"Unknown vault {args.vault}. The vaults are {', '.join(cfg.vaults)}.", file=sys.stderr)
@@ -447,7 +447,7 @@ def cmd_health(cfg, args) -> int:
         print(e, file=sys.stderr)
         return 1
     try:
-        for warning in update(cfg, conn, OllamaEmbedder(cfg), limit=SCAN_LIMIT).warnings:
+        for warning in update(cfg, conn, OllamaEmbedder(cfg)).warnings:
             print(f"ragnarok health: {warning}", file=sys.stderr)
         result = health(cfg, conn, args.vault, args.area)
     except EmbedError as e:

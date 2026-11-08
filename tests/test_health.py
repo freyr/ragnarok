@@ -179,6 +179,34 @@ def test_health_scans_the_vault_before_it_reads(cfg, tmp_path, capsys, monkeypat
     assert heating["coverage"]["as_of"] == cov(1, 2)
 
 
+def test_health_counts_a_batch_of_new_notes_larger_than_the_scan_limit(cfg, tmp_path, capsys, monkeypatch):
+    indexed(cfg)
+    monkeypatch.setattr("ragnarok.embed.OllamaEmbedder", lambda c: FakeEmbedder())
+    for n in range(25):
+        (cfg.root / f"V/Heating/new-{n}.md").write_text(f"---\nclass: record\nas_of: 2026-03-01\n---\n# New {n}\n")
+    _, out = run(cfg, tmp_path, capsys, "--vault", "V", "--json")
+    heating = {a["area"]: a for a in json.loads(out.out)["areas"]}["Heating"]
+    assert heating["notes"] == 28
+    assert heating["coverage"]["as_of"] == cov(25, 26)
+
+
+def test_an_accepted_bad_validity_fixture_is_out_of_the_coverage_count(cfg, tmp_path, capsys):
+    (cfg.root / "V/Fixtures/validity.md").write_text("---\nclass: record\nvalidity: current\n---\n# Validity\n")
+    indexed(cfg)
+    health = HEALTH_TOML.replace('"bad-yaml"]', '"bad-yaml", "bad-validity"]')
+    _, out = run(cfg, tmp_path, capsys, "--vault", "V", "--json", health=health)
+    fixtures = {a["area"]: a for a in json.loads(out.out)["areas"]}["Fixtures"]
+    assert fixtures["notes"] == 3
+    assert fixtures["structural_errors"] == {"errors": 3, "accepted": 3, "not_accepted": 0}
+    # only the link fixture counts; the record with a validity would add a class and a missing as_of
+    assert fixtures["coverage"] == {
+        "class": cov(1, 1),
+        "validity": cov(0, 0),
+        "as_of": cov(1, 1),
+        "subject": cov(1, 1),
+    }
+
+
 def test_save_adds_one_line_for_each_area_and_the_totals(cfg, tmp_path, capsys):
     indexed(cfg)
     run(cfg, tmp_path, capsys, "--vault", "V", "--save")
