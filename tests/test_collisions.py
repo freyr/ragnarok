@@ -175,6 +175,23 @@ def test_one_query_embedding(cfg, conn):
     assert Counting.calls == 1
 
 
+def test_a_given_context_is_used_and_not_built_again(cfg, conn, monkeypatch):
+    without = [run(cfg, conn, draft=DRAFT), run(cfg, conn, path=IDENT_STATE)]
+    ctx = collisions._Context(cfg, conn)
+    built = []
+
+    class Counted(collisions._Context):
+        def __init__(self, *args):
+            built.append(args)
+            super().__init__(*args)
+
+    monkeypatch.setattr(collisions, "_Context", Counted)
+    assert [run(cfg, conn, draft=DRAFT, ctx=ctx), run(cfg, conn, path=IDENT_STATE, ctx=ctx)] == without
+    assert built == []
+    run(cfg, conn, draft=DRAFT)  # with no context, each call builds one, as before
+    assert len(built) == 1
+
+
 # --- the order and the limit -------------------------------------------------------------------------------------
 
 

@@ -110,6 +110,13 @@ def build_parser() -> argparse.ArgumentParser:
     asc = has.add_parser("score", help="the correct share and the Wilson interval of a marked sheet")
     asc.add_argument("sheet", type=Path, help="a sheet with ok or wrong: <correct value> in each verdict cell")
     asc.description = "Rejects a sheet with unmarked rows. Adds the record to data/health/audit-records.jsonl."
+    sw = hsub.add_parser("sweep", help="write data/health/sweep-<stamp>.jsonl, the collision pairs to judge")
+    sw.add_argument("--vault", dest="sweep_vault", default="Private", help="the vault (default Private)")
+    sw.description = (
+        "Scans the vaults for changes first. Runs find_collisions for each note with class: state and"
+        " validity: current that is not private, and keeps the candidates of the same labels in the vault."
+        " A pair found from both ends is one line."
+    )
     xp = parsers["fix"]
     xp.add_argument("kind", choices=["links", "yaml"])
     xp.add_argument("--vault", help="one vault (default all vaults)")
@@ -529,6 +536,36 @@ def cmd_health_audit(cfg, args) -> int:
     return 0
 
 
+def cmd_health_sweep(cfg, args) -> int:
+    from .embed import EmbedError, OllamaEmbedder
+    from .health import sweep, write_sweep
+    from .index import IndexMismatch, connect, update
+
+    if args.sweep_vault not in cfg.vaults:
+        print(f"Unknown vault {args.sweep_vault}. The vaults are {', '.join(cfg.vaults)}.", file=sys.stderr)
+        return 1
+    if not cfg.index_path.exists():
+        print(f"No index at {cfg.index_path}. Run `ragnarok index`.", file=sys.stderr)
+        return 1
+    try:
+        conn = connect(cfg)
+    except IndexMismatch as e:
+        print(e, file=sys.stderr)
+        return 1
+    try:
+        embedder = OllamaEmbedder(cfg)
+        for warning in update(cfg, conn, embedder).warnings:
+            print(f"ragnarok health: {warning}", file=sys.stderr)
+        notes, pairs = sweep(cfg, conn, embedder, args.sweep_vault)
+    except EmbedError as e:
+        print(f"ragnarok health: the sweep failed: {e}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+    print(f"sweep: {write_sweep(cfg, pairs)} ({len(notes)} notes, {len(pairs)} pairs)")
+    return 0
+
+
 def cmd_health(cfg, args) -> int:
     from .embed import EmbedError, OllamaEmbedder
     from .health import format_text, format_worklist, health, save, worklist
@@ -538,6 +575,8 @@ def cmd_health(cfg, args) -> int:
         return cmd_health_baseline_seed(cfg, args)
     if args.topic == "audit":
         return cmd_health_audit(cfg, args)
+    if args.topic == "sweep":
+        return cmd_health_sweep(cfg, args)
     if args.vault is not None and args.vault not in cfg.vaults:
         print(f"Unknown vault {args.vault}. The vaults are {', '.join(cfg.vaults)}.", file=sys.stderr)
         return 1
@@ -556,6 +595,9 @@ def cmd_health(cfg, args) -> int:
         works = worklist(cfg, conn, result) if args.worklist else None
     except EmbedError as e:
         print(f"ragnarok health: the scan of the vaults failed: {e}", file=sys.stderr)
+        return 1
+    except ValueError as e:  # a bad line of the conflicts file
+        print(f"ragnarok health: {e}", file=sys.stderr)
         return 1
     finally:
         conn.close()

@@ -40,6 +40,7 @@ accept = [
 structural_errors = 0
 coverage = 0.5
 correctness = 0.9
+open_conflicts = 0
 """
 
 
@@ -78,7 +79,7 @@ def test_health_config_is_read_from_toml(cfg, tmp_path):
     loaded = load_config(config_file(cfg, tmp_path))
     assert loaded.health == HealthConfig(
         accept=[AcceptRule(glob="V/Fixtures/**", kinds=["broken-link", "bad-yaml"], reason="fixtures")],
-        targets={"structural_errors": 0, "coverage": 0.5, "correctness": 0.9},
+        targets={"structural_errors": 0, "coverage": 0.5, "correctness": 0.9, "open_conflicts": 0},
     )
     assert Config().health == HealthConfig()
 
@@ -127,8 +128,13 @@ def test_health_gives_errors_and_coverage_for_each_area_and_the_totals(cfg, tmp_
         "coverage.subject": {"value": 0.6, "target": 0.5, "result": "pass"},
         "drift": {"value": None, "target": None, "result": "no baseline"},
         "correctness": {"value": None, "target": 0.9, "result": "no audit"},
+        "consistency.m3": {"value": 0, "target": 0, "result": "pass"},
+        "consistency.open_conflicts": {"value": None, "target": 0, "result": "no sweep"},
         "result": "fail",
     }
+    assert heating["consistency"] == {"m3": 0, "open_conflicts": None}
+    assert total["consistency"] == {"m3": 0, "open_conflicts": None}
+    assert data["conflicts"] is None
     issues = {(i["path"], i["kind"]): i for i in data["issues"]}
     assert set(issues) == {(LOG, "broken-link"), (BAD, "bad-yaml"), (LINK, "broken-link")}
     assert issues[(LINK, "broken-link")]["accepted"] is True
@@ -155,6 +161,8 @@ def test_without_targets_and_accept_list_all_errors_count_and_no_target_shows(cf
     assert data["gate"]["structural_errors"] == {"value": 3, "target": None, "result": "no target"}
     assert data["gate"]["coverage.subject"]["result"] == "no target"
     assert data["gate"]["drift"] == {"value": None, "target": None, "result": "no baseline"}
+    assert data["gate"]["consistency.m3"] == {"value": 0, "target": None, "result": "no target"}
+    assert data["gate"]["consistency.open_conflicts"] == {"value": None, "target": None, "result": "no sweep"}
     assert data["total"]["drift"] is None and data["areas"][0]["drift"] is None  # no baseline file: no failure
     assert data["gate"]["result"] == "no target"  # with nothing to judge, the gate neither passes nor fails
 
@@ -179,6 +187,8 @@ def test_text_output_gives_the_table_the_accepted_issues_and_the_gate(cfg, tmp_p
     assert LOG not in out.out  # an issue that is not accepted is in the worklist only
     assert "result: fail" in out.out
     assert "  drift: no baseline" in out.out
+    assert "  consistency.m3: 0  target 0  pass" in out.out
+    assert "  consistency.open_conflicts: no sweep" in out.out
     assert "no target" not in out.out
     _, out = run(cfg, tmp_path, capsys, "--vault", "V", "--worklist")
     assert out.out.startswith("area ")
@@ -822,3 +832,216 @@ def test_health_shows_the_correctness_of_the_last_audit_record(audit_cfg, tmp_pa
     assert "correctness: 80.0% (49.0%-94.3%, 2026-02-02)  target 90.0%  fail" in text.out
     _, out = run(audit_cfg, tmp_path, capsys, "--json", health="")
     assert json.loads(out.out)["gate"]["correctness"]["result"] == "no target"
+
+
+# --- the contradiction sweep and the open conflicts ---------------------------------------------------------------
+
+SA, SB, SC, SE = "V/Heating/a.md", "V/Heating/b.md", "V/Heating/c.md", "V/Astro/e.md"
+S_OLD, S_DEFAULT, S_SECRET = "V/Heating/old.md", "V/Heating/default.md", "V/Secret/s.md"
+NONE = "subject: none\nsubject_reason: a test note\n"
+PUMP_GUIDE = "---\ntype: guide\nclass: state\nvalidity: current\nsubject: ['[[Heat pump]]']\n---\n"
+SWEEP_NOTES = {
+    "V/Entities/Heat pump.md": "---\ntype: entity\nkind: device\n---\n# Heat pump\n",
+    # a and b have one identity key: an M3 group
+    SA: PUMP_GUIDE + "# A\nThe boiler flow is 45.\n",
+    SB: PUMP_GUIDE + "# B\nThe boiler flow is 50.\n",
+    SC: f"---\ntype: research\nclass: state\nvalidity: current\n{NONE}---\n# C\nThe boiler pressure.\n",
+    SE: f"---\nclass: state\nvalidity: current\n{NONE}---\n# E\nThe eyepiece field.\n",
+    # not a source and not a candidate: superseded, a proposal, no explicit labels, private, another vault
+    S_OLD: f"---\nclass: state\nvalidity: superseded\n{NONE}---\n# Old\nThe boiler flow is 40.\n",
+    "V/Heating/plan.md": f"---\nclass: proposal\nvalidity: open\n{NONE}---\n# Plan\nA new boiler.\n",
+    S_DEFAULT: "---\ntype: guide\n---\n# Default\nThe boiler.\n",
+    S_SECRET: f"---\nclass: state\nvalidity: current\n{NONE}---\n# S\nThe boiler flow is 45.\n",
+    "W/Notes/w.md": f"---\nclass: state\nvalidity: current\n{NONE}---\n# W\nThe boiler flow is 45.\n",
+}
+
+
+@pytest.fixture
+def scfg(tmp_path, monkeypatch):
+    from test_search import TopicEmbedder
+
+    root = tmp_path / "vaults"
+    for rel, text in SWEEP_NOTES.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    cfg = Config(
+        root=root,
+        index_path=tmp_path / "index.db",
+        vaults=["V", "W"],
+        dimension=len(TopicEmbedder.TOPICS),
+        private_patterns=["V/Secret/**"],
+    )
+    conn = connect(cfg)
+    update(cfg, conn, TopicEmbedder())
+    conn.close()
+    monkeypatch.setattr("ragnarok.embed.OllamaEmbedder", lambda c: TopicEmbedder())
+    return cfg
+
+
+def sweep(cfg, tmp_path, capsys, *args):
+    code = main(["--config", str(config_file(cfg, tmp_path)), "health", "sweep", *args])
+    return code, capsys.readouterr()
+
+
+def sweep_lines(cfg):
+    (path,) = (cfg.data_dir / "health").glob("sweep-*.jsonl")
+    assert re.fullmatch(r"sweep-\d{8}T\d{6}Z\.jsonl", path.name)
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def text_sha(rel):
+    return sha(SWEEP_NOTES[rel])
+
+
+def test_sweep_writes_each_pair_of_current_state_notes_once(scfg, tmp_path, capsys):
+    code, out = sweep(scfg, tmp_path, capsys, "--vault", "V")
+    assert code == 0, out.err
+    lines = sweep_lines(scfg)
+    assert "4 notes, 6 pairs" in out.out
+    # four sources in a small vault: each finds the other three; the other notes are never in a pair
+    assert [(x["a"], x["b"]) for x in lines] == [(SE, SA), (SE, SB), (SE, SC), (SA, SB), (SA, SC), (SB, SC)]
+    ab = lines[3]
+    assert ab["a_sha256"] == text_sha(SA) and ab["b_sha256"] == text_sha(SB)
+    assert ab["identity"] is True
+    assert ab["reasons"] == ["identity", "search"]
+    assert ab["subject_a"] == ["Heat pump"] and ab["subject_b"] == ["Heat pump"]
+    assert ab["shared_subject"] == ["Heat pump"]
+    assert [f["from"] for f in ab["found_from"]] == [SA, SB]  # found from both ends, one line
+    assert all(f["reasons"] == ["identity", "search"] and f["rank"] >= 1 for f in ab["found_from"])
+    assert all(isinstance(f["distance"], float) for f in ab["found_from"])
+    ac = lines[4]
+    assert ac["identity"] is False and ac["reasons"] == ["search"] and ac["shared_subject"] == []
+
+
+def test_sweep_builds_one_context_and_keeps_pairs_found_from_one_end(scfg, monkeypatch):
+    calls = []
+
+    def fake(cfg, conn, embedder, *, path, allow_private, ctx):
+        calls.append((path, allow_private, ctx))
+        found = {
+            SA: [
+                {"path": SB, "reasons": ["identity"], "rank": None, "distance": 0.25, "subject": ["Heat pump"]},
+                {"path": S_OLD, "reasons": ["search"], "rank": 1, "distance": 0.1, "subject": None},
+            ],
+            SC: [{"path": SA, "reasons": ["search"], "rank": 3, "distance": 0.5, "subject": ["Heat pump"]}],
+        }
+        return found.get(path, [])
+
+    monkeypatch.setattr(health_module, "find_collisions", fake)
+    conn = connect(scfg)
+    sources, pairs = health_module.sweep(scfg, conn, None, "V")
+    conn.close()
+    assert sources == [SE, SA, SB, SC]
+    assert sorted(p for p, _, _ in calls) == sorted(sources)
+    assert calls[0][2] is not None and all(c is calls[0][2] for _, _, c in calls)  # one context for all calls
+    assert not any(private for _, private, _ in calls)
+    assert [(p["a"], p["b"]) for p in pairs] == [(SA, SB), (SA, SC)]
+    assert pairs[0]["found_from"] == [{"from": SA, "reasons": ["identity"], "rank": None, "distance": 0.25}]
+    assert pairs[1]["found_from"] == [{"from": SC, "reasons": ["search"], "rank": 3, "distance": 0.5}]
+    assert pairs[1]["subject_a"] == ["Heat pump"]
+
+
+def test_sweep_needs_a_known_vault_and_defaults_to_private(scfg, tmp_path, capsys):
+    code, out = sweep(scfg, tmp_path, capsys)
+    assert code == 1
+    assert "Unknown vault Private" in out.err
+    assert not (scfg.data_dir / "health").exists()
+
+
+def conflict(a, b, verdict="contradicts", a_sha=None, b_sha=None, **extra):
+    return {
+        "a": a,
+        "b": b,
+        "a_sha256": a_sha or text_sha(a),
+        "b_sha256": b_sha or text_sha(b),
+        "verdict": verdict,
+        "date": "2026-11-08",
+        **extra,
+    }
+
+
+def write_conflicts(cfg, lines):
+    folder = cfg.data_dir / "health"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "conflicts.jsonl"
+    path.write_text("".join((x if isinstance(x, str) else json.dumps(x)) + "\n" for x in lines))
+    return path
+
+
+def test_health_shows_the_open_conflicts_and_the_m3_groups(scfg, tmp_path, capsys):
+    write_conflicts(
+        scfg,
+        [
+            conflict(SA, SB, reason="45 against 50", sweep="sweep-20261108T000000Z.jsonl"),  # open
+            conflict(SA, SC, b_sha="0" * 64),  # c changed after the verdict: open, kb-sweep checks it again
+            conflict(SE, SA),  # open, in two areas
+            conflict(SB, S_OLD),  # old is superseded: closed
+            conflict(SC, SE),
+            conflict(SE, SC, verdict="unrelated"),  # the last line of the pair has no contradicts: closed
+            conflict(SE, SB, b_sha="2" * 64) | {"b": "V/Heating/gone.md"},  # no such note: closed
+            conflict(SA, S_DEFAULT),  # no explicit class: closed
+        ],
+    )
+    code, out = run(scfg, tmp_path, capsys, "--vault", "V", "--json", "--worklist")
+    assert code == 0, out.err
+    data = json.loads(out.out)
+    areas = {a["area"]: a for a in data["areas"]}
+    assert areas["Heating"]["consistency"] == {"m3": 1, "open_conflicts": 3}
+    assert areas["Astro"]["consistency"] == {"m3": 0, "open_conflicts": 1}
+    assert data["total"]["consistency"] == {"m3": 1, "open_conflicts": 3}
+    assert data["gate"]["consistency.m3"] == {"value": 1, "target": 0, "result": "fail"}
+    assert data["gate"]["consistency.open_conflicts"] == {"value": 3, "target": 0, "result": "fail"}
+    assert [(c["a"], c["b"], c["recheck"]) for c in data["conflicts"]] == [
+        (SE, SA, False),
+        (SA, SB, False),
+        (SA, SC, True),
+    ]
+    work = {(w["path"], w["detail"]): w["fix"] for w in data["worklist"] if w["kind"] == "open-conflict"}
+    assert work == {
+        (SE, f"contradicts {SA}"): "kb-write",
+        (SA, f"contradicts {SB}"): "kb-write",
+        (SA, f"contradicts {SC} (changed since the verdict)"): "kb-sweep",
+    }
+    _, text = run(scfg, tmp_path, capsys, "--vault", "V")
+    assert "  consistency.m3: 1  target 0  fail" in text.out
+    assert "  consistency.open_conflicts: 3  target 0  fail" in text.out
+    _, out = run(scfg, tmp_path, capsys, "--vault", "V", "--area", "Astro", "--json")
+    assert json.loads(out.out)["total"]["consistency"] == {"m3": 0, "open_conflicts": 1}
+
+
+def test_an_empty_conflicts_file_gives_no_open_conflict(scfg, tmp_path, capsys):
+    write_conflicts(scfg, [])
+    _, out = run(scfg, tmp_path, capsys, "--vault", "V", "--json")
+    assert json.loads(out.out)["gate"]["consistency.open_conflicts"] == {"value": 0, "target": 0, "result": "pass"}
+
+
+def test_a_sweep_with_no_verdicts_yet_shows_no_sweep(scfg, tmp_path, capsys):
+    folder = scfg.data_dir / "health"
+    folder.mkdir(parents=True)
+    (folder / "sweep-20261108T000000Z.jsonl").write_text(json.dumps({"a": SA, "b": SB}) + "\n")
+    _, out = run(scfg, tmp_path, capsys, "--vault", "V", "--json")
+    assert json.loads(out.out)["gate"]["consistency.open_conflicts"]["result"] == "no sweep"
+
+
+@pytest.mark.parametrize(
+    ("bad", "message"),
+    [
+        ("{not json", "not a JSON object"),
+        ('["a", "b"]', "not a JSON object"),
+        (json.dumps({k: v for k, v in conflict(SA, SB).items() if k != "b"}), "b"),
+        (json.dumps(conflict(SA, SB, verdict="maybe")), "verdict"),
+        (json.dumps(conflict(SA, SB, a_sha="abc")), "a_sha256"),
+        (json.dumps(conflict(SA, SA)), "two different notes"),
+        (json.dumps(conflict(SA, SB, note="x")), "note"),
+        (json.dumps(conflict(SA, SB) | {"date": "8 Nov"}), "date"),
+    ],
+    ids=["no-json", "list", "no-b", "verdict", "sha", "same-note", "unknown-key", "date"],
+)
+def test_a_bad_conflicts_line_stops_health_with_the_line_number(scfg, tmp_path, capsys, bad, message):
+    path = write_conflicts(scfg, [conflict(SA, SB), bad])
+    code, out = run(scfg, tmp_path, capsys, "--vault", "V", "--json")
+    assert code == 1
+    assert f"{path}:2:" in out.err
+    assert message in out.err
+    assert out.out == ""

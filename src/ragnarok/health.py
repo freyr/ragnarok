@@ -27,6 +27,30 @@ The seed takes one more rule, with a cutoff time: a note that differs from its W
 mtime is at or before the cutoff gets the hash of the live note (source `pre-cutoff-live`). mtime is used at the
 seed, once, and never at the drift check.
 
+Consistency has two values: the M3 groups (the current state notes that share one identity key, from
+`mark_doubles`) and the open conflicts of `data/health/conflicts.jsonl`. A group or a conflict counts in each area
+that holds one of its notes, and once in the totals. Both are judged against the target `open_conflicts`.
+
+`ragnarok health sweep` writes `data/health/sweep-<stamp>.jsonl`: the collision pairs among the notes of one vault
+with the explicit labels `class: state` and `validity: current` that are not private. One line for each unordered
+pair (`a` < `b` by path), also when both ends found it:
+- `a`, `b`: the note keys; `a_sha256`, `b_sha256`: the SHA-256 of each file at the sweep;
+- `identity`: true when the pair shares an identity key; `reasons`: the union of the find_collisions reasons;
+- `shared_subject`, `subject_a`, `subject_b`: the subjects of the index (the subjects of both, and of each note);
+- `found_from`: for each end that found the pair, `from` (the note of the call), `reasons`, `rank`, `distance`.
+
+`data/health/conflicts.jsonl` is the log of the verdicts of the `kb-sweep` skill, one JSON object for each line:
+- required: `a`, `b` (two different note keys, in any order), `a_sha256`, `b_sha256` (the 64 lower-case hex digits
+  of the SHA-256 of each file when the pair was judged), `verdict` (`contradicts`, `overlaps` or `unrelated`),
+  `date` (YYYY-MM-DD);
+- optional: `reason` (the text of the verdict), `sweep` (the name of the sweep file);
+- no other key. A bad line stops `health` with the file, the line number and the reason.
+The last line of a pair decides. A pair is an open conflict when its last verdict is `contradicts` and both notes
+are state + current now. It closes when one note is not state + current (or not in the index), or when a later line
+of the pair has another verdict: kb-sweep writes it when it judges the pair again after a hash changed. A
+`contradicts` whose hashes differ from the live notes stays open and asks for that check (`recheck`). With no
+conflicts file, open conflicts show `no sweep`, also when a sweep file exists: kb-sweep creates the file.
+
 The worklist gives each error that is not accepted one fix. `link_decision` is the one function that decides
 between `ragnarok fix links` and the user; the fixer of the links calls the same function.
 """
@@ -47,6 +71,7 @@ from pathlib import Path
 import frontmatter
 import yaml
 
+from .collisions import SOURCES, find_collisions
 from .config import Config
 from .index import _link_key
 from .metadata import is_private, iter_notes, parse_note
@@ -99,6 +124,8 @@ class Values:
     baseline: bool = False  # a baseline file exists, so the drift fields hold values
     changed: int = 0  # the notes that differ from the baseline or are not in it
     passing: int = 0  # the changed notes that pass the model
+    m3: int = 0  # the identity groups of more than one current state note
+    conflicts: int | None = None  # the open conflicts; None when there is no conflicts file
 
     def share(self, key: str) -> float | None:
         return round(self.have[key] / self.need[key], 4) if self.need[key] else None
@@ -118,6 +145,7 @@ class Values:
             "drift": {"changed": self.changed, "passing": self.passing, "share": self.drift_share()}
             if self.baseline
             else None,
+            "consistency": {"m3": self.m3, "open_conflicts": self.conflicts},
         }
 
 
@@ -130,6 +158,7 @@ class Result:
     vault: str | None = None  # the scope: one vault, or all vaults
     area: str | None = None
     gaps: list[tuple[str, str]] = field(default_factory=list)  # (path, key) of each missing required key
+    conflicts: list[dict] | None = None  # the open conflicts in the scope; None when there is no conflicts file
 
     def label(self, vault: str, area: str) -> str:
         """The name of an area: with one vault in scope the area alone, else `<vault>/<area>`."""
@@ -150,6 +179,7 @@ class Result:
             "issues": [
                 {**issue.as_dict(), "accepted": reason is not None, "reason": reason} for issue, reason in self.issues
             ],
+            "conflicts": self.conflicts,
         }
 
 
@@ -207,6 +237,12 @@ def gate(cfg: Config, total: Values) -> dict:
     else:
         judge("correctness", record["share"], targets.get("correctness"), lambda v, t: v >= t)
         out["correctness"].update(low=record["low"], high=record["high"], date=record["date"])
+    target = targets.get("open_conflicts")
+    judge("consistency.m3", total.m3, target, lambda v, t: v <= t)
+    if total.conflicts is None:
+        out["consistency.open_conflicts"] = {"value": None, "target": target, "result": "no sweep"}
+    else:
+        judge("consistency.open_conflicts", total.conflicts, target, lambda v, t: v <= t)
     judged = [g["result"] for g in out.values() if g["result"] in ("pass", "fail")]
     out["result"] = "no target" if not judged else "fail" if "fail" in judged else "pass"
     return out
@@ -215,7 +251,8 @@ def gate(cfg: Config, total: Values) -> dict:
 def health(cfg: Config, conn: sqlite3.Connection, vault: str | None = None, area: str | None = None) -> Result:
     """The values of the notes of the index in the scope. Check 7 runs over all notes, as in `validate`."""
     notes = list(_Context(cfg, conn).index_notes())
-    mark_doubles(notes)
+    doubles = mark_doubles(notes)
+    conflicts = open_conflicts(cfg, {note.path: note for note in notes})
     base = load_baseline(cfg)
     base_vaults = {path.split("/")[0] for path in base or {}}
     areas: dict[tuple[str, str], Values] = {}
@@ -238,8 +275,27 @@ def health(cfg: Config, conn: sqlite3.Connection, vault: str | None = None, area
                 each.passing += ok
         issues += [(i, r) for i, r in zip(note.issues, reasons, strict=True) if i.severity == ERROR]
     issues.sort(key=lambda ir: (ir[0].path, ir[0].check))
+
+    def in_scope(paths: list[str]) -> list[tuple[str, str]]:
+        """The areas in the scope that hold one of these notes."""
+        held = {area_of(p) for p in paths}
+        return sorted(k for k in held if (vault is None or k[0] == vault) and (area is None or k[1] == area))
+
+    for group in doubles:
+        held = in_scope([n.path for n in group])
+        for k in held:
+            areas[k].m3 += 1
+        total.m3 += bool(held)
+    if conflicts is not None:
+        for values in [*areas.values(), total]:
+            values.conflicts = 0
+        conflicts = [c for c in conflicts if in_scope([c["a"], c["b"]])]
+        for c in conflicts:
+            for k in in_scope([c["a"], c["b"]]):
+                areas[k].conflicts += 1
+            total.conflicts += 1
     areas = dict(sorted(areas.items()))
-    return Result(areas, total, issues, gate(cfg, total), vault, area, gaps)
+    return Result(areas, total, issues, gate(cfg, total), vault, area, gaps, conflicts)
 
 
 # --- the drift baseline -----------------------------------------------------------------------------------------
@@ -496,6 +552,10 @@ def worklist(cfg: Config, conn: sqlite3.Connection, result: Result) -> list[Work
         elif issue.kind in KB_WRITE_KINDS:
             work.fix = "kb-write"
         out.append(work)
+    for c in result.conflicts or []:
+        vault, area = area_of(c["a"])
+        detail = f"contradicts {c['b']}" + (" (changed since the verdict)" if c["recheck"] else "")
+        out.append(Work(c["a"], vault, area, "open-conflict", detail, "kb-sweep" if c["recheck"] else "kb-write"))
     for path, key in result.gaps:
         vault, area = area_of(path)
         out.append(
@@ -528,12 +588,13 @@ def format_text(result: Result) -> str:
     lines = []
     rows = [(result.label(v, a), values) for (v, a), values in result.areas.items()] + [(TOTAL, result.total)]
     width = max(len(name) for name, _ in rows)
-    header = ["notes", "errors", "accepted", *KEYS, "drift"]
-    lines.append(f"{'area':{width}}  " + "  ".join(f"{h:>8}" if i < 3 else f"{h:>16}" for i, h in enumerate(header)))
+    header = ["notes", "errors", "accepted", *KEYS, "drift", "m3", "conflicts"]
+    widths = [8, 8, 8, *[16] * len(KEYS), 16, 8, 10]
+    lines.append(f"{'area':{width}}  " + "  ".join(f"{h:>{w}}" for h, w in zip(header, widths, strict=True)))
     for name, values in rows:
-        cells = [f"{values.notes:>8}", f"{values.errors:>8}", f"{values.accepted:>8}"]
-        cells += [f"{_pct(values, key):>16}" for key in KEYS] + [f"{_drift(values):>16}"]
-        lines.append(f"{name:{width}}  " + "  ".join(cells))
+        cells = [values.notes, values.errors, values.accepted, *(_pct(values, key) for key in KEYS), _drift(values)]
+        cells += [values.m3, "no sweep" if values.conflicts is None else values.conflicts]
+        lines.append(f"{name:{width}}  " + "  ".join(f"{c:>{w}}" for c, w in zip(cells, widths, strict=True)))
     lines += [
         f"{i.path}: {i.severity} [{i.check}] {i.message} (accepted: {r})" for i, r in result.issues if r is not None
     ]
@@ -542,8 +603,8 @@ def format_text(result: Result) -> str:
         if name == "result":
             continue
         value, target = g["value"], g["target"]
-        if g["result"] == "no baseline":
-            lines.append(f"  {name}: no baseline")
+        if g["result"] in ("no baseline", "no sweep"):
+            lines.append(f"  {name}: {g['result']}")
             continue
         if name == "drift":
             value = _drift(result.total)
@@ -706,3 +767,137 @@ def score_sheet(cfg: Config, path: Path) -> dict:
     with out.open("a") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
     return record
+
+
+# --- the contradiction sweep and the open conflicts -------------------------------------------------------------
+
+VERDICTS = ("contradicts", "overlaps", "unrelated")
+CONFLICT_KEYS = ("a", "b", "a_sha256", "b_sha256", "verdict", "date")
+CONFLICT_OPTIONAL = ("reason", "sweep")
+SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def current_state(fm: dict) -> bool:
+    """True for a note with the explicit labels `class: state` and `validity: current`."""
+    return _label(fm.get("class")) == "state" and _label(fm.get("validity")) == "current"
+
+
+def current_notes(cfg: Config, conn: sqlite3.Connection, vault: str) -> dict[str, list[str] | None]:
+    """The indexed notes of the vault that are state + current and not private, as {key: index subjects}."""
+    notes = {}
+    for path, subject in conn.execute("SELECT path, subject FROM notes ORDER BY path").fetchall():
+        file = cfg.note_path(path)
+        if path.split("/")[0] != vault or is_private(cfg, path) or not file.is_file():
+            continue
+        fm, _ = parse_note(file.read_text(errors="replace"))
+        if current_state(fm):
+            notes[path] = subject.split("\n") if subject else None
+    return notes
+
+
+def sweep(cfg: Config, conn: sqlite3.Connection, embedder, vault: str) -> tuple[list[str], list[dict]]:
+    """find_collisions for each state + current note of the vault, with one `_Context` for all calls. Returns the
+    notes and the pairs of these notes, one for each unordered pair, sorted by `a`, then `b`."""
+    notes = current_notes(cfg, conn, vault)
+    ctx = _Context(cfg, conn)
+    pairs: dict[tuple[str, str], dict] = {}
+    for source in notes:
+        for c in find_collisions(cfg, conn, embedder, path=source, allow_private=False, ctx=ctx):
+            if c["path"] not in notes:
+                continue
+            a, b = sorted((source, c["path"]))
+            if (a, b) not in pairs:
+                subject_a, subject_b = notes[a], notes[b]
+                pairs[(a, b)] = {
+                    "a": a,
+                    "b": b,
+                    "a_sha256": file_hash(cfg.note_path(a)),
+                    "b_sha256": file_hash(cfg.note_path(b)),
+                    "identity": False,
+                    "reasons": [],
+                    "shared_subject": [s for s in subject_a or [] if s in (subject_b or [])],
+                    "subject_a": subject_a,
+                    "subject_b": subject_b,
+                    "found_from": [],
+                }
+            found = {"from": source, "reasons": c["reasons"], "rank": c["rank"], "distance": c["distance"]}
+            pairs[(a, b)]["found_from"].append(found)
+    for pair in pairs.values():
+        reasons = {r for f in pair["found_from"] for r in f["reasons"]}
+        pair["reasons"] = [r for r in SOURCES if r in reasons]
+        pair["identity"] = "identity" in reasons
+        pair["found_from"].sort(key=lambda f: f["from"])
+    return list(notes), [pairs[k] for k in sorted(pairs)]
+
+
+def write_sweep(cfg: Config, pairs: list[dict]) -> Path:
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    folder = cfg.data_dir / "health"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"sweep-{stamp}.jsonl"
+    path.write_text("".join(json.dumps(pair, ensure_ascii=False) + "\n" for pair in pairs))
+    return path
+
+
+def conflicts_path(cfg: Config) -> Path:
+    return cfg.data_dir / "health" / "conflicts.jsonl"
+
+
+def _conflict(data) -> dict:
+    """One checked line of the conflicts file, with `a` < `b`. Raises ValueError with the reason."""
+    if not isinstance(data, dict):
+        raise ValueError("not a JSON object")
+    missing = [k for k in CONFLICT_KEYS if k not in data]
+    if missing:
+        raise ValueError(f"missing keys: {', '.join(missing)}")
+    unknown = sorted(set(data) - set(CONFLICT_KEYS) - set(CONFLICT_OPTIONAL))
+    if unknown:
+        raise ValueError(f"unknown keys: {', '.join(unknown)}")
+    for key in ("a", "b", *CONFLICT_OPTIONAL):
+        if key in data and not (isinstance(data[key], str) and data[key].strip()):
+            raise ValueError(f"{key} is not a text")
+    if data["a"] == data["b"]:
+        raise ValueError("a and b must name two different notes")
+    for key in ("a_sha256", "b_sha256"):
+        if not (isinstance(data[key], str) and SHA256.fullmatch(data[key])):
+            raise ValueError(f"{key} is not a SHA-256 digest (64 lower-case hex digits)")
+    if data["verdict"] not in VERDICTS:
+        raise ValueError(f"verdict {data['verdict']!r} is not {', '.join(VERDICTS)}")
+    if not (isinstance(data["date"], str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", data["date"])):
+        raise ValueError(f"date {data['date']!r} is not an ISO date (YYYY-MM-DD)")
+    if data["a"] > data["b"]:
+        data = {**data, "a": data["b"], "b": data["a"], "a_sha256": data["b_sha256"], "b_sha256": data["a_sha256"]}
+    return data
+
+
+def read_conflicts(cfg: Config) -> list[dict] | None:
+    """The checked lines of the conflicts file, or None when there is no file. Raises ValueError for a bad line."""
+    path = conflicts_path(cfg)
+    if not path.is_file():
+        return None
+    lines = []
+    for n, line in enumerate(path.read_text().splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            lines.append(_conflict(json.loads(line)))
+        except json.JSONDecodeError:
+            raise ValueError(f"{path}:{n}: not a JSON object") from None
+        except ValueError as e:
+            raise ValueError(f"{path}:{n}: {e}") from None
+    return lines
+
+
+def open_conflicts(cfg: Config, notes: dict[str, _Note]) -> list[dict] | None:
+    """The open conflicts (see the module text), sorted by `a`, then `b`; None when there is no conflicts file."""
+    lines = read_conflicts(cfg)
+    if lines is None:
+        return None
+    last = {(c["a"], c["b"]): c for c in lines}
+    out = []
+    for (a, b), c in sorted(last.items()):
+        if c["verdict"] != "contradicts" or not all(p in notes and current_state(notes[p].fm) for p in (a, b)):
+            continue
+        recheck = c["a_sha256"] != file_hash(cfg.note_path(a)) or c["b_sha256"] != file_hash(cfg.note_path(b))
+        out.append({"a": a, "b": b, "date": c["date"], "recheck": recheck})
+    return out

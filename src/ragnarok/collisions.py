@@ -74,6 +74,7 @@ def find_collisions(
     path: str | None = None,
     allow_private: bool = False,
     exclude: str | None = None,
+    ctx: _Context | None = None,
 ) -> list[dict]:
     """The collision candidates of a draft (with its intended key draft_path) or of the indexed note at path.
 
@@ -82,7 +83,9 @@ def find_collisions(
     keeps its places (only as many as it has candidates); tier 2 fills the rest of the LIMIT places. The note at
     path is not a candidate. A private note is a candidate only with allow_private, which needs
     allow_private = true in the configuration. exclude (internal, not a parameter of the MCP tool) is the path of
-    an indexed note that is not a candidate either; like the note at path, it leaves the pool before the limit."""
+    an indexed note that is not a candidate either; like the note at path, it leaves the pool before the limit.
+    ctx (internal) is a `_Context` of the same connection that many calls share, for example the sweep of
+    `ragnarok health sweep`; without it each call builds one."""
     if allow_private and not cfg.allow_private:
         raise PrivateNotAllowed("allow_private needs allow_private = true in the configuration")
     excluded: set[int] = set()
@@ -102,7 +105,8 @@ def find_collisions(
     else:
         raise ValueError("Give a draft or a path.")
 
-    ctx = _Context(cfg, conn)
+    if ctx is None:
+        ctx = _Context(cfg, conn)
     note = ctx.note(text, key, strict=True)
     fm, body = parse_note(text)
     query = query_text(note.meta.title if key else _first_heading(body), note.meta.description, body)
