@@ -663,15 +663,18 @@ def write_sheet(cfg: Config, sample: list[tuple[str, dict]], n: int, seed: int) 
 
 
 def read_sheet(path: Path) -> list[tuple[str, str]]:
-    """(note path, verdict) for each row of the table of a sheet."""
+    """(note path, verdict) for each row of the table of a sheet. A raw `|` in the verdict stays in the verdict;
+    a row with too few cells gets an empty verdict, so the score lists it as unmarked instead of dropping it."""
     rows = []
+    last = len(AUDIT_HEADER) - 1
     for line in path.read_text().splitlines():
         if not line.startswith("|"):
             continue
         cells = [c.strip().replace("\\|", "|") for c in CELL_SPLIT.split(line.strip())[1:-1]]
-        if len(cells) != len(AUDIT_HEADER) or cells[0] in ("path", "---"):
+        if not cells or cells[0] == "path" or set(cells[0]) <= set("-: "):
             continue
-        rows.append((cells[0], cells[-1]))
+        verdict = "|".join(cells[last:]).strip() if len(cells) > last else ""
+        rows.append((cells[0], verdict))
     return rows
 
 

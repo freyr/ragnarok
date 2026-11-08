@@ -778,6 +778,30 @@ def test_score_rejects_a_sheet_with_unmarked_rows_and_lists_them(audit_cfg, tmp_
     assert not (audit_cfg.data_dir / "health" / "audit-records.jsonl").exists()
 
 
+def test_score_keeps_a_row_whose_verdict_holds_a_raw_pipe(audit_cfg, tmp_path, capsys):
+    sheet = make_sheet(audit_cfg, tmp_path, capsys, 3)
+    mark(sheet, ["ok", "wrong: [[C|D]]", "ok"])
+    code, _ = audit(audit_cfg, tmp_path, capsys, "score", str(sheet))
+    assert code == 0
+    (record,) = [
+        json.loads(x) for x in (audit_cfg.data_dir / "health" / "audit-records.jsonl").read_text().splitlines()
+    ]
+    assert record["n"] == 3 and record["correct"] == 2
+
+
+def test_score_lists_a_row_with_missing_cells_as_unmarked(audit_cfg, tmp_path, capsys):
+    sheet = make_sheet(audit_cfg, tmp_path, capsys, 3)
+    mark(sheet, ["ok", "ok", "ok"])
+    lines = sheet.read_text().splitlines()
+    rows = [i for i, x in enumerate(lines) if x.startswith("| V/")]
+    broken = lines[rows[1]].split("|")
+    lines[rows[1]] = "|".join(broken[:4]) + "|"  # path and two label cells left
+    sheet.write_text("\n".join(lines) + "\n")
+    code, out = audit(audit_cfg, tmp_path, capsys, "score", str(sheet))
+    assert code == 1
+    assert broken[1].strip() in out.err
+
+
 def test_health_shows_the_correctness_of_the_last_audit_record(audit_cfg, tmp_path, capsys):
     folder = audit_cfg.data_dir / "health"
     folder.mkdir(parents=True)
