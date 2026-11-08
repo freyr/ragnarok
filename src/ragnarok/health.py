@@ -515,7 +515,8 @@ def _drift(values: Values) -> str:
 
 
 def format_text(result: Result) -> str:
-    """A table of the areas and the totals, then the gate. The issues are in the worklist and the JSON output."""
+    """A table of the areas and the totals, the accepted issues with their reason, then the gate. The issues that
+    are not accepted are in the worklist and the JSON output."""
     lines = []
     rows = [(result.label(v, a), values) for (v, a), values in result.areas.items()] + [(TOTAL, result.total)]
     width = max(len(name) for name, _ in rows)
@@ -525,6 +526,9 @@ def format_text(result: Result) -> str:
         cells = [f"{values.notes:>8}", f"{values.errors:>8}", f"{values.accepted:>8}"]
         cells += [f"{_pct(values, key):>16}" for key in KEYS] + [f"{_drift(values):>16}"]
         lines.append(f"{name:{width}}  " + "  ".join(cells))
+    lines += [
+        f"{i.path}: {i.severity} [{i.check}] {i.message} (accepted: {r})" for i, r in result.issues if r is not None
+    ]
     lines.append("gate on the totals:")
     for name, g in result.gate.items():
         if name == "result":

@@ -167,17 +167,21 @@ def test_one_area(cfg, tmp_path, capsys):
     assert data["gate"]["structural_errors"]["result"] == "fail"
 
 
-def test_text_output_gives_only_the_table_and_the_gate(cfg, tmp_path, capsys):
+def test_text_output_gives_the_table_the_accepted_issues_and_the_gate(cfg, tmp_path, capsys):
     indexed(cfg)
+    accepted = f"{LINK}: error [4] link [[gone]] resolves to no note (accepted: fixtures)"
     code, out = run(cfg, tmp_path, capsys, "--vault", "V")
     assert code == 0
     assert out.out.startswith("area ")  # no issue lines before the table
-    assert LOG not in out.out and LINK not in out.out
+    lines = out.out.splitlines()
+    assert lines.index(accepted) < lines.index("gate on the totals:")  # after the table, before the gate
+    assert LOG not in out.out  # an issue that is not accepted is in the worklist only
     assert "result: fail" in out.out
     assert "  drift: no baseline" in out.out
     assert "no target" not in out.out
     _, out = run(cfg, tmp_path, capsys, "--vault", "V", "--worklist")
     assert out.out.startswith("area ")
+    assert accepted in out.out.splitlines()
     assert f"{LOG}: broken-link [[nowhere]] (no-candidate)  fix: the user" in out.out  # the issue is in the worklist
 
 
