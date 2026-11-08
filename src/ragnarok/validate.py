@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 
@@ -177,6 +178,7 @@ class _Note:
     path: str | None
     note_id: int | None
     meta: NoteMeta
+    fm: dict = field(default_factory=dict)  # the frontmatter as written; empty when it is not valid YAML
     issues: list[Issue] = field(default_factory=list)
     identity: tuple[str, int, str] | None = None
     current: bool = False
@@ -203,7 +205,7 @@ class _Context:
             meta = resolve(self.cfg, path, fm, body)
         else:
             meta = resolve(self.cfg, "draft.md", fm, body, lambda f: False, lambda f: False)
-        note = _Note(path or DRAFT, path, self.ids.get(path) if path else None, meta)
+        note = _Note(path or DRAFT, path, self.ids.get(path) if path else None, meta, fm)
         if not valid:
             note.add(1, "bad-yaml", "the frontmatter is not valid YAML")
         self._model(note, fm)
@@ -216,6 +218,14 @@ class _Context:
             note.identity = (meta.type, primary, _task(fm))
         note.current = meta.note_class == "state" and meta.validity in (None, "current") and meta.status != "archived"
         return note
+
+    def index_notes(self) -> Iterator[_Note]:
+        """Each note of the index that has a file, checked as in the scan: a missing class or validity is no error.
+        Check 7 needs all notes; mark_doubles adds it."""
+        for (path,) in self.conn.execute("SELECT path FROM notes ORDER BY path").fetchall():
+            file = self.cfg.note_path(path)
+            if file.is_file():
+                yield self.note(file.read_text(errors="replace"), path, strict=False)
 
     def _model(self, note: _Note, fm: dict) -> None:
         """Check 1: the values of the model keys."""
@@ -396,14 +406,9 @@ def check_draft(
     return _single(ctx, [ctx.note(text, path, strict=True)], show_private)
 
 
-def check_index(cfg: Config, conn: sqlite3.Connection) -> Report:
-    """Check all notes of the index. A missing class or validity is no error; it counts as unlabeled."""
-    ctx = _Context(cfg, conn)
-    notes = []
-    for (path,) in conn.execute("SELECT path FROM notes ORDER BY path").fetchall():
-        file = cfg.note_path(path)
-        if file.is_file():
-            notes.append(ctx.note(file.read_text(errors="replace"), path, strict=False))
+def mark_doubles(notes: list[_Note]) -> list[list[_Note]]:
+    """Check 7 within these notes: mark each current state note that shares its identity key with another one.
+    Returns the groups of more than one note."""
     groups: dict[tuple, list[_Note]] = {}
     for note in notes:
         if note.identity is not None and note.current:
@@ -412,6 +417,13 @@ def check_index(cfg: Config, conn: sqlite3.Connection) -> Report:
     for group in doubles:
         for note in group:
             _double(note, [n.label for n in group if n is not note])
+    return doubles
+
+
+def check_index(cfg: Config, conn: sqlite3.Connection) -> Report:
+    """Check all notes of the index. A missing class or validity is no error; it counts as unlabeled."""
+    notes = list(_Context(cfg, conn).index_notes())
+    doubles = mark_doubles(notes)
     issues = sorted((i for n in notes for i in n.issues), key=lambda i: (i.path, i.check))
     kinds = [i.kind for i in issues]
     passed = sum(not any(i.severity == ERROR for i in n.issues) for n in notes)

@@ -20,6 +20,7 @@ COMMANDS = {
     "init": "Set up this computer: config, Ollama, model, index and the MCP server in Claude Code",
     "doctor": "Check the six parts of the setup and print the fix for each failure",
     "validate": "Check notes against the frontmatter model, the links and the identity keys",
+    "health": "Print the structural errors and the label coverage for each area, with the gate on the totals",
     "find-collisions": "Print the notes that a note or a draft can collide with",
     "replay": "Build the replay set of the write path, score R1 on it, or run the kb-write skill on it",
 }
@@ -69,6 +70,14 @@ def build_parser() -> argparse.ArgumentParser:
     vp = parsers["validate"]
     vp.add_argument("paths", nargs="*", help="note paths, relative to the vault root or absolute (default all notes)")
     vp.add_argument("--json", action="store_true", help="print one JSON object")
+    hp = parsers["health"]
+    hp.add_argument("--vault", help="one vault (default all vaults)")
+    hp.add_argument("--area", help="one area: the first folder under the vault, or (top)")
+    hp.add_argument("--json", action="store_true", help="print one JSON object")
+    hp.add_argument("--save", action="store_true", help="add one line for each area to data/health/history.jsonl")
+    hp.description = (
+        "Scans the vaults for changes first. The exit code is 0 when the run completes, also on a gate fail."
+    )
     fp = parsers["find-collisions"]
     fp.add_argument("path", help="a note path, relative to the vault root or absolute; - reads a draft from stdin")
     fp.description = (
@@ -421,6 +430,40 @@ def cmd_validate(cfg, args) -> int:
     return 1 if report.errors else 0
 
 
+def cmd_health(cfg, args) -> int:
+    from .embed import EmbedError, OllamaEmbedder
+    from .health import format_text, health, save
+    from .index import SCAN_LIMIT, IndexMismatch, connect, update
+
+    if args.vault is not None and args.vault not in cfg.vaults:
+        print(f"Unknown vault {args.vault}. The vaults are {', '.join(cfg.vaults)}.", file=sys.stderr)
+        return 1
+    if not cfg.index_path.exists():
+        print(f"No index at {cfg.index_path}. Run `ragnarok index`.", file=sys.stderr)
+        return 1
+    try:
+        conn = connect(cfg)
+    except IndexMismatch as e:
+        print(e, file=sys.stderr)
+        return 1
+    try:
+        for warning in update(cfg, conn, OllamaEmbedder(cfg), limit=SCAN_LIMIT).warnings:
+            print(f"ragnarok health: {warning}", file=sys.stderr)
+        result = health(cfg, conn, args.vault, args.area)
+    except EmbedError as e:
+        print(f"ragnarok health: the scan of the vaults failed: {e}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+    if not result.areas:
+        print("ragnarok health: no notes in the scope", file=sys.stderr)
+        return 1
+    print(json.dumps(result.as_dict(), ensure_ascii=False, indent=2) if args.json else format_text(result))
+    if args.save:
+        save(cfg, result)
+    return 0
+
+
 def cmd_find_collisions(cfg, args) -> int:
     from .collisions import find_collisions, format_text
     from .embed import EmbedError, OllamaEmbedder
@@ -632,6 +675,7 @@ HANDLERS = {
     "status": cmd_status,
     "search": cmd_search,
     "validate": cmd_validate,
+    "health": cmd_health,
     "find-collisions": cmd_find_collisions,
     "replay": cmd_replay,
 }

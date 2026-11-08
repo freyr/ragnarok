@@ -79,6 +79,24 @@ class WriteConfig:
 
 
 @dataclass
+class AcceptRule:
+    """Issues that `health` does not count: the issue kinds of the notes whose key matches the glob."""
+
+    glob: str
+    kinds: list[str]
+    reason: str
+
+
+@dataclass
+class HealthConfig:
+    """The [health] table: the accepted issues and the targets of the gate."""
+
+    accept: list[AcceptRule] = field(default_factory=list)
+    # attribute -> target, for example structural_errors = 0, coverage = 0.95; no entry: no target
+    targets: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
 class Config:
     root: Path = field(default_factory=lambda: Path("~/Documents/Vaults").expanduser())
     vaults: list[str] = field(default_factory=list)
@@ -107,6 +125,7 @@ class Config:
     data_dir: Path | None = None
     index_path: Path | None = None
     write: WriteConfig = field(default_factory=WriteConfig)
+    health: HealthConfig = field(default_factory=HealthConfig)
 
     def __post_init__(self):
         if self.index_path is None:
@@ -180,6 +199,9 @@ def load_config(path: Path | None = None) -> Config:
         elif key == "write":
             systems = [SystemOfRecord(**entry) for entry in value.get("systems_of_record", [])]
             value = WriteConfig(**{**value, "systems_of_record": systems})
+        elif key == "health":
+            accept = [AcceptRule(**entry) for entry in value.get("accept", [])]
+            value = HealthConfig(**{**value, "accept": accept})
         values[key] = value
     return Config(**values)
 
@@ -189,7 +211,7 @@ def dump_config(cfg: Config, **paths: Path | str) -> str:
     lines = [f"{key} = {json.dumps(str(value))}" for key, value in paths.items()]
     for f in fields(Config):
         value = getattr(cfg, f.name)
-        if f.name in PATH_KEYS or f.name in ("vault_paths", "vault_rules", "write") or f.name in paths:
+        if f.name in PATH_KEYS or f.name in ("vault_paths", "vault_rules", "write", "health") or f.name in paths:
             continue
         lines.append(f"{f.name} = {json.dumps(sorted(value) if isinstance(value, set) else value)}")
     if cfg.vault_paths:
