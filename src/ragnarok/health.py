@@ -52,6 +52,13 @@ verdict with the same hashes does not close it; only kb-write, with the approval
 `contradicts` whose hashes differ from the live notes stays open and asks for that check (`recheck`). With no
 conflicts file, open conflicts show `no sweep`, also when a sweep file exists: kb-sweep creates the file.
 
+Fitness for use is the share of the questions of a set whose rank 1 is a top-grade gold note: one `search()` for
+each question (the `question` form, no agent), scored by `score_ranked`. The set is a JSON list in the format of
+`now.json` (`question`, `answer`, `gold` paths with a grade, `wrong` paths); the default set is
+`data/health/sets/private-now.json`. A question with no gold counts as a miss. `ragnarok health fitness` adds one
+record to `data/health/fitness-records.jsonl` (date, set, n, hits, share, Wilson interval); `health` judges the last
+record against the target `fitness`, and shows `no fitness` while there is no record.
+
 The worklist gives each error that is not accepted one fix. `link_decision` is the one function that decides
 between `ragnarok fix links` and the user; the fixer of the links calls the same function.
 """
@@ -77,6 +84,7 @@ from .config import Config
 from .index import _link_key
 from .metadata import is_private, iter_notes, parse_note
 from .replay import wilson
+from .search import search
 from .validate import ERROR, Issue, _Context, _label, _Note, mark_doubles
 
 TOP = "(top)"
@@ -244,6 +252,12 @@ def gate(cfg: Config, total: Values) -> dict:
         out["consistency.open_conflicts"] = {"value": None, "target": target, "result": "no sweep"}
     else:
         judge("consistency.open_conflicts", total.conflicts, target, lambda v, t: v <= t)
+    record = last_fitness(cfg)
+    if record is None:
+        out["fitness"] = {"value": None, "target": targets.get("fitness"), "result": "no fitness"}
+    else:
+        judge("fitness", record["share"], targets.get("fitness"), lambda v, t: v >= t)
+        out["fitness"].update(low=record["low"], high=record["high"], date=record["date"])
     judged = [g["result"] for g in out.values() if g["result"] in ("pass", "fail")]
     out["result"] = "no target" if not judged else "fail" if "fail" in judged else "pass"
     return out
@@ -604,16 +618,13 @@ def format_text(result: Result) -> str:
         if name == "result":
             continue
         value, target = g["value"], g["target"]
-        if g["result"] in ("no baseline", "no sweep"):
+        if g["result"] in ("no baseline", "no sweep", "no audit", "no fitness"):
             lines.append(f"  {name}: {g['result']}")
             continue
         if name == "drift":
             value = _drift(result.total)
             target = "-" if target is None else f"{target:.1%}"
-        if name == "correctness":
-            if g["result"] == "no audit":
-                lines.append("  correctness: no audit")
-                continue
+        if name in ("correctness", "fitness"):
             value = f"{value:.1%} ({g['low']:.1%}-{g['high']:.1%}, {g['date']})"
             target = "-" if target is None else f"{target:.1%}"
         if name.startswith("coverage."):
@@ -911,3 +922,113 @@ def open_conflicts(cfg: Config, notes: dict[str, _Note]) -> list[dict] | None:
         recheck = c["a_sha256"] != file_hash(cfg.note_path(a)) or c["b_sha256"] != file_hash(cfg.note_path(b))
         out.append({"a": a, "b": b, "date": c["date"], "recheck": recheck})
     return out
+
+
+# --- fitness for use --------------------------------------------------------------------------------------------
+# score_ranked and read_path_map are ported from kb_eval of the branch kb-first-bet.
+
+STALE_TOP = 5  # the mechanical stale citation: a stale distractor in the top 5
+WRONG_TOP = 5  # the mechanical wrong@5: a wrong note in the top 5
+FITNESS_LIMIT = 10  # the documents that one fitness search asks for, as the mechanical KB runner
+KINDS = ("now", "future", "history")  # the classes of a kind of question
+
+
+def top_gold(q: dict) -> set[str]:
+    """The gold paths of the highest grade."""
+    grades = [g.get("grade", 1) for g in q.get("gold", [])]
+    return {g["path"] for g in q.get("gold", []) if g.get("grade", 1) == max(grades)}
+
+
+def stale_paths(q: dict) -> set[str]:
+    return {d["path"] for d in q.get("distractors", []) if d.get("kind") == "stale"}
+
+
+def wrong_paths(q: dict) -> set[str]:
+    return set(q.get("wrong", []))
+
+
+def score_ranked(q: dict, ranked: list[str]) -> dict:
+    """The mechanical measures of one returned list: canonical-first and a stale distractor in the top 5; for a
+    kind of question, answer-first (rank 1 is a top gold) and a wrong note in the top 5."""
+    first = float(bool(ranked) and ranked[0] in top_gold(q))
+    if q.get("class") in KINDS:
+        return {"answer_first": first, "wrong": float(bool(wrong_paths(q) & set(ranked[:WRONG_TOP])))}
+    return {
+        "canonical_first": first,
+        "stale": float(bool(stale_paths(q) & set(ranked[:STALE_TOP]))),
+    }
+
+
+def read_path_map(text: str) -> dict[str, list[str]]:
+    """The path map of a conversion: one line for each old path, `<old> → <new>, <new>` (or `->`). A path in
+    backticks is one path, also with a comma in it; with no backticks, a comma separates the new paths. A leading
+    `- `, blank lines and lines that start with # are ignored."""
+    out: dict[str, list[str]] = {}
+    for raw in text.splitlines():
+        line = raw.strip().removeprefix("- ").strip()
+        if not line or line.startswith("#"):
+            continue
+        sep = "→" if "→" in line else "->"
+        if sep not in line:
+            raise ValueError(f"a path map line with no → or ->: {raw!r}")
+        old, new = line.split(sep, 1)
+        quoted = re.findall(r"`([^`]+)`", new)
+        news = quoted if quoted else new.split(",")
+        out[old.replace("`", "").strip()] = [p.strip() for p in news if p.strip()]
+    return out
+
+
+def default_set_path(cfg: Config) -> Path:
+    return cfg.data_dir / "health" / "sets" / "private-now.json"
+
+
+def fitness_records_path(cfg: Config) -> Path:
+    return cfg.data_dir / "health" / "fitness-records.jsonl"
+
+
+def last_fitness(cfg: Config) -> dict | None:
+    """The last line of the fitness records, or None when there is no record."""
+    path = fitness_records_path(cfg)
+    lines = path.read_text().splitlines() if path.is_file() else []
+    return json.loads(lines[-1]) if lines else None
+
+
+def read_set(path: Path) -> list[dict]:
+    """The questions of a set file. Raises ValueError when it is not a non-empty JSON list of questions with a
+    `question` text."""
+    try:
+        questions = json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        raise ValueError(f"{path} is not JSON: {e}") from None
+    if not isinstance(questions, list) or not questions:
+        raise ValueError(f"{path} is not a non-empty JSON list of questions")
+    for n, q in enumerate(questions, start=1):
+        if not (isinstance(q, dict) and isinstance(q.get("question"), str) and q["question"].strip()):
+            raise ValueError(f"{path}: question {n} has no question text")
+    return questions
+
+
+def fitness(cfg: Config, conn: sqlite3.Connection, embedder, set_path: Path) -> dict:
+    """One search for each question of the set, scored at rank 1 against the top-grade gold. Adds the record to
+    the fitness records and returns it."""
+    questions = read_set(set_path)
+    hits = 0
+    for q in questions:
+        ranked = [h.path for h in search(cfg, conn, embedder, q["question"], limit=FITNESS_LIMIT)]
+        score = score_ranked(q, ranked)
+        hits += int(score.get("answer_first", score.get("canonical_first")))  # both are the measure of rank 1
+    low, high = wilson(hits, len(questions))
+    record = {
+        "date": _today(),
+        "set": str(set_path),
+        "n": len(questions),
+        "hits": hits,
+        "share": round(hits / len(questions), 4),
+        "low": round(low, 4),
+        "high": round(high, 4),
+    }
+    out = fitness_records_path(cfg)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("a") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record

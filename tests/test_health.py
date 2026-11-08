@@ -41,6 +41,7 @@ structural_errors = 0
 coverage = 0.5
 correctness = 0.9
 open_conflicts = 0
+fitness = 0.5
 """
 
 
@@ -79,7 +80,13 @@ def test_health_config_is_read_from_toml(cfg, tmp_path):
     loaded = load_config(config_file(cfg, tmp_path))
     assert loaded.health == HealthConfig(
         accept=[AcceptRule(glob="V/Fixtures/**", kinds=["broken-link", "bad-yaml"], reason="fixtures")],
-        targets={"structural_errors": 0, "coverage": 0.5, "correctness": 0.9, "open_conflicts": 0},
+        targets={
+            "structural_errors": 0,
+            "coverage": 0.5,
+            "correctness": 0.9,
+            "open_conflicts": 0,
+            "fitness": 0.5,
+        },
     )
     assert Config().health == HealthConfig()
 
@@ -130,6 +137,7 @@ def test_health_gives_errors_and_coverage_for_each_area_and_the_totals(cfg, tmp_
         "correctness": {"value": None, "target": 0.9, "result": "no audit"},
         "consistency.m3": {"value": 0, "target": 0, "result": "pass"},
         "consistency.open_conflicts": {"value": None, "target": 0, "result": "no sweep"},
+        "fitness": {"value": None, "target": 0.5, "result": "no fitness"},
         "result": "fail",
     }
     assert heating["consistency"] == {"m3": 0, "open_conflicts": None}
@@ -163,6 +171,7 @@ def test_without_targets_and_accept_list_all_errors_count_and_no_target_shows(cf
     assert data["gate"]["drift"] == {"value": None, "target": None, "result": "no baseline"}
     assert data["gate"]["consistency.m3"] == {"value": 0, "target": None, "result": "no target"}
     assert data["gate"]["consistency.open_conflicts"] == {"value": None, "target": None, "result": "no sweep"}
+    assert data["gate"]["fitness"] == {"value": None, "target": None, "result": "no fitness"}
     assert data["total"]["drift"] is None and data["areas"][0]["drift"] is None  # no baseline file: no failure
     assert data["gate"]["result"] == "no target"  # with nothing to judge, the gate neither passes nor fails
 
@@ -189,6 +198,7 @@ def test_text_output_gives_the_table_the_accepted_issues_and_the_gate(cfg, tmp_p
     assert "  drift: no baseline" in out.out
     assert "  consistency.m3: 0  target 0  pass" in out.out
     assert "  consistency.open_conflicts: no sweep" in out.out
+    assert "  fitness: no fitness" in out.out
     assert "no target" not in out.out
     _, out = run(cfg, tmp_path, capsys, "--vault", "V", "--worklist")
     assert out.out.startswith("area ")
@@ -1066,3 +1076,189 @@ def test_a_bad_conflicts_line_stops_health_with_the_line_number(scfg, tmp_path, 
     assert f"{path}:2:" in out.err
     assert message in out.err
     assert out.out == ""
+
+
+# --- fitness for use ----------------------------------------------------------------------------------------------
+
+F_GOLD, F_LOW = "Kb/howto/deploy.md", "Kb/howto/deploy-notes.md"
+F_STALE, F_DUP, F_OTHER = "Kb/howto/deploy-2024.md", "Kb/howto/deploy-copy.md", "Kb/misc/other.md"
+F_WRONG = "Kb/howto/deploy-rejected.md"
+F_SINGLE = {
+    "id": "st-01",
+    "class": "single-truth",
+    "question": "How do I deploy?",
+    "gold": [{"path": F_GOLD, "grade": 2}, {"path": F_LOW, "grade": 1}],
+    "distractors": [{"path": F_STALE, "kind": "stale"}, {"path": F_DUP, "kind": "duplicate"}],
+}
+F_NOW = {
+    "id": "nw-01",
+    "class": "now",
+    "when": "now",
+    "question": "How do I deploy now?",
+    "question_alt": "Current deploy steps?",
+    "answer": "with the pipeline",
+    "gold": [{"path": F_GOLD, "grade": 2}, {"path": F_LOW, "grade": 1}],
+    "wrong": [F_WRONG],
+}
+F_NOW_EMPTY = {**F_NOW, "id": "nw-02", "gold": [], "wrong": [F_STALE]}
+
+
+def test_canonical_first_and_stale_at_5_of_a_ranked_list():
+    score_ranked = health_module.score_ranked
+    assert score_ranked(F_SINGLE, [F_GOLD, F_STALE]) == {"canonical_first": 1.0, "stale": 1.0}
+    assert score_ranked(F_SINGLE, [F_LOW, F_GOLD]) == {"canonical_first": 0.0, "stale": 0.0}
+    late = [F_OTHER, F_DUP, "a.md", "b.md", "c.md", F_STALE]  # the stale distractor is sixth
+    assert score_ranked(F_SINGLE, late) == {"canonical_first": 0.0, "stale": 0.0}
+
+
+def test_answer_first_and_wrong_at_5_of_a_ranked_list():
+    score_ranked = health_module.score_ranked
+    assert score_ranked(F_NOW, [F_GOLD, F_WRONG]) == {"answer_first": 1.0, "wrong": 1.0}
+    assert score_ranked(F_NOW, [F_LOW, F_GOLD]) == {"answer_first": 0.0, "wrong": 0.0}  # not a top gold
+    late = [F_OTHER, F_DUP, "a.md", "b.md", "c.md", F_WRONG]  # the wrong note is sixth
+    assert score_ranked(F_NOW, late) == {"answer_first": 0.0, "wrong": 0.0}
+    assert score_ranked(F_NOW, [F_STALE]) == {"answer_first": 0.0, "wrong": 0.0}  # distractors are not wrong
+    assert score_ranked(F_NOW, []) == {"answer_first": 0.0, "wrong": 0.0}
+    for cls in ("future", "history"):
+        assert score_ranked({**F_NOW, "class": cls, "when": cls}, [F_GOLD]) == {"answer_first": 1.0, "wrong": 0.0}
+
+
+def test_a_question_with_empty_gold_has_answer_first_0_and_wrong_from_its_list():
+    assert health_module.score_ranked(F_NOW_EMPTY, [F_GOLD, F_STALE]) == {"answer_first": 0.0, "wrong": 1.0}
+    assert health_module.score_ranked(F_NOW_EMPTY, [F_OTHER]) == {"answer_first": 0.0, "wrong": 0.0}
+
+
+def test_read_path_map():
+    text = (
+        "# the path map\n\n"
+        "- `Home/Heating/old-boiler.md` → `Home/Heating/notes/boiler.md`, `Home/Heating/SUMMARY.md`\n"
+        "Work/old cpu.md -> Work/Devops/db-resize/research-cpu.md\n"
+    )
+    assert health_module.read_path_map(text) == {
+        "Home/Heating/old-boiler.md": ["Home/Heating/notes/boiler.md", "Home/Heating/SUMMARY.md"],
+        "Work/old cpu.md": ["Work/Devops/db-resize/research-cpu.md"],
+    }
+    # a quoted path is one path: a comma in a note name does not cut it
+    quoted = "- `Kb/old, runbook.md` → `Kb/core/Runbook — HA, Z2M.md`, `Kb/core/part 2.md`\n"
+    assert health_module.read_path_map(quoted) == {
+        "Kb/old, runbook.md": ["Kb/core/Runbook — HA, Z2M.md", "Kb/core/part 2.md"]
+    }
+    with pytest.raises(ValueError, match="no → or ->"):
+        health_module.read_path_map("Kb/a.md Kb/b.md\n")
+
+
+def fq(qid, question, gold, wrong=()):
+    """A question of the now kind; gold is a list of (path, grade)."""
+    return {
+        "id": qid,
+        "class": "now",
+        "when": "now",
+        "question": question,
+        "question_alt": "an alternative form that is never asked",
+        "answer": "a",
+        "gold": [{"path": p, "grade": g} for p, g in gold],
+        "wrong": list(wrong),
+    }
+
+
+# In SWEEP_NOTES only e.md has the word eyepiece, and e.md has no word boiler.
+FITNESS_SET = [
+    fq("q1", "The eyepiece field?", [(SE, 1)]),  # rank 1 is e.md: a hit
+    fq("q2", "The boiler flow?", [(SE, 1)]),  # e.md cannot be rank 1: a miss
+    fq("q3", "The eyepiece field?", [(SA, 2), (SE, 1)]),  # rank 1 is e.md, but the top gold is a.md: a miss
+    fq("q4", "The eyepiece field?", []),  # no gold: a miss that counts in n
+]
+
+
+def fitness(cfg, tmp_path, capsys, *args):
+    code = main(["--config", str(config_file(cfg, tmp_path)), "health", "fitness", *args])
+    return code, capsys.readouterr()
+
+
+def fitness_records(cfg):
+    path = cfg.data_dir / "health" / "fitness-records.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def test_fitness_scores_rank_1_of_one_search_for_each_question_and_saves_a_record(scfg, tmp_path, capsys, monkeypatch):
+    set_file = tmp_path / "set.json"
+    set_file.write_text(json.dumps(FITNESS_SET))
+    queries = []
+    real = health_module.search
+
+    def spy(cfg, conn, embedder, query, **kwargs):
+        queries.append(query)
+        return real(cfg, conn, embedder, query, **kwargs)
+
+    monkeypatch.setattr(health_module, "search", spy)
+    code, out = fitness(scfg, tmp_path, capsys, "--set", str(set_file))
+    assert code == 0, out.err
+    assert queries == [q["question"] for q in FITNESS_SET]  # one search for each question, the main form only
+    (record,) = fitness_records(scfg)
+    # Wilson 95% interval of 1 of 4, computed by hand: 0.0456 to 0.6994
+    assert record == {
+        "date": record["date"],
+        "set": str(set_file),
+        "n": 4,
+        "hits": 1,
+        "share": 0.25,
+        "low": 0.0456,
+        "high": 0.6994,
+    }
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", record["date"])
+    assert "fitness: 1/4 25.0%, Wilson 95% interval 4.6% to 69.9%" in out.out
+    fitness(scfg, tmp_path, capsys, "--set", str(set_file))
+    assert len(fitness_records(scfg)) == 2  # each run adds one record
+
+
+def test_fitness_reads_the_default_set_of_the_home(scfg, tmp_path, capsys):
+    code, out = fitness(scfg, tmp_path, capsys)
+    default = scfg.data_dir / "health" / "sets" / "private-now.json"
+    assert code == 1
+    assert str(default) in out.err
+    assert not (scfg.data_dir / "health" / "fitness-records.jsonl").exists()
+    default.parent.mkdir(parents=True)
+    default.write_text(json.dumps(FITNESS_SET[:1]))
+    code, out = fitness(scfg, tmp_path, capsys)
+    assert code == 0, out.err
+    assert fitness_records(scfg)[0]["set"] == str(default)
+    assert fitness_records(scfg)[0]["hits"] == 1
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["{not json", json.dumps({"question": "x"}), "[]", json.dumps([{"id": "q1", "gold": []}])],
+    ids=["no-json", "not-a-list", "empty", "no-question"],
+)
+def test_fitness_rejects_a_bad_set_and_saves_no_record(scfg, tmp_path, capsys, text):
+    set_file = tmp_path / "set.json"
+    set_file.write_text(text)
+    code, out = fitness(scfg, tmp_path, capsys, "--set", str(set_file))
+    assert code == 1
+    assert out.err.startswith("ragnarok health: ")
+    assert not (scfg.data_dir / "health" / "fitness-records.jsonl").exists()
+
+
+def test_health_shows_the_fitness_of_the_last_record(scfg, tmp_path, capsys):
+    folder = scfg.data_dir / "health"
+    folder.mkdir(parents=True)
+    old = {"date": "2026-01-01", "set": "s", "n": 10, "hits": 9, "share": 0.9, "low": 0.5958, "high": 0.9821}
+    new = {"date": "2026-02-02", "set": "s", "n": 10, "hits": 4, "share": 0.4, "low": 0.1682, "high": 0.6873}
+    (folder / "fitness-records.jsonl").write_text(json.dumps(old) + "\n" + json.dumps(new) + "\n")
+    _, out = run(scfg, tmp_path, capsys, "--vault", "V", "--json")
+    assert json.loads(out.out)["gate"]["fitness"] == {
+        "value": 0.4,
+        "target": 0.5,
+        "result": "fail",  # the point value is compared, not the interval
+        "low": 0.1682,
+        "high": 0.6873,
+        "date": "2026-02-02",
+    }
+    _, text = run(scfg, tmp_path, capsys, "--vault", "V")
+    assert "  fitness: 40.0% (16.8%-68.7%, 2026-02-02)  target 50.0%  fail" in text.out
+    _, out = run(scfg, tmp_path, capsys, "--vault", "V", "--json", health="")
+    data = json.loads(out.out)
+    assert data["gate"]["fitness"]["result"] == "no target"
+    assert data["gate"]["fitness"]["value"] == 0.4
+    _, text = run(scfg, tmp_path, capsys, "--vault", "V", health="")
+    assert "  fitness: 40.0% (16.8%-68.7%, 2026-02-02)  no target" in text.out

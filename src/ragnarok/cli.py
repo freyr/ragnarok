@@ -117,6 +117,14 @@ def build_parser() -> argparse.ArgumentParser:
         " validity: current that is not private, and keeps the candidates of the same labels in the vault."
         " A pair found from both ends is one line."
     )
+    fi = hsub.add_parser("fitness", help="the share of the questions of a set whose rank 1 is a top gold note")
+    fi.add_argument(
+        "--set", type=Path, dest="fitness_set", help="the question set (default data/health/sets/private-now.json)"
+    )
+    fi.description = (
+        "Scans the vaults for changes first. Runs one search for each question, with no agent, and scores rank 1"
+        " against the gold of the highest grade. Adds the record to data/health/fitness-records.jsonl."
+    )
     xp = parsers["fix"]
     xp.add_argument("kind", choices=["links", "yaml"])
     xp.add_argument("--vault", help="one vault (default all vaults)")
@@ -566,6 +574,43 @@ def cmd_health_sweep(cfg, args) -> int:
     return 0
 
 
+def cmd_health_fitness(cfg, args) -> int:
+    from .embed import EmbedError, OllamaEmbedder
+    from .health import default_set_path, fitness
+    from .index import IndexMismatch, connect, update
+
+    set_path = args.fitness_set or default_set_path(cfg)
+    if not set_path.is_file():
+        print(f"ragnarok health: no question set at {set_path}", file=sys.stderr)
+        return 1
+    if not cfg.index_path.exists():
+        print(f"No index at {cfg.index_path}. Run `ragnarok index`.", file=sys.stderr)
+        return 1
+    try:
+        conn = connect(cfg)
+    except IndexMismatch as e:
+        print(e, file=sys.stderr)
+        return 1
+    try:
+        embedder = OllamaEmbedder(cfg)
+        for warning in update(cfg, conn, embedder).warnings:
+            print(f"ragnarok health: {warning}", file=sys.stderr)
+        record = fitness(cfg, conn, embedder, set_path)
+    except EmbedError as e:
+        print(f"ragnarok health: the fitness run failed: {e}", file=sys.stderr)
+        return 1
+    except (OSError, ValueError) as e:
+        print(f"ragnarok health: {e}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+    print(
+        f"fitness: {record['hits']}/{record['n']} {record['share']:.1%},"
+        f" Wilson 95% interval {record['low']:.1%} to {record['high']:.1%}"
+    )
+    return 0
+
+
 def cmd_health(cfg, args) -> int:
     from .embed import EmbedError, OllamaEmbedder
     from .health import format_text, format_worklist, health, save, worklist
@@ -577,6 +622,8 @@ def cmd_health(cfg, args) -> int:
         return cmd_health_audit(cfg, args)
     if args.topic == "sweep":
         return cmd_health_sweep(cfg, args)
+    if args.topic == "fitness":
+        return cmd_health_fitness(cfg, args)
     if args.vault is not None and args.vault not in cfg.vaults:
         print(f"Unknown vault {args.vault}. The vaults are {', '.join(cfg.vaults)}.", file=sys.stderr)
         return 1
