@@ -32,3 +32,13 @@ def test_embed_calls_send_the_configured_keep_alive_unchanged(monkeypatch):
     for value in ("30m", 900):
         OllamaEmbedder(Config(dimension=4, keep_alive=value)).embed_query("question")
     assert [b["keep_alive"] for b in bodies] == ["30m", 900]
+
+
+def test_config_refuses_a_keep_alive_that_ollama_refuses():
+    import pytest
+
+    for bad in ("-1", "900", True, 1.5, None):
+        with pytest.raises(ValueError):
+            Config(dimension=4, keep_alive=bad)
+    for good in (-1, 0, 900, "30m", "1h"):
+        assert Config(dimension=4, keep_alive=good).keep_alive == good
