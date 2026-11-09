@@ -102,20 +102,16 @@ change of the configuration applies at the next `ragnarok index` or MCP tool cal
 
 ## Use in Claude Code
 
-The server gives ten tools:
+The server gives six tools:
 
 | Tool | What it does |
 |---|---|
-| `search` | Hybrid search over the notes. Filters: vault, project, area, type, archived, subject (an entity). |
+| `search` | Hybrid search over the notes. Filters: vault, project, area, type, archived. |
 | `find_projects` | The projects that match a prompt, with the summary and the matching notes of each project. |
 | `list_project` | All notes of one project. |
 | `open_projects` | The open projects (`state: in-progress` and `paused` by default), grouped by state, newest update first. |
 | `open_note` | The text of a note or of one section, with its links and backlinks. A note of more than 4,000 words gives an outline: each section with its heading path, words and first sentence. |
 | `find_by_jira` | The notes that contain a ticket key, for example `ABC-123`. |
-| `find_entities` | The entity notes (`type: entity`), with kind and aliases. |
-| `validate` | Checks notes, or a draft before a write, against the knowledge-base frontmatter model: the values, the required keys, the links, the reference targets and the identity keys. |
-| `find_collisions` | The notes that a draft (or a note) can collide with, before a write: at most 10 candidates from the identity key, the hybrid search, the links of the draft and the notes that link to its `supersedes` targets. Each candidate has its labels, its reasons, its search rank and the cosine distance of its best chunk. The identity candidates and the `supersedes` targets come first, then the search results; the last places (up to 3) go to the candidates that only the links give. |
-| `vault_rules` | The path rules of each vault and the local `[write]` table: the known keys and the systems of record. |
 
 The plugin adds the guidance below to each session itself, with the plugin tool names
 `mcp__plugin_ragnarok_ragnarok__*`. Without the plugin, Claude Code loads MCP tools on demand. To make Claude
@@ -171,11 +167,11 @@ It changes only `config.toml` and adds frontmatter keys. It never moves, renames
 | `[vault_paths]` | The folder of a vault that is not in `root`, for example `kb = "~/code/kb"`. A note key stays `<vault>/<path>`. |
 | `private_patterns` | Glob patterns of private notes, for example `"Notes/Journal/**"`. |
 | `model`, `dimension` | The Ollama embedding model and its vector size. A change needs `ragnarok index --rebuild`. |
+| `keep_alive` | How long Ollama keeps the embedding model in memory after a call: an integer of seconds, `-1` (the default) keeps it loaded, or a duration such as `"30m"`. A change needs no rebuild. |
 | `min_words`, `max_words` | The chunk size limits of the splitter. A change needs `ragnarok index --rebuild`. |
 | `project_markers` | A folder that holds one of these files is a project folder (default `DRIVERS.md`, `SUMMARY.md`). |
 | `jira_prefixes` | The ticket prefixes that `find_by_jira` knows. |
 | `[vault_rules.<vault>]` | The path rules of one vault: which folder gives the area and the project. |
-| `[write]` | `known_keys`: frontmatter keys outside the knowledge-base model that `validate` does not report as unknown. `[[write.systems_of_record]]`: a kind of data that lives outside the vaults, with `data`, `system` and an optional `skill`; `vault_rules` gives both. The defaults are empty lists. |
 
 ### Note metadata
 
@@ -212,10 +208,6 @@ Without frontmatter, the path rules give the metadata. The default rules work fo
 | `ragnarok serve` | Runs the MCP server on stdio. Claude Code starts it. |
 | `ragnarok backfill propose\|export\|merge\|apply <vault> [file...]` | Proposes, describes and applies missing frontmatter keys. The order is `propose`, `export`, Claude writes descriptions, `merge <vault> <file>...`, you examine the proposal, `apply`. |
 | `ragnarok survey <vault> [--json]` | Prints the folders, frontmatter keys, marker files, name patterns and ticket prefixes of a vault folder. Run it before you write `[vault_rules.<vault>]`. It prints no note text. |
-| `ragnarok validate [<path>...] [--json]` | Checks notes against the knowledge-base frontmatter model, their links, their reference targets and the identity keys. With no path, it checks all notes of the index and prints the counts of broken links (M1), double identity (M3) and notes with no error (M4). The exit code is 1 when there is an error. |
-| `ragnarok find-collisions <path>\|- [--json]` | Prints the collision candidates of a note, or of a draft from stdin (`-`), as `find_collisions` gives them. |
-| `ragnarok replay build --out <dir> [--neg-count N] [--neg-distance D] [--copy-similarity S] [--seed 0]` | Writes the replay set of the write path (`cases.jsonl` and `manifest.json`) from the index and its notes into `<dir>`, a folder inside the home folder, and the marker file `.ragnarok-bench` in the home folder. The positive cases come from the resolved `superseded_by` links and `supersedes` wiki-links; each group of notes with an equal body (each wiki-link compared by its display text, whitespace collapsed) is a duplicate case. It prints the counts and how many notes qualify as negative cases at the distance limits 0.15 to 0.30. |
-| `ragnarok replay score --set <dir> [--json]` | Runs `find_collisions` on each positive case of the set, in two draft forms, with the newer note excluded. Prints R1 (all old notes in the 10 candidates) with the 95% Wilson interval for each form, subset and candidate source, and writes `score-<time>.json` into `<dir>`. |
 | `ragnarok eval mechanical\|pool\|agent` | Runs an evaluation on the question sets in `data/eval/sets/`. |
 
 Run each command with `uvx ragnarok-mcp`, for example `uvx ragnarok-mcp search "boiler"`, or with `uv run` in the

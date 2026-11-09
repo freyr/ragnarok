@@ -6,16 +6,14 @@ import datetime as dt
 import posixpath
 import re
 import sqlite3
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 
-from .collisions import find_collisions
 from .config import Config
 from .index import SCAN_LIMIT, update
-from .metadata import normalize_alias, read_note
+from .metadata import read_note
 from .redact import redact
 from .search import PrivateNotAllowed, search
 from .splitter import sections
-from .validate import check_draft, check_paths
 
 PROJECT_POOL = 50  # notes that find_projects groups into projects
 DESCRIPTION_WORDS = 60
@@ -65,12 +63,6 @@ def _first_paragraph(body: str) -> str | None:
     return None
 
 
-def _applies(pattern: str, vault: str) -> bool:
-    """True when a private pattern can match a note of the vault: its first segment is the vault or a glob."""
-    first = pattern.split("/", 1)[0]
-    return first == vault or any(c in first for c in "*?[")
-
-
 def _state(fm: dict, archived: bool) -> str:
     """The state in SUMMARY.md; without one, a project is done when archived by path or its stage is DONE."""
     state = str(fm.get("state") or "").strip().lower()
@@ -118,9 +110,7 @@ class Tools:
 
     def find_projects(self, query: str, vault: str | None = None, limit: int = 5) -> dict:
         warnings = self.scan()
-        hits = search(
-            self.cfg, self.conn, self.embedder, query, vault=vault, include_superseded=True, limit=PROJECT_POOL
-        )
+        hits = search(self.cfg, self.conn, self.embedder, query, vault=vault, limit=PROJECT_POOL)
         groups: dict[tuple[str, str], dict] = {}
         for h in hits:
             if h.project == "none":
@@ -142,19 +132,15 @@ class Tools:
             where += " AND n.vault = ?"
             params.append(vault)
         rows = self.conn.execute(
-            "SELECT vault, path, title, type, status, description, note_class, validity FROM notes n"
-            f" WHERE {where}{self._visible()}"
+            f"SELECT vault, path, title, type, status, description FROM notes n WHERE {where}{self._visible()}"
             " ORDER BY vault, path",
             params,
         ).fetchall()
         by_vault: dict[str, list[dict]] = {}
-        for v, path, title, type_, status, description, note_class, validity in rows:
-            note = {"path": path, "title": title, "type": type_, "status": status, "description": description}
-            if note_class:
-                note["class"] = note_class
-            if validity:
-                note["validity"] = validity
-            by_vault.setdefault(v, []).append(note)
+        for v, path, title, type_, status, description in rows:
+            by_vault.setdefault(v, []).append(
+                {"path": path, "title": title, "type": type_, "status": status, "description": description}
+            )
         results = [{**self._project_info(v, project), "notes": notes} for v, notes in by_vault.items()]
         return {"results": results, "warnings": warnings}
 
@@ -244,83 +230,6 @@ class Tools:
         ).fetchall()
         keys = ("path", "title", "project", "type", "status")
         return {"results": [dict(zip(keys, r, strict=True)) for r in rows], "warnings": warnings}
-
-    def find_entities(self, kind: str | None = None, name: str | None = None) -> dict:
-        warnings = self.scan()
-        rows = self.conn.execute(
-            "SELECT n.id, n.path, n.title, e.kind FROM entities e JOIN notes n ON n.id = e.note_id"
-            f" WHERE 1 = 1{self._visible()} ORDER BY n.path"
-        ).fetchall()
-        aliases: dict[int, list[str]] = {}
-        for nid, alias in self.conn.execute("SELECT note_id, alias FROM entity_aliases ORDER BY rowid"):
-            aliases.setdefault(nid, []).append(alias)
-        wanted = normalize_alias(name) if name else None
-        results = []
-        for nid, path, title, entity_kind in rows:
-            names = [title, *aliases.get(nid, [])]
-            if kind and (entity_kind or "") != kind.strip().lower():
-                continue
-            if wanted and not any(wanted in normalize_alias(n) for n in names):
-                continue
-            results.append({"path": path, "title": title, "kind": entity_kind, "aliases": aliases.get(nid, [])})
-        return {"results": results, "warnings": warnings}
-
-    def validate(self, paths: list[str] | None = None, draft: str | None = None, path: str | None = None) -> dict:
-        warnings = self.scan()
-        show = self.cfg.allow_private
-        if draft is not None:
-            # the intended path gives only the link resolution and the identity key; its file is never read
-            report = check_draft(self.cfg, self.conn, draft, self._draft_key(path) if path else None, show)
-        elif paths:
-            keys = [self.cfg.note_key(p) for p in paths]
-            for key in keys:
-                row = self._note_row(key)
-                if row is None:
-                    raise FileNotFoundError(f"{key} is not a note in the index. Use a path from a search result.")
-                self._check_private(row[7], key)
-            report = check_paths(self.cfg, self.conn, keys, show)
-        else:
-            raise ValueError("Give paths or a draft.")
-        return {**report.as_dict(), "warnings": warnings}
-
-    def find_collisions(self, draft: str | None = None, path: str | None = None, allow_private: bool = False) -> dict:
-        warnings = self.scan()
-        if draft is not None:
-            key = self._draft_key(path) if path else None
-            found = find_collisions(
-                self.cfg, self.conn, self.embedder, draft=draft, draft_path=key, allow_private=allow_private
-            )
-        elif path:
-            key = self.cfg.note_key(path)
-            row = self._note_row(key)
-            if row is None:
-                raise FileNotFoundError(f"{key} is not a note in the index. Use a path from a search result.")
-            self._check_private(row[7], key)
-            found = find_collisions(self.cfg, self.conn, self.embedder, path=key, allow_private=allow_private)
-        else:
-            raise ValueError("Give a draft or a path.")
-        return {"candidates": found, "warnings": warnings}
-
-    def vault_rules(self) -> dict:
-        vaults = []
-        for vault in self.cfg.vaults:
-            vaults.append(
-                {
-                    "name": vault,
-                    "folder": self.cfg.vault_dir(vault).name,
-                    **asdict(self.cfg.rules(vault)),
-                    "project_markers": list(self.cfg.project_markers),
-                    "archive_folder": self.cfg.archive_folder,
-                    "private_patterns": [p for p in self.cfg.private_patterns if _applies(p, vault)],
-                }
-            )
-        return {"vaults": vaults, "write": asdict(self.cfg.write)}
-
-    def _draft_key(self, path: str) -> str:
-        key = posixpath.normpath(self.cfg.note_key(path))
-        if key.startswith(("../", "/")) or key.split("/")[0] not in self.cfg.vaults:
-            raise ValueError(f"{path} is not a path in a vault.")
-        return key
 
     # --- project summary ---------------------------------------------------------------------------------------
 

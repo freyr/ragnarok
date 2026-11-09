@@ -7,13 +7,13 @@
     "url": "https://github.com/freyr/ragnarok",
     "source": "github"
   },
-  "version": "1.2.0",
+  "version": "2.0.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "ragnarok-mcp",
-      "version": "1.2.0",
+      "version": "2.0.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-09
+
+### Removed
+
+- The tools `validate`, `find_collisions`, `vault_rules` and `find_entities`, and the commands
+  `ragnarok validate`, `ragnarok find-collisions` and `ragnarok replay`. The knowledge-base model goes with them:
+  the labels `class`, `validity`, `as_of`, `subject` and `superseded_by`, the entity notes, the `subject` filter
+  and the `include_superseded` argument of `search`, and the label output of `search` and `list_project`.
+- The `[write]` table of `config.toml` (`known_keys`, `systems_of_record`). A `config.toml` that still has the
+  table gives a warning at the first load; ragnarok ignores the table. Remove it.
+
+### Added
+
+- The top-level key `keep_alive` (default `-1`) sets how long Ollama keeps the embedding model loaded: an
+  integer of seconds, `-1` for always, or a duration such as `"30m"`.
+
+### Changed
+
+- The index has schema version 2. The first start of 2.0.0 migrates an index of version 1 in place and drops the
+  tables and columns of the knowledge-base model, with no new embedding.
+
+### Upgrade
+
+- Stop every 1.x MCP server before the first 2.0.0 start: close each Claude Code session. A 1.2.0 server that
+  starts after the migration adds the dropped tables back and asks for a rebuild of the index.
+
 ## [1.2.0] - 2026-11-07
 
 ### Added
@@ -63,6 +89,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 First public release.
 
+[2.0.0]: https://github.com/freyr/ragnarok/releases/tag/v2.0.0
 [1.2.0]: https://github.com/freyr/ragnarok/releases/tag/v1.2.0
 [1.1.0]: https://github.com/freyr/ragnarok/releases/tag/v1.1.0
 [1.0.0]: https://github.com/freyr/ragnarok/releases/tag/v1.0.0
