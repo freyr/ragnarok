@@ -110,9 +110,7 @@ class Tools:
 
     def find_projects(self, query: str, vault: str | None = None, limit: int = 5) -> dict:
         warnings = self.scan()
-        hits = search(
-            self.cfg, self.conn, self.embedder, query, vault=vault, include_superseded=True, limit=PROJECT_POOL
-        )
+        hits = search(self.cfg, self.conn, self.embedder, query, vault=vault, limit=PROJECT_POOL)
         groups: dict[tuple[str, str], dict] = {}
         for h in hits:
             if h.project == "none":
@@ -134,19 +132,15 @@ class Tools:
             where += " AND n.vault = ?"
             params.append(vault)
         rows = self.conn.execute(
-            "SELECT vault, path, title, type, status, description, note_class, validity FROM notes n"
-            f" WHERE {where}{self._visible()}"
+            f"SELECT vault, path, title, type, status, description FROM notes n WHERE {where}{self._visible()}"
             " ORDER BY vault, path",
             params,
         ).fetchall()
         by_vault: dict[str, list[dict]] = {}
-        for v, path, title, type_, status, description, note_class, validity in rows:
-            note = {"path": path, "title": title, "type": type_, "status": status, "description": description}
-            if note_class:
-                note["class"] = note_class
-            if validity:
-                note["validity"] = validity
-            by_vault.setdefault(v, []).append(note)
+        for v, path, title, type_, status, description in rows:
+            by_vault.setdefault(v, []).append(
+                {"path": path, "title": title, "type": type_, "status": status, "description": description}
+            )
         results = [{**self._project_info(v, project), "notes": notes} for v, notes in by_vault.items()]
         return {"results": results, "warnings": warnings}
 

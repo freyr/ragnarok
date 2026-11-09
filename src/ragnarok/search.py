@@ -9,7 +9,6 @@ from dataclasses import asdict, dataclass
 import sqlite_vec
 
 from .config import Config
-from .index import find_entity
 
 RRF_K = 60
 CANDIDATES = 200  # chunks from each list
@@ -42,24 +41,9 @@ class Hit:
     score: float
     dense_rank: int | None
     fts_rank: int | None
-    note_class: str | None = None
-    validity: str | None = None
-    as_of: str | None = None
-    superseded_by: str | None = None
-    subject: list[str] | None = None  # the targets of the `subject` links
 
     def as_dict(self) -> dict:
-        """The hit as a dict. The knowledge-base labels appear only when the note has them; note_class is `class`."""
-        d = asdict(self)
-        for key in KB_LABELS:
-            value = d.pop(key)
-            if value is not None:
-                d["class" if key == "note_class" else key] = value
-        return d
-
-
-KB_LABELS = ("note_class", "validity", "as_of", "superseded_by", "subject")
-HIDDEN_VALIDITY = ("superseded", "rejected")
+        return asdict(self)
 
 
 def fts_query(query: str) -> str:
@@ -68,22 +52,14 @@ def fts_query(query: str) -> str:
     return " OR ".join(f'"{w}"' for w in dict.fromkeys(words))
 
 
-def _note_filters(
-    vault, project, area, type_, include_archived, include_private, include_superseded=True, entity=None
-) -> tuple[str, list]:
+def _note_filters(vault, project, area, type_, include_archived, include_private) -> tuple[str, list]:
     where, params = [], []
-    if entity is not None:
-        where.append("n.id IN (SELECT note_id FROM refs WHERE key = 'subject' AND to_note = ?)")
-        params.append(entity)
     for column, value in (("vault", vault), ("project", project), ("area", area), ("type", type_)):
         if value is not None:
             where.append(f"n.{column} = ?")
             params.append(value)
     if not include_archived:
         where.append("n.status = 'active'")
-    if not include_superseded:
-        where.append(f"(n.validity IS NULL OR n.validity NOT IN ({', '.join('?' * len(HIDDEN_VALIDITY))}))")
-        params.extend(HIDDEN_VALIDITY)
     if not include_private:
         where.append("n.sensitivity = 'normal'")
     return (" AND " + " AND ".join(where)) if where else "", params
@@ -140,28 +116,15 @@ def search(
     type: str | None = None,
     include_archived: bool = True,
     include_private: bool = False,
-    include_superseded: bool = False,
-    subject: str | None = None,
     limit: int = 8,
     mode: str = "hybrid",
 ) -> list[Hit]:
-    """Hybrid search. Notes with validity superseded or rejected are left out unless include_superseded.
-
-    subject (an entity name, alias or path) keeps the notes with a subject that resolves to that entity note; an
-    unknown entity gives no results."""
     if include_private and not cfg.allow_private:
         raise PrivateNotAllowed("include_private needs allow_private = true in the configuration")
-    entity = None
-    if subject is not None:
-        entity = find_entity(conn, subject)
-        if entity is None:
-            return []
-    note_where, note_params = _note_filters(
-        vault, project, area, type, include_archived, include_private, include_superseded, entity
-    )
+    note_where, note_params = _note_filters(vault, project, area, type, include_archived, include_private)
     lists: list[list[tuple[int, int]]] = []
     if mode in ("hybrid", "dense"):
-        k = FILTERED_CANDIDATES if (project or area or type or subject) else CANDIDATES
+        k = FILTERED_CANDIDATES if (project or area or type) else CANDIDATES
         ids = _dense(conn, embedder.embed_query(query), k, vault, include_archived, include_private)
         lists.append(_by_note(conn, ids, note_where, note_params))
     else:
@@ -184,13 +147,10 @@ def search(
     hits = []
     for nid in top:
         n = conn.execute(
-            "SELECT path, vault, title, project, area, type, status, description, note_class, validity, as_of,"
-            " superseded_by, subject FROM notes WHERE id = ?",
-            (nid,),
+            "SELECT path, vault, title, project, area, type, status, description FROM notes WHERE id = ?", (nid,)
         ).fetchone()
         heading, text = conn.execute("SELECT heading, text FROM chunks WHERE id = ?", (best[nid][1],)).fetchone()
         words = text.split()
         snippet = " ".join(words[:SNIPPET_WORDS]) + (" …" if len(words) > SNIPPET_WORDS else "")
-        subject = n[12].split("\n") if n[12] else None
-        hits.append(Hit(*n[:8], heading, snippet, round(scores[nid], 5), *ranks[nid], *n[8:12], subject))
+        hits.append(Hit(*n, heading, snippet, round(scores[nid], 5), *ranks[nid]))
     return hits

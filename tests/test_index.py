@@ -1,12 +1,14 @@
 import dataclasses
 import hashlib
+import json
 import os
+import sqlite3
 
 import pytest
 import sqlite_vec
 
 from ragnarok import index
-from ragnarok.config import Config, VaultRules
+from ragnarok.config import Config, VaultRules, rules_hash
 from ragnarok.index import IndexMismatch, connect, status, update
 
 
@@ -42,40 +44,164 @@ def count(conn, sql):
     return conn.execute(sql).fetchone()[0]
 
 
-def test_an_index_without_the_kb_columns_gets_them_and_derives_the_notes_again(cfg):
-    (cfg.root / "Home/Heating/notes/boiler.md").write_text(
-        "---\nclass: state\nvalidity: current\nsubject:\n  - '[[pump]]'\n  - '[[valve|v]]'\n---\n# Boiler\n"
-    )
-    conn, emb, _ = build(cfg)
-    for column in ("note_class", "validity", "as_of", "superseded_by", "subject"):
-        conn.execute(f"ALTER TABLE notes DROP COLUMN {column}")
-    for table in ("refs", "entities", "entity_aliases"):
-        conn.execute(f"DROP TABLE {table}")
-    conn.commit()
-    conn.close()
-    conn = connect(cfg)
-    result = update(cfg, conn, emb)
-    assert result.rederived >= 1 and result.embedded == 0
-    row = conn.execute(
-        "SELECT note_class, validity, subject FROM notes WHERE path = 'Home/Heating/notes/boiler.md'"
-    ).fetchone()
-    assert row == ("state", "current", "pump\nvalve")
-    assert refs(conn, "Home/Heating/notes/boiler.md") == [("subject", "pump", None), ("subject", "valve", None)]
+# the schema of release 1.1.0, as its index.py made it (schema version 1)
+SCHEMA_1_1_0 = """
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS notes (
+    id INTEGER PRIMARY KEY,
+    vault TEXT NOT NULL,
+    path TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    project TEXT NOT NULL,
+    area TEXT NOT NULL,
+    type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    sensitivity TEXT NOT NULL,
+    description TEXT,
+    mtime_ns INTEGER NOT NULL,
+    size INTEGER NOT NULL,
+    hash TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS notes_project ON notes (vault, project);
+CREATE TABLE IF NOT EXISTS chunks (
+    id INTEGER PRIMARY KEY,
+    note_id INTEGER NOT NULL REFERENCES notes (id),
+    ord INTEGER NOT NULL,
+    heading TEXT NOT NULL,
+    text TEXT NOT NULL,
+    text_hash TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chunks_note ON chunks (note_id);
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+    heading, text, tokenize = 'porter unicode61 remove_diacritics 2'
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
+    chunk_id INTEGER PRIMARY KEY,
+    embedding float[8] distance_metric=cosine,
+    vault TEXT,
+    sensitivity TEXT,
+    status TEXT
+);
+CREATE TABLE IF NOT EXISTS embed_cache (text_hash TEXT PRIMARY KEY, model TEXT NOT NULL, vector BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS links (from_note INTEGER NOT NULL, target TEXT NOT NULL, to_note INTEGER);
+CREATE INDEX IF NOT EXISTS links_from ON links (from_note);
+CREATE INDEX IF NOT EXISTS links_to ON links (to_note);
+CREATE TABLE IF NOT EXISTS jira (key TEXT NOT NULL, note_id INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS jira_key ON jira (key);
+"""
+
+# what release 1.2.0 added to an index of schema version 1 (_add_kb_columns and _add_kb_tables), with no version change
+ADDED_1_2_0 = """
+ALTER TABLE notes ADD COLUMN note_class TEXT;
+ALTER TABLE notes ADD COLUMN validity TEXT;
+ALTER TABLE notes ADD COLUMN as_of TEXT;
+ALTER TABLE notes ADD COLUMN superseded_by TEXT;
+ALTER TABLE notes ADD COLUMN subject TEXT;
+CREATE TABLE IF NOT EXISTS entities (note_id INTEGER PRIMARY KEY, kind TEXT);
+CREATE TABLE IF NOT EXISTS entity_aliases (note_id INTEGER NOT NULL, alias TEXT NOT NULL, norm TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS entity_aliases_note ON entity_aliases (note_id);
+CREATE TABLE IF NOT EXISTS refs (note_id INTEGER NOT NULL, key TEXT NOT NULL, target TEXT NOT NULL, to_note INTEGER);
+CREATE INDEX IF NOT EXISTS refs_note ON refs (note_id);
+CREATE INDEX IF NOT EXISTS refs_to ON refs (to_note, key);
+UPDATE notes SET note_class = 'state', validity = 'current', subject = 'pump' WHERE path = 'Home/Heating/SUMMARY.md';
+UPDATE notes SET note_class = 'record' WHERE path LIKE '%/research-%';
+INSERT INTO entities (note_id, kind) SELECT id, 'device' FROM notes WHERE path = 'Home/Heating/notes/boiler.md';
+INSERT INTO entity_aliases (note_id, alias, norm) SELECT id, 'Pump', 'pump' FROM notes
+    WHERE path = 'Home/Heating/notes/boiler.md';
+INSERT INTO refs (note_id, key, target, to_note) SELECT s.id, 'subject', 'pump', b.id FROM notes s, notes b
+    WHERE s.path = 'Home/Heating/SUMMARY.md' AND b.path = 'Home/Heating/notes/boiler.md';
+"""
 
 
-def test_an_index_without_the_reference_tables_gets_them_with_no_embedding(cfg):
-    (cfg.root / "Home/Entities").mkdir()
-    (cfg.root / HEAT_PUMP).write_text(ENTITY)
-    (cfg.root / "Home/Heating/notes/boiler.md").write_text("---\nsubject: '[[HP]]'\n---\n# Boiler\n")
-    conn, emb, _ = build(cfg)
-    for table in ("refs", "entities", "entity_aliases"):
-        conn.execute(f"DROP TABLE {table}")
+def tables(conn) -> dict[str, list]:
+    """The columns of each table and the names of the indexes."""
+    names = [
+        n
+        for (n,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        if n != "sqlite_sequence"
+    ]
+    columns = {n: [r[1:] for r in conn.execute(f"PRAGMA table_info('{n}')")] for n in names}
+    columns["indexes"] = [n for (n,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index' ORDER BY 1")]
+    return columns
+
+
+def raw(path=":memory:"):
+    """A plain connection that can read the vector table."""
+    conn = sqlite3.connect(path)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    return conn
+
+
+def schema_1_1_0():
+    conn = raw()
+    conn.executescript(SCHEMA_1_1_0)
+    return tables(conn)
+
+
+def old_index(cfg, release):
+    """An index of schema version 1 with the notes of the vault, as release 1.1.0 or 1.2.0 left it."""
+    conn, emb, built = build(cfg)
+    if release == "1.2.0":
+        conn.executescript(ADDED_1_2_0)
+    conn.execute("UPDATE meta SET value = '1' WHERE key = 'schema_version'")
     conn.commit()
     conn.close()
+    return emb, built
+
+
+def run_index(cfg, monkeypatch, capsys) -> dict:
+    """`ragnarok index` with the fake embedder; the JSON line that it prints."""
+    from ragnarok import cli, embed
+
+    monkeypatch.setattr(embed, "OllamaEmbedder", lambda cfg: FakeEmbedder())
+    assert cli.cmd_index(cfg, cli.build_parser().parse_args(["index"])) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize("release", ["1.1.0", "1.2.0"])
+def test_connect_migrates_an_index_of_schema_1_with_no_embedding(cfg, release, monkeypatch, capsys):
+    _, built = old_index(cfg, release)
     conn = connect(cfg)
-    result = update(cfg, conn, emb)
-    assert result.rederived == 2 and result.embedded == 0  # the entity note and the note with a subject
-    assert refs(conn, "Home/Heating/notes/boiler.md") == [("subject", "HP", HEAT_PUMP)]
+    assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == ("2",)
+    assert tables(conn) == schema_1_1_0()
+    assert status(cfg, conn)["rules_hash"] is None  # the next update derives the metadata of all notes again
+    conn.close()
+    result = run_index(cfg, monkeypatch, capsys)
+    assert result["embedded"] == 0
+    assert (result["notes"], result["added"], result["changed"], result["removed"]) == (built.notes, 0, 0, 0)
+    conn = connect(cfg)
+    st = status(cfg, conn)
+    assert st["rules_hash"] == rules_hash(cfg)
+    assert st["notes"] == built.notes and st["chunks"] == st["vectors"] == built.chunks
+    assert run_index(cfg, monkeypatch, capsys)["embedded"] == 0
+
+
+def test_a_failed_migration_leaves_the_old_index_usable(cfg):
+    old_index(cfg, "1.2.0")
+    conn = raw(cfg.index_path)
+    conn.execute("CREATE VIEW labels AS SELECT path, note_class FROM notes")  # DROP COLUMN fails on a used column
+    conn.commit()
+    before = tables(conn)
+    conn.close()
+    with pytest.raises(sqlite3.OperationalError):
+        connect(cfg)
+    conn = raw(cfg.index_path)
+    assert tables(conn) == before
+    meta = dict(conn.execute("SELECT key, value FROM meta"))
+    assert meta["schema_version"] == "1" and meta["rules_hash"] == rules_hash(cfg)
+    assert conn.execute("SELECT count(*) FROM refs").fetchone() == (1,)
+
+
+@pytest.mark.parametrize("version", ["0", "3"])
+def test_an_index_of_another_schema_version_is_refused(cfg, version):
+    conn, _, _ = build(cfg)
+    conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (version,))
+    conn.commit()
+    conn.close()
+    with pytest.raises(IndexMismatch) as e:
+        connect(cfg)
+    assert "--rebuild" not in str(e.value)
 
 
 def test_full_index_then_no_new_embeddings(cfg):
@@ -187,8 +313,9 @@ def test_model_mismatch_needs_rebuild(cfg):
     conn, _, _ = build(cfg)
     conn.close()
     other = Config(root=cfg.root, index_path=cfg.index_path, dimension=8, model="other-model")
-    with pytest.raises(IndexMismatch):
+    with pytest.raises(IndexMismatch) as e:
         connect(other)
+    assert "--rebuild" not in str(e.value)
 
 
 FIELD_STOP = "Home/Astro/Theory/Field Stop.md"
@@ -355,99 +482,3 @@ def test_a_note_that_another_writer_added_during_the_update_is_replaced(cfg, mon
     assert result.added == result.notes
     assert count(conn, "SELECT COUNT(*) FROM notes") == result.notes
     assert count(conn, "SELECT COUNT(*) FROM chunks") == count(conn, "SELECT COUNT(*) FROM chunks_vec") == result.chunks
-
-
-HEAT_PUMP = "Home/Entities/Heat pump.md"
-ENTITY = "---\ntype: entity\nkind: device\naliases: [HP, Wärmepumpe]\n---\n# Heat pump\n"
-
-
-def refs(conn, path):
-    """(key, target, path of the resolved note) of the references of a note, in order."""
-    return conn.execute(
-        "SELECT r.key, r.target, t.path FROM refs r JOIN notes f ON f.id = r.note_id"
-        " LEFT JOIN notes t ON t.id = r.to_note WHERE f.path = ? ORDER BY r.rowid",
-        (path,),
-    ).fetchall()
-
-
-def test_an_alias_resolves_to_its_entity(cfg):
-    (cfg.root / "Home/Entities").mkdir()
-    (cfg.root / HEAT_PUMP).write_text(ENTITY)
-    (cfg.root / "Home/Heating/notes/boiler.md").write_text(
-        "---\nsubject: ['[[hp]]', '[[warmepumpe]]', '[[Heat Pump|the pump]]', '[[Home/Entities/Heat pump.md]]']\n"
-        "---\n# Boiler\n"
-    )
-    conn, _, _ = build(cfg)
-    assert refs(conn, "Home/Heating/notes/boiler.md") == [
-        ("subject", "hp", HEAT_PUMP),
-        ("subject", "warmepumpe", HEAT_PUMP),  # no diacritics, any case
-        ("subject", "Heat Pump", HEAT_PUMP),
-        ("subject", "Home/Entities/Heat pump", HEAT_PUMP),
-    ]
-    row = conn.execute(
-        "SELECT e.kind FROM entities e JOIN notes n ON n.id = e.note_id WHERE n.path = ?", (HEAT_PUMP,)
-    ).fetchone()
-    assert row == ("device",)
-
-
-def test_a_missing_target_is_kept_unresolved(cfg):
-    (cfg.root / "Home/Heating/notes/boiler.md").write_text("---\nsubject: '[[Nothing here]]'\n---\n# Boiler\n")
-    conn, _, _ = build(cfg)
-    assert refs(conn, "Home/Heating/notes/boiler.md") == [("subject", "Nothing here", None)]
-
-
-def test_subject_and_owner_resolve_only_to_entities_and_supersedes_to_any_note(cfg):
-    (cfg.root / "Home/Entities").mkdir()
-    (cfg.root / HEAT_PUMP).write_text(ENTITY)
-    (cfg.root / "Home/Heating/notes/boiler.md").write_text(
-        "---\nsubject: ['[[Field Stop]]']\nowner: '[[HP]]'\nsupersedes: ['[[Field Stop]]', '[[hp]]']\n"
-        "superseded_by: '[[SUMMARY]]'\n---\n# Boiler\n"
-    )
-    conn, _, _ = build(cfg)
-    assert refs(conn, "Home/Heating/notes/boiler.md") == [
-        ("subject", "Field Stop", None),  # a note that is not an entity
-        ("owner", "HP", HEAT_PUMP),
-        ("supersedes", "Field Stop", FIELD_STOP),
-        ("supersedes", "hp", HEAT_PUMP),
-        ("superseded_by", "SUMMARY", "Home/Heating/SUMMARY.md"),
-    ]
-
-
-def test_an_alias_of_two_entities_resolves_to_nothing(cfg):
-    (cfg.root / "Home/Entities").mkdir()
-    (cfg.root / HEAT_PUMP).write_text(ENTITY)
-    (cfg.root / "Home/Entities/Old pump.md").write_text("---\ntype: entity\naliases: [HP]\n---\n# Old pump\n")
-    (cfg.root / "Home/Heating/notes/boiler.md").write_text("---\nsubject: '[[HP]]'\n---\n# Boiler\n")
-    conn, _, _ = build(cfg)
-    assert refs(conn, "Home/Heating/notes/boiler.md") == [("subject", "HP", None)]
-
-
-@pytest.mark.parametrize("aliases, old_resolves", [("[HP]", False), ("[HP, Heat pump]", True)])
-def test_a_renamed_entity_resolves_by_its_new_name(cfg, aliases, old_resolves):
-    (cfg.root / "Home/Entities").mkdir()
-    (cfg.root / HEAT_PUMP).write_text(f"---\ntype: entity\naliases: {aliases}\n---\n# Pump\n")
-    (cfg.root / "Home/Heating/notes/boiler.md").write_text("---\nsubject: '[[Heat pump]]'\n---\n# Boiler\n")
-    (cfg.root / "Home/Heating/notes/valves.md").write_text("---\nsubject: '[[Air pump]]'\n---\n# Valves\n")
-    conn, emb, _ = build(cfg)
-    assert refs(conn, "Home/Heating/notes/boiler.md") == [("subject", "Heat pump", HEAT_PUMP)]
-    assert refs(conn, "Home/Heating/notes/valves.md") == [("subject", "Air pump", None)]
-    new = "Home/Entities/Air pump.md"
-    (cfg.root / HEAT_PUMP).rename(cfg.root / new)
-    result = update(cfg, conn, emb)
-    assert result.moved == 1  # the title is in the chunk text, so the chunk embeds again
-    assert refs(conn, "Home/Heating/notes/valves.md") == [("subject", "Air pump", new)]
-    assert refs(conn, "Home/Heating/notes/boiler.md") == [("subject", "Heat pump", new if old_resolves else None)]
-
-
-def test_a_deleted_note_takes_its_entity_rows_and_references_away(cfg):
-    (cfg.root / "Home/Entities").mkdir()
-    (cfg.root / HEAT_PUMP).write_text(ENTITY)
-    (cfg.root / "Home/Heating/notes/boiler.md").write_text("---\nsubject: '[[HP]]'\n---\n# Boiler\n")
-    conn, emb, _ = build(cfg)
-    (cfg.root / HEAT_PUMP).unlink()
-    update(cfg, conn, emb)
-    assert refs(conn, "Home/Heating/notes/boiler.md") == [("subject", "HP", None)]
-    assert count(conn, "SELECT COUNT(*) FROM entities") == count(conn, "SELECT COUNT(*) FROM entity_aliases") == 0
-    (cfg.root / "Home/Heating/notes/boiler.md").unlink()
-    update(cfg, conn, emb)
-    assert count(conn, "SELECT COUNT(*) FROM refs") == 0

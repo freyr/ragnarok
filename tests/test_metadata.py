@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from ragnarok.config import Config, home_dir, load_config
+from ragnarok.config import Config, VaultRules, dump_config, home_dir, load_config
 from ragnarok.metadata import iter_notes, resolve, resolve_file
 
 
@@ -120,6 +120,29 @@ def test_load_config_rejects_unknown_keys(tmp_path):
     path.write_text("allow_privat = true\n")
     with pytest.raises(ValueError):
         load_config(path)
+
+
+def test_load_config_with_a_write_table_gives_one_warning(tmp_path, caplog):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        'vaults = ["Home"]\n\n[write]\nknown_keys = ["tags"]\n\n'
+        '[[write.systems_of_record]]\ndata = "tickets"\nsystem = "Jira"\n\n[vault_rules.Home]\nproject_depth = 1\n'
+    )
+    with caplog.at_level("WARNING"):
+        cfg = load_config(path)
+    assert (cfg.vaults, cfg.vault_rules["Home"].project_depth) == (["Home"], 1)
+    assert not hasattr(cfg, "write")
+    assert [r.levelname for r in caplog.records] == ["WARNING"]
+    assert "[write]" in caplog.records[0].getMessage()
+
+
+def test_dump_config_round_trips_without_a_write_table(tmp_path):
+    cfg = Config(root=tmp_path, vaults=["Home"], vault_rules={"Home": VaultRules(project_depth=1)})
+    text = dump_config(cfg, root=tmp_path, index_path=tmp_path / "index.db")
+    assert "[write]" not in text
+    path = tmp_path / "config.toml"
+    path.write_text(text)
+    assert load_config(path).vault_rules == cfg.vault_rules
 
 
 def test_config_paths_are_relative_to_the_config_file(tmp_path, monkeypatch):
@@ -244,100 +267,40 @@ def test_done_project_under_archive_folder_is_archived_by_path(vault):
     assert (m.status, m.sources["status"]) == ("archived", "path")
 
 
-def test_kb_labels_come_from_frontmatter(vault):
-    fm = {"class": "State", "validity": "current", "as_of": "2026-11-01"}
+NOTE_KEYS = {
+    "vault",
+    "path",
+    "title",
+    "project",
+    "area",
+    "type",
+    "status",
+    "sensitivity",
+    "description",
+    "jira",
+    "sources",
+}
+
+
+@pytest.mark.parametrize("raw_type", ["research", "plan", "guide", "entity", "note"])
+def test_the_knowledge_base_keys_give_no_metadata(vault, raw_type):
+    fm = {
+        "type": raw_type,
+        "class": "state",
+        "validity": "superseded",
+        "as_of": "2026-11-01",
+        "superseded_by": "[[boiler-2026]]",
+        "subject": "[[pump]]",
+        "owner": "[[team]]",
+        "supersedes": "[[boiler-2024]]",
+        "kind": "device",
+        "aliases": ["b"],
+    }
     m = resolve(vault, "Home/Heating/notes/boiler.md", fm)
-    assert (m.note_class, m.validity, m.as_of, m.superseded_by) == ("state", "current", "2026-11-01", None)
-
-
-def test_a_successor_link_makes_the_note_superseded(vault):
-    m = resolve(vault, "Home/Heating/notes/boiler.md", {"class": "state", "superseded_by": "[[boiler-2026|new]]"})
-    assert (m.validity, m.superseded_by) == ("superseded", "boiler-2026")
-
-
-def test_a_note_without_kb_keys_has_no_labels(vault):
-    m = resolve(vault, "Home/Heating/notes/boiler.md", {})
-    assert (m.note_class, m.validity, m.as_of, m.superseded_by) == (None, None, None, None)
-
-
-@pytest.mark.parametrize(
-    "raw_type, expected",
-    [
-        ("research", "record"),
-        ("meeting", "record"),
-        ("log", "record"),
-        ("review", "record"),
-        ("decision", "record"),
-        ("plan", "proposal"),
-        ("brainstorm", "proposal"),
-        ("spec", "proposal"),
-        ("guide", "state"),
-        ("reference", "state"),
-        ("summary", "state"),
-        ("drivers", "state"),
-        ("note", None),
-        ("template", None),
-        ("entity", None),
-        ("something-else", None),
-        ("investigation", "record"),  # a raw type: the default follows the mapped type research
-        ("how-to", "state"),  # mapped to guide
-    ],
-)
-def test_class_defaults_from_the_normalized_type(vault, raw_type, expected):
-    m = resolve(vault, "Home/Heating/notes/boiler.md", {"type": raw_type})
-    assert m.note_class == expected
-    assert m.validity is None  # a default class gives no validity
-
-
-def test_class_defaults_from_a_path_type(vault):
-    assert resolve(vault, "Home/Heating/SUMMARY.md", {}).note_class == "state"
-    assert resolve(vault, "Home/Heating/notes/boiler.md", {}).note_class is None
-
-
-def test_an_explicit_class_wins_over_the_default(vault):
-    m = resolve(vault, "Home/Heating/notes/boiler.md", {"type": "research", "class": "State"})
-    assert m.note_class == "state"
-
-
-@pytest.mark.parametrize(
-    "value, expected",
-    [
-        (["[[boiler|the boiler]]", "[[Home/Heating/pump#Flow]]"], ["boiler", "Home/Heating/pump"]),
-        ("[[boiler]]", ["boiler"]),
-        ("plain topic", ["plain topic"]),
-        ([["boiler"], ["pump"]], ["boiler", "pump"]),  # unquoted wiki-links are nested lists in YAML
-        (None, []),
-        ([], []),
-    ],
-)
-def test_subject_targets_come_from_frontmatter(vault, value, expected):
-    fm = {} if value is None else {"subject": value}
-    assert resolve(vault, "Home/Heating/notes/boiler.md", fm).subject == expected
+    assert set(m.as_dict()) == NOTE_KEYS
+    assert m.status == "active"
 
 
 def test_summary_stage_does_not_reach_notes_outside_the_project(vault):
     (vault.root / "Home/Heating/SUMMARY.md").write_text("---\nstage: DONE\n---\n# Heating\n")
     assert meta(vault, "Home/Astro/Theory/Field Stop.md").status == "active"
-
-
-def test_an_entity_note_gives_its_kind_and_aliases(vault):
-    fm = {"type": "Entity", "kind": " Device ", "aliases": ["HP", "heat pump", " hp ", "Wärmepumpe"]}
-    m = resolve(vault, "Home/Entities/Heat pump.md", fm)
-    assert (m.entity, m.kind, m.aliases) == (True, "device", ["HP", "heat pump", "Wärmepumpe"])
-    assert m.type == "note"  # the type label does not change
-
-
-def test_a_single_alias_can_be_a_string(vault):
-    m = resolve(vault, "Home/Entities/Heat pump.md", {"type": "entity", "aliases": "HP"})
-    assert (m.entity, m.kind, m.aliases) == (True, None, ["HP"])
-
-
-def test_a_note_that_is_not_an_entity_has_no_kind_or_aliases(vault):
-    m = resolve(vault, "Home/Heating/notes/boiler.md", {"kind": "device", "aliases": ["b"]})
-    assert (m.entity, m.kind, m.aliases) == (False, None, [])
-
-
-def test_owner_and_supersedes_targets_come_from_frontmatter(vault):
-    fm = {"owner": "[[Platform team|team]]", "supersedes": ["[[boiler-2025]]", "[[old/boiler-2024.md]]"]}
-    m = resolve(vault, "Home/Heating/notes/boiler.md", fm)
-    assert (m.owner, m.supersedes) == (["Platform team"], ["boiler-2025", "old/boiler-2024"])
