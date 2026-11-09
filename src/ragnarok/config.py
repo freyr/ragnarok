@@ -85,6 +85,8 @@ class Config:
     query_prefix: str = "task: search result | query: "
     doc_prefix: str = "title: {title} | text: "
     dimension: int = 768
+    # how long Ollama keeps the model loaded after a call: seconds (-1 = until Ollama stops) or a duration like "30m"
+    keep_alive: int | str = -1
     min_words: int = 80
     max_words: int = 300
     # data_dir holds index.db, backups/ and proposals/; without index_path the index is data_dir/index.db

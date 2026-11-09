@@ -30,7 +30,9 @@ class OllamaEmbedder:
         self.timeout = timeout
 
     def _post(self, texts: list[str]) -> list[list[float]]:
-        body = json.dumps({"model": self.cfg.model, "input": texts, "truncate": True}).encode()
+        body = json.dumps(
+            {"model": self.cfg.model, "input": texts, "truncate": True, "keep_alive": self.cfg.keep_alive}
+        ).encode()
         req = urllib.request.Request(
             f"{self.cfg.ollama_url}/api/embed", data=body, headers={"Content-Type": "application/json"}
         )
