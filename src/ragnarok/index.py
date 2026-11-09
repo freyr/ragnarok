@@ -126,7 +126,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     The rules hash is removed, so the next update derives the metadata of all notes again from the embedding cache,
     with no new embedding."""
-    conn.execute("BEGIN")
+    # IMMEDIATE takes the write lock at once, so the busy timeout applies while another connection writes.
+    conn.execute("BEGIN IMMEDIATE")
     try:
         for table in REMOVED_TABLES:
             conn.execute(f"DROP TABLE IF EXISTS {table}")
