@@ -19,9 +19,6 @@ COMMANDS = {
     "eval": "Run the evaluation sets",
     "init": "Set up this computer: config, Ollama, model, index and the MCP server in Claude Code",
     "doctor": "Check the six parts of the setup and print the fix for each failure",
-    "validate": "Check notes against the frontmatter model, the links and the identity keys",
-    "find-collisions": "Print the notes that a note or a draft can collide with",
-    "replay": "Build the replay set of the write path, score R1 on it, or run the kb-write skill on it",
 }
 
 
@@ -66,53 +63,6 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("vault", help="a folder name under the vault root; it need not be in the config yet")
     sv.add_argument("--top", type=int, default=30, help="the number of rows in each list (default 30)")
     sv.add_argument("--json", action="store_true", help="print one JSON object")
-    vp = parsers["validate"]
-    vp.add_argument("paths", nargs="*", help="note paths, relative to the vault root or absolute (default all notes)")
-    vp.add_argument("--json", action="store_true", help="print one JSON object")
-    fp = parsers["find-collisions"]
-    fp.add_argument("path", help="a note path, relative to the vault root or absolute; - reads a draft from stdin")
-    fp.description = (
-        "At most 10 candidates: first the identity candidates and the supersedes targets, then the search results"
-        " by rank, last up to 3 candidates that only the links give, by distance."
-    )
-    fp.add_argument("--json", action="store_true", help="print one JSON object")
-    actions = parsers["replay"].add_subparsers(dest="action", required=True)
-    rb = actions.add_parser("build", help="write cases.jsonl and manifest.json from the index and its mirror")
-    rb.add_argument("--out", type=Path, required=True, help="the folder of the set, inside the home folder")
-    rb.add_argument("--neg-count", type=int, default=0, help="the number of negative cases (default 0)")
-    rb.add_argument("--neg-distance", type=float, help="the least best-chunk distance of a negative case")
-    rb.add_argument("--copy-similarity", type=float, default=0.9, help="the least similarity of a moved copy")
-    rb.add_argument("--seed", type=int, default=0, help="the seed of the negative sample (default 0)")
-    rs = actions.add_parser("score", help="run find_collisions on each positive case and print R1")
-    rs.add_argument("--set", type=Path, required=True, dest="set_dir", help="the folder that replay build wrote")
-    rs.add_argument("--json", action="store_true", help="print the result as one JSON object")
-    rr = actions.add_parser("run", help="run the kb-write skill on each case in fixture mode and score R2")
-    rr.description = (
-        "RAGNAROK_HOME must be a bench home (it holds .ragnarok-bench). Each case gets a home under"
-        " <set>/runs/<run id>/<case id>/ with a copy of the mirror in the start state and of the index."
-    )
-    rr.add_argument("--set", type=Path, required=True, dest="set_dir", help="the folder that replay build wrote")
-    rr.add_argument("--skill", type=Path, required=True, help="the SKILL.md of kb-write in its plugin folder")
-    rr.add_argument("--cases", help="comma-separated case ids (default all cases)")
-    rr.add_argument("--form", choices=["bare", "typed"], default="bare", help="the draft form (default bare)")
-    rr.add_argument("--parallel", type=int, default=1, help="the number of cases at the same time (default 1)")
-    rr.add_argument("--max-budget-usd", type=float, help="the cost limit of the agent of each case")
-    rr.add_argument("--timeout", type=float, default=1800, help="the time limit of each case in seconds")
-    rr.add_argument("--claude", default="claude", help="the Claude Code binary (default claude)")
-    rr.add_argument("--model", help="the model of the agent (default the Claude Code default)")
-    rr.add_argument("--out", type=Path, help="the run folder (default <set>/runs/<run id>), inside the home folder")
-    rr.add_argument(
-        "--guard",
-        type=Path,
-        action="append",
-        default=[],
-        help="a folder closed to the agent's reads; a file changed in it during the run is a warning (repeatable)",
-    )
-    rr.add_argument(
-        "--keep-homes",
-        action="store_true",
-        help="keep the index copy of each case home (one copy of index.db for each case; deleted by default)",
-    )
     return parser
 
 
@@ -390,202 +340,6 @@ def cmd_survey(cfg, args) -> int:
     return 0
 
 
-def cmd_validate(cfg, args) -> int:
-    from .index import IndexMismatch, connect
-    from .validate import check_index, check_paths, format_text
-
-    if not cfg.index_path.exists():
-        print(f"No index at {cfg.index_path}. Run `ragnarok index`.", file=sys.stderr)
-        return 1
-    keys = []
-    for raw in args.paths:
-        try:
-            keys.append(cfg.note_key(raw))
-        except ValueError:
-            keys.append(raw)
-    missing = [k for k in keys if not cfg.note_path(k).is_file()]
-    for rel in missing:
-        print(f"not a note: {rel}", file=sys.stderr)
-    if missing:
-        return 1
-    try:
-        conn = connect(cfg)
-    except IndexMismatch as e:
-        print(e, file=sys.stderr)
-        return 1
-    try:
-        report = check_paths(cfg, conn, keys) if keys else check_index(cfg, conn)
-    finally:
-        conn.close()
-    print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2) if args.json else format_text(report))
-    return 1 if report.errors else 0
-
-
-def cmd_find_collisions(cfg, args) -> int:
-    from .collisions import find_collisions, format_text
-    from .embed import EmbedError, OllamaEmbedder
-    from .index import IndexMismatch, connect
-
-    if not cfg.index_path.exists():
-        print(f"No index at {cfg.index_path}. Run `ragnarok index`.", file=sys.stderr)
-        return 1
-    try:
-        conn = connect(cfg)
-        embedder = OllamaEmbedder(cfg)
-        if args.path == "-":
-            found = find_collisions(cfg, conn, embedder, draft=sys.stdin.read())
-        else:
-            found = find_collisions(cfg, conn, embedder, path=cfg.note_key(args.path))
-    except (IndexMismatch, EmbedError, FileNotFoundError, ValueError) as e:
-        print(f"ragnarok find-collisions: {e}", file=sys.stderr)
-        return 1
-    print(json.dumps({"candidates": found}, ensure_ascii=False, indent=2) if args.json else format_text(found))
-    return 0
-
-
-def cmd_replay(cfg, args) -> int:
-    from .index import IndexMismatch, connect
-
-    if args.action == "run":
-        return _replay_run(cfg, args)  # it never opens the source index
-    if not cfg.index_path.exists():
-        print(f"No index at {cfg.index_path}. Run `ragnarok index`.", file=sys.stderr)
-        return 1
-    try:
-        conn = connect(cfg)
-    except IndexMismatch as e:
-        print(e, file=sys.stderr)
-        return 1
-    try:
-        return _replay_build(cfg, conn, args) if args.action == "build" else _replay_score(cfg, conn, args)
-    finally:
-        conn.close()
-
-
-def _replay_build(cfg, conn, args) -> int:
-    from . import replay
-    from .config import home_dir
-
-    home, out = home_dir().resolve(), args.out.expanduser().resolve()
-    if out == home or not out.is_relative_to(home):
-        print(f"ragnarok replay build: --out must be a folder inside the home folder {home}", file=sys.stderr)
-        return 1
-    if (out / "cases.jsonl").exists():
-        print(f"ragnarok replay build: {out} already holds cases.jsonl; use a new folder", file=sys.stderr)
-        return 1
-    try:
-        result = replay.build(
-            cfg,
-            conn,
-            neg_count=args.neg_count,
-            neg_distance=args.neg_distance,
-            copy_similarity=args.copy_similarity,
-            seed=args.seed,
-        )
-    except ValueError as e:
-        print(f"ragnarok replay build: {e}", file=sys.stderr)
-        return 1
-    (home / replay.MARKER).touch()
-    parameters = {
-        "neg_count": args.neg_count,
-        "neg_distance": args.neg_distance,
-        "copy_similarity": args.copy_similarity,
-        "seed": args.seed,
-    }
-    print(replay.format_build(replay.write_set(cfg, out, result, parameters)))
-    return 0
-
-
-def _replay_score(cfg, conn, args) -> int:
-    from datetime import UTC, datetime
-
-    from . import replay
-    from .embed import EmbedError, OllamaEmbedder
-
-    folder = args.set_dir.expanduser()
-    if not (folder / "cases.jsonl").is_file() or not (folder / "manifest.json").is_file():
-        print(f"ragnarok replay score: {folder} has no cases.jsonl and manifest.json", file=sys.stderr)
-        return 1
-    manifest, cases = replay.read_set(folder)
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    try:
-        records = replay.score_cases(cfg, conn, OllamaEmbedder(cfg), cases)
-    except (EmbedError, FileNotFoundError) as e:
-        print(f"ragnarok replay score: {e}", file=sys.stderr)
-        return 1
-    result = {"time": stamp, "manifest": manifest, "summary": replay.summarize(records), "cases": records}
-    path = folder / f"score-{stamp}.json"
-    path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
-    print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else replay.format_summary(result["summary"]))
-    print(f"written to {path}", file=sys.stderr)
-    return 0
-
-
-def _replay_run(cfg, args) -> int:
-    from . import replay, replay_run
-    from .config import home_dir
-
-    def fail(message: str) -> int:
-        print(f"ragnarok replay run: {message}", file=sys.stderr)
-        return 1
-
-    home = home_dir().resolve()
-    try:
-        replay_run.check_bench(home)
-    except ValueError as e:
-        return fail(str(e))
-    folder = args.set_dir.expanduser().resolve()
-    if not folder.is_relative_to(home) or folder == home:
-        return fail(f"--set must be a folder inside the home folder {home}")
-    if not (folder / "cases.jsonl").is_file() or not (folder / "manifest.json").is_file():
-        return fail(f"{folder} has no cases.jsonl and manifest.json")
-    out = args.out.expanduser().resolve() if args.out else None
-    if out is not None and (not out.is_relative_to(home) or out.exists()):
-        return fail(f"--out must be a new folder inside the home folder {home}")
-    skill = args.skill.expanduser().resolve()
-    if not skill.is_file():
-        return fail(f"no skill file {skill}")
-    _, cases = replay.read_set(folder)
-    if args.cases:
-        wanted = [c.strip() for c in args.cases.split(",") if c.strip()]
-        known = {c["id"]: c for c in cases}
-        if repeated := sorted({c for c in wanted if wanted.count(c) > 1}):
-            return fail(f"a case id is repeated in --cases: {', '.join(repeated)}")
-        if missing := [c for c in wanted if c not in known]:
-            return fail(f"no case {', '.join(missing)} in {folder}")
-        cases = [known[c] for c in wanted]
-    try:
-        rows, summary, run_dir = replay_run.run_cases(
-            cfg,
-            home,
-            folder,
-            cases,
-            skill=skill,
-            form=args.form,
-            parallel=args.parallel,
-            budget=args.max_budget_usd,
-            claude=args.claude,
-            model=args.model,
-            timeout=args.timeout,
-            out=out,
-            guards=tuple(g.expanduser() for g in args.guard),
-            keep_homes=args.keep_homes,
-        )
-    except (replay_run.SourceChanged, ValueError, OSError) as e:
-        return fail(str(e))
-    for row in rows:
-        s = row["score"]
-        print(
-            f"{row['case']:6} {row['kind']:9} expected {s['expected_action']:9} action {s['action'] or '-':9}"
-            f" {s['category']:20} cost {row['cost_usd'] or 0:.2f}{'  ' + row['error'] if row['error'] else ''}"
-        )
-    print(replay_run.format_summary(summary))
-    print(f"written to {run_dir}", file=sys.stderr)
-    if summary["failed_cases"]:
-        return fail(f"{len(summary['failed_cases'])} cases failed: {', '.join(summary['failed_cases'])}")
-    return 0
-
-
 def _config_file(args) -> Path:
     from .config import config_path
 
@@ -631,9 +385,6 @@ HANDLERS = {
     "index": cmd_index,
     "status": cmd_status,
     "search": cmd_search,
-    "validate": cmd_validate,
-    "find-collisions": cmd_find_collisions,
-    "replay": cmd_replay,
 }
 
 

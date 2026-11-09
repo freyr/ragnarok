@@ -196,38 +196,6 @@ def write_entities(tools):
         (tools.cfg.root / rel).write_text(text)
 
 
-def test_find_entities_lists_the_entity_notes(tools):
-    write_entities(tools)
-    assert tools.find_entities() == {
-        "results": [
-            {"path": "Home/Entities/Garage.md", "title": "Garage", "kind": "room", "aliases": []},
-            {"path": "Home/Entities/Ghost.md", "title": "Ghost", "kind": None, "aliases": []},
-            {
-                "path": "Home/Entities/Pump.md",
-                "title": "Pump",
-                "kind": "device",
-                "aliases": ["circulator", "Umwälzpumpe"],
-            },
-        ],
-        "warnings": [],
-    }
-
-
-def test_find_entities_filters_by_kind_and_name(tools):
-    write_entities(tools)
-    found = lambda **f: [r["path"] for r in tools.find_entities(**f)["results"]]  # noqa: E731
-    assert found(kind="DEVICE") == ["Home/Entities/Pump.md"]
-    assert found(name="umwalz") == ["Home/Entities/Pump.md"]  # an alias, any case, no diacritics
-    assert found(name="gar") == ["Home/Entities/Garage.md"]  # the title
-    assert found(name="pump", kind="room") == []
-
-
-def test_find_entities_shows_private_entities_only_when_allowed(tools):
-    write_entities(tools)
-    tools.cfg = dataclasses.replace(tools.cfg, allow_private=True)
-    assert "Home/Password/Router.md" in [r["path"] for r in tools.find_entities(kind="device")["results"]]
-
-
 def test_server_search_takes_a_subject(tools):
     write_entities(tools)
     server = build(tools=tools)
@@ -236,10 +204,9 @@ def test_server_search_takes_a_subject(tools):
     ]
     assert paths("search", {"query": "valves", "subject": "circulator"}) == ["Home/Heating/notes/valves.md"]
     assert paths("search", {"query": "valves", "subject": "nobody"}) == []
-    assert paths("find_entities", {"name": "garage"}) == ["Home/Entities/Garage.md"]
 
 
-def test_server_lists_the_ten_tools(tools):
+def test_server_lists_the_six_tools(tools):
     server = build(tools=tools)
     names = {t.name for t in asyncio.run(server.list_tools())}
     assert names == {
@@ -249,10 +216,6 @@ def test_server_lists_the_ten_tools(tools):
         "open_projects",
         "open_note",
         "find_by_jira",
-        "find_entities",
-        "validate",
-        "find_collisions",
-        "vault_rules",
     }
 
 

@@ -7,8 +7,6 @@ REQUIRED = {
     "eval": ["mechanical"],
     "backfill": ["propose", "Studio"],
     "survey": ["Studio"],
-    "find-collisions": ["-"],
-    "replay": ["build", "--out", "x"],
 }
 
 
