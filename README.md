@@ -166,9 +166,14 @@ It changes only `config.toml` and adds frontmatter keys. It never moves, renames
 | `root`, `vaults` | The folder that holds the vaults, and the vault folders to index. |
 | `[vault_paths]` | The folder of a vault that is not in `root`, for example `kb = "~/code/kb"`. A note key stays `<vault>/<path>`. |
 | `private_patterns` | Glob patterns of private notes, for example `"Notes/Journal/**"`. |
-| `model`, `dimension` | The Ollama embedding model and its vector size. A change needs `ragnarok index --rebuild`. |
+| `model`, `dimension` | The Ollama embedding model and its vector size. A dimension below the native dimension of the model gives a shorter vector (Ollama `dimensions`). A change needs `ragnarok index --rebuild`. |
+| `query_prefix`, `doc_template` | Override the query prefix and the document template of the model profile. `{title}` in the template is the note title and the heading path. The profiles cover `embeddinggemma-2:270m` (and `-bf16-text`), `qwen3-embedding:0.6b` and `:4b`, `snowflake-arctic-embed2` and `bge-m3`; another model gets the prefixes of `embeddinggemma-2:270m`. The old key `doc_prefix` still works as `doc_template`. A change needs `ragnarok index --rebuild`. |
 | `keep_alive` | How long Ollama keeps the embedding model in memory after a call: an integer of seconds, `-1` (the default) keeps it loaded, or a duration such as `"30m"`. A change needs no rebuild. |
-| `min_words`, `max_words` | The chunk size limits of the splitter. A change needs `ragnarok index --rebuild`. |
+| `min_words`, `max_words` | The chunk size limits of the splitter. The splitter also cuts a chunk to the token limit of the model profile (4 characters for each token), and a text that Ollama refuses as too long is embedded in two halves; Ollama never truncates a text. A change needs `ragnarok index --rebuild`. |
+| `chunk_prefix` | `none` (the default) or `description`: the description of a note goes before the text of each body chunk in the text to the model. The stored text and the keyword index do not change. A change needs `ragnarok index --rebuild`. |
+| `note_rank` | How the chunks of a note give its rank: `maxp` (the default, the best chunk), `topk_sum` (the sum of the scores of the best 3 chunks of the note in the dense list and in the keyword list) or `note_vector` (also the mean chunk vector of each note, as a third list). A change needs a new index. |
+| `[variants.<name>]` | The bench: a variant overrides `model`, `dimension`, `query_prefix`, `doc_template`, `min_words`, `max_words`, `chunk_prefix` and `note_rank`. |
+| `[corpora.<name>]` | The bench: a `root` and a list of `vaults` that a variant indexes. |
 | `project_markers` | A folder that holds one of these files is a project folder (default `DRIVERS.md`, `SUMMARY.md`). |
 | `jira_prefixes` | The ticket prefixes that `find_by_jira` knows. |
 | `[vault_rules.<vault>]` | The path rules of one vault: which folder gives the area and the project. |
@@ -200,7 +205,7 @@ Without frontmatter, the path rules give the metadata. The default rules work fo
 |---|---|
 | `ragnarok init` | Sets up this computer (see Setup). |
 | `ragnarok doctor` | Checks the setup. |
-| `ragnarok index [--rebuild]` | Adds, changes and removes notes in the index. After a change of the path rules, the private paths or the markers, it derives the metadata of all notes again, with no new embeddings. When a `.md` marker file is added or removed, it does the same for the notes under the folder of that file. `--rebuild` is needed only after a change of `model`, `dimension`, `min_words` or `max_words`. |
+| `ragnarok index [--rebuild]` | Adds, changes and removes notes in the index. After a change of the path rules, the private paths or the markers, it derives the metadata of all notes again, with no new embeddings. When a `.md` marker file is added or removed, it does the same for the notes under the folder of that file. `--rebuild` is needed only after a change of `model`, `dimension`, `min_words` or `max_words`. It keeps the embedding cache, so it embeds only the chunk texts that are not in the cache. |
 | `ragnarok status` | Shows the size and the state of the index. |
 | `ragnarok search "<query>"` | Searches from the terminal. |
 | `ragnarok inspect <path>...` | Shows the metadata of notes. |
@@ -209,6 +214,35 @@ Without frontmatter, the path rules give the metadata. The default rules work fo
 | `ragnarok backfill propose\|export\|merge\|apply <vault> [file...]` | Proposes, describes and applies missing frontmatter keys. The order is `propose`, `export`, Claude writes descriptions, `merge <vault> <file>...`, you examine the proposal, `apply`. |
 | `ragnarok survey <vault> [--json]` | Prints the folders, frontmatter keys, marker files, name patterns and ticket prefixes of a vault folder. Run it before you write `[vault_rules.<vault>]`. It prints no note text. |
 | `ragnarok eval mechanical\|pool\|agent` | Runs an evaluation on the question sets in `data/eval/sets/`. |
+| `ragnarok bench index --variant <name> --corpus <name>` | Builds or updates the index of a variant on a corpus in `data/variants/<variant>/<corpus>/index.db`. It shares the embedding cache, so a variant with the default embedding settings embeds nothing again. It refuses an index that was built with other settings of the variant. |
+| `ragnarok bench run --set <file> --variant <name>` | Runs each question of a set through the MCP search (`limit` 20, with the change scan, no filter) on the index of the variant on the corpus of the set. It writes the rank of each expected note, the scan time and the search time of each question, the keyword overlap of the question and the gold note, and the BM25 rank of the gold note to `data/bench/<set hash>-<variant hash>.json`. It first brings the index of the variant current with no limit. It refuses a set when an expected path is not in the index or is private, lists each such path with its reason and runs no question. |
+| `ragnarok bench compare --set <file> <A> <B> [<B2>...] [--margin 0.05]` | Gives recall@5 and MRR of each variant, by stratum and by area, and the difference B − A with a 95% interval from a cluster bootstrap (10,000 samples, fixed seed). With more than one B, the interval level follows the Holm correction. It lists the share of discordant questions and each changed question with its diagnostics. It ends with one verdict line for each B (see the set format). |
+| `ragnarok bench convert <draft set> --out <file> --name <name> --kind synthetic\|real --corpus <name>` | Converts a draft set of `ragnarok eval` to the set format. The stratum is the old `type`, the cluster is the first expected path, and the area comes from the metadata rules of the first expected note (`unknown` when the note is absent). It does not convert a question with no expected path or with a folder as an expected path, and it lists each one. |
+
+### The set format
+
+A set is one JSON file:
+
+```json
+{
+  "name": "pilot", "kind": "real", "version": 2, "corpus": "real", "hash": "<SHA-256 of the questions>",
+  "questions": [
+    {"id": "q01", "question": "What is a field stop?", "expected": ["Private/Astro/Field Stop.md"],
+     "stratum": "lookup", "area": "astro", "cluster": "Private/Astro/Field Stop.md", "notes": "optional"}
+  ]
+}
+```
+
+- `kind` is `synthetic` or `real`. `corpus` is a table `[corpora.<name>]` of the config.
+- `hash` is the SHA-256 of the `questions` list as JSON with sorted keys and no spaces. The bench refuses a set whose hash does not agree.
+- `expected` holds one or more note paths. A continuation question lists the `SUMMARY.md` of its project.
+- `cluster` is the path of the main gold note. The bootstrap draws clusters, not questions.
+- recall@5 is 1 when all expected notes are in the first 5 notes, else 0. MRR uses the rank of the first expected note; no expected note in the first 20 gives 0.
+
+The verdict of `bench compare`:
+
+- A synthetic set: B wins when the interval of B − A at its Holm level is above 0 for recall@5 or for MRR, the point difference of the other measure is not below 0, and the p95 search time (scan included) is below 500 ms. The report also gives the sign of the difference in each vault.
+- A real set does not decide a win. It checks that B does not get worse: the lower end of the interval of B − A must be above −margin for recall@5 and for MRR. It also checks the p95 time.
 
 Run each command with `uvx ragnarok-mcp`, for example `uvx ragnarok-mcp search "boiler"`, or with `uv run` in the
 checkout.
@@ -221,7 +255,10 @@ ignores `config.toml`, `data/` and `logs/`.
 | Path | What |
 |---|---|
 | `config.toml` | The configuration of this computer. |
-| `data/index.db` | The SQLite index. Copy it to a second computer to skip the first index. |
+| `data/index.db` | The SQLite index. Copy it and `data/embed-cache.db` to a second computer to skip the first index. |
+| `data/embed-cache.db` | The embedding cache that all index files share. Its key is the model, the dimension, the document template and the text hash. |
+| `data/variants/<variant>/<corpus>/index.db` | The index of a bench variant on a corpus. The MCP server never uses it. |
+| `data/bench/` | The results of `bench run`, one file for each set and variant settings. |
 | `data/backups/` | The vault archives that `backfill apply` makes before it writes. |
 | `data/proposals/` | The output of `backfill propose` and `backfill export`. |
 | `data/eval/` | Your question sets (`sets/`), the evaluation results and the mirror of the agent evaluation. |

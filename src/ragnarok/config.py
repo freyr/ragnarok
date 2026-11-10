@@ -13,7 +13,7 @@ import logging
 import os
 import re
 import tomllib
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 
 PATH_KEYS = ("root", "data_dir", "index_path")
@@ -63,6 +63,29 @@ class VaultRules:
 
 
 @dataclass
+class Corpus:
+    """The vaults that a variant indexes: the folders root/<vault>."""
+
+    root: Path
+    vaults: list[str]
+
+
+CHUNK_PREFIXES = ("none", "description")
+NOTE_RANKS = ("maxp", "topk_sum", "note_vector")
+# the keys of the default configuration that a variant can override
+VARIANT_KEYS = (
+    "model",
+    "dimension",
+    "query_prefix",
+    "doc_template",
+    "min_words",
+    "max_words",
+    "chunk_prefix",
+    "note_rank",
+)
+
+
+@dataclass
 class Config:
     root: Path = field(default_factory=lambda: Path("~/Documents/Vaults").expanduser())
     vaults: list[str] = field(default_factory=list)
@@ -82,13 +105,23 @@ class Config:
     eval_exclude: list[str] = field(default_factory=list)
     ollama_url: str = "http://127.0.0.1:11434"
     model: str = "embeddinggemma-2:270m"
-    query_prefix: str = "task: search result | query: "
-    doc_prefix: str = "title: {title} | text: "
+    # the query prefix and the document template ("{title}" is the note title and the heading path); unset gives the
+    # value of the model profile in embed.PROFILES
+    query_prefix: str | None = None
+    doc_template: str | None = None
     dimension: int = 768
     # how long Ollama keeps the model loaded after a call: seconds (-1 = until Ollama stops) or a duration like "30m"
     keep_alive: int | str = -1
     min_words: int = 80
     max_words: int = 300
+    # "description": the description of the note goes before the text of each body chunk in the text to the model
+    chunk_prefix: str = "none"
+    # how the chunks of a note give its rank: "maxp" (the best chunk), "topk_sum" (the sum of the scores of the best
+    # TOPK chunks in each list) or "note_vector" (also the mean chunk vector of each note as a third list)
+    note_rank: str = "maxp"
+    # bench: settings that override the keys in VARIANT_KEYS, and sets of vaults to index with a variant
+    variants: dict[str, dict] = field(default_factory=dict)
+    corpora: dict[str, Corpus] = field(default_factory=dict)
     # data_dir holds index.db, backups/ and proposals/; without index_path the index is data_dir/index.db
     data_dir: Path | None = None
     index_path: Path | None = None
@@ -101,11 +134,36 @@ class Config:
             raise ValueError(
                 f"keep_alive must be an integer of seconds or a duration such as '30m', not {self.keep_alive!r}"
             )
+        if self.chunk_prefix not in CHUNK_PREFIXES:
+            raise ValueError(f"chunk_prefix must be one of {', '.join(CHUNK_PREFIXES)}, not {self.chunk_prefix!r}")
+        if self.note_rank not in NOTE_RANKS:
+            raise ValueError(f"note_rank must be one of {', '.join(NOTE_RANKS)}, not {self.note_rank!r}")
+        for name, values in self.variants.items():
+            if unknown := set(values) - set(VARIANT_KEYS):
+                raise ValueError(f"variant {name}: unknown keys {', '.join(sorted(unknown))}")
+            replace(self, **values, variants={})  # the checks above for the values of the variant
         if self.index_path is None:
             self.data_dir = self.data_dir or home_dir() / "data"
             self.index_path = self.data_dir / "index.db"
         elif self.data_dir is None:
             self.data_dir = self.index_path.parent
+
+    def variant(self, name: str, corpus: str) -> Config:
+        """The configuration of a variant on a corpus: its own index file data_dir/variants/<name>/<corpus>/index.db,
+        and the same data_dir, so the same embedding cache."""
+        if name not in self.variants:
+            raise KeyError(f"no variant {name!r} in the configuration; the variants are {', '.join(self.variants)}")
+        if corpus not in self.corpora:
+            raise KeyError(f"no corpus {corpus!r} in the configuration; the corpora are {', '.join(self.corpora)}")
+        c = self.corpora[corpus]
+        return replace(
+            self,
+            **self.variants[name],
+            root=c.root,
+            vaults=list(c.vaults),
+            vault_paths={},
+            index_path=self.data_dir / "variants" / name / corpus / "index.db",
+        )
 
     def note_key(self, raw: str) -> str:
         """The key `<vault>/<path in the vault>` of a path that is relative to the vault root or absolute."""
@@ -162,6 +220,9 @@ def load_config(path: Path | None = None) -> Config:
         if key == "write":
             log.warning("%s: ragnarok does not use the [write] table any more; remove it", path)
             continue
+        if key == "doc_prefix":
+            log.warning("%s: the key doc_prefix is now doc_template; rename it", path)
+            key = "doc_template"
         if key not in Config.__dataclass_fields__:
             raise ValueError(f"unknown config key in {path}: {key}")
         if key in PATH_KEYS:
@@ -172,8 +233,28 @@ def load_config(path: Path | None = None) -> Config:
             value = {vault: path.parent / Path(folder).expanduser() for vault, folder in value.items()}
         elif key == "vault_rules":
             value = {vault: VaultRules(**rules) for vault, rules in value.items()}
+        elif key == "variants":
+            value = {name: dict(values) for name, values in value.items()}
+        elif key == "corpora":
+            value = {name: _corpus(path, name, values) for name, values in value.items()}
         values[key] = value
     return Config(**values)
+
+
+def _corpus(path: Path, name: str, values: dict) -> Corpus:
+    if set(values) != {"root", "vaults"}:
+        raise ValueError(f"corpus {name} in {path} needs the keys root and vaults, and no other key")
+    return Corpus(path.parent / Path(values["root"]).expanduser(), list(values["vaults"]))
+
+
+def variant_hash(cfg: Config) -> str:
+    """A stable hash of the settings that a variant can override, with the template of the model profile."""
+    from .embed import profile
+
+    p = profile(cfg)
+    values = {key: getattr(cfg, key) for key in VARIANT_KEYS}
+    values.update(query_prefix=p.query_prefix, doc_template=p.doc_template)
+    return hashlib.sha1(json.dumps(values, sort_keys=True).encode()).hexdigest()[:12]
 
 
 def dump_config(cfg: Config, **paths: Path | str) -> str:
@@ -181,7 +262,8 @@ def dump_config(cfg: Config, **paths: Path | str) -> str:
     lines = [f"{key} = {json.dumps(str(value))}" for key, value in paths.items()]
     for f in fields(Config):
         value = getattr(cfg, f.name)
-        if f.name in PATH_KEYS or f.name in ("vault_paths", "vault_rules") or f.name in paths:
+        skip = ("vault_paths", "vault_rules", "variants", "corpora")
+        if f.name in PATH_KEYS or f.name in skip or f.name in paths or value is None:
             continue
         lines.append(f"{f.name} = {json.dumps(sorted(value) if isinstance(value, set) else value)}")
     if cfg.vault_paths:

@@ -27,6 +27,11 @@ class Chunk:
     ord: int
     heading: str  # "<note title> > <heading path>"
     text: str
+    context: str = ""  # goes before the text in the text to the model only (chunk_prefix), not in BM25
+
+    @property
+    def model_text(self) -> str:
+        return self.context + self.text
 
 
 def sections(body: str) -> list[Section]:
@@ -104,6 +109,7 @@ def split(
     description: str | None = None,
     project: str | None = None,
     area: str | None = None,
+    context: str = "",
 ) -> list[Chunk]:
     chunks: list[Chunk] = []
     for sec in _join_small(sections(body), min_words):
@@ -111,14 +117,43 @@ def split(
         text = "\n".join(sec.lines).strip()
         if not text:
             if sec.path:  # heading with no text: keep the heading as the only text
-                chunks.append(Chunk(len(chunks), heading, sec.path[-1]))
+                chunks.append(Chunk(len(chunks), heading, sec.path[-1], context))
             continue
         for part in _split_large(text, max_words):
-            chunks.append(Chunk(len(chunks), heading, part))
+            chunks.append(Chunk(len(chunks), heading, part, context))
     if description:
         text = f"project: {project}. area: {area}. {description}"
         chunks.append(Chunk(len(chunks), f"{title} > description", text))
     return chunks
+
+
+def _cut(text: str, limit: int) -> list[str]:
+    """Cut text into parts of at most limit characters, at the last whitespace in the limit, else at the limit."""
+    parts: list[str] = []
+    while len(text) > limit:
+        cut = max(text.rfind(" ", 0, limit + 1), text.rfind("\n", 0, limit + 1))
+        if cut <= 0:
+            parts.append(text[:limit])
+            text = text[limit:]
+        else:
+            parts.append(text[:cut].rstrip())
+            text = text[cut:].lstrip()
+    parts.append(text)
+    return parts
+
+
+def fit(cfg, chunks: list[Chunk]) -> list[Chunk]:
+    """Cut each chunk whose text to the model is above the token limit of the model profile; no text is lost."""
+    from .embed import doc_input, max_chars
+
+    limit = max_chars(cfg)
+    out: list[Chunk] = []
+    for c in chunks:
+        # a heading above the limit must not stop the loop
+        room = max(limit - len(doc_input(cfg, c.heading, c.context)), 1)
+        for part in _cut(c.text, room):
+            out.append(Chunk(len(out), c.heading, part, c.context))
+    return out
 
 
 def chunk_note(cfg, meta, body: str) -> tuple[list[Chunk], int]:
@@ -130,8 +165,9 @@ def chunk_note(cfg, meta, body: str) -> tuple[list[Chunk], int]:
     if description:
         description, n = redact(description)
         count += n
-    chunks = split(meta.title, body, cfg.min_words, cfg.max_words, description, meta.project, meta.area)
-    return chunks, count
+    context = f"{description}\n" if description and cfg.chunk_prefix == "description" else ""
+    chunks = split(meta.title, body, cfg.min_words, cfg.max_words, description, meta.project, meta.area, context)
+    return fit(cfg, chunks), count
 
 
 def chunk_file(cfg, rel: str):

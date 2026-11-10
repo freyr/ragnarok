@@ -15,13 +15,25 @@ data_dir = "data"
 
 ollama_url = "http://127.0.0.1:11434"
 model = "embeddinggemma-2:270m"
+# A dimension below the native dimension of the model sends `dimensions` to Ollama (a shorter MRL vector).
 dimension = 768
+# The model profile gives the query prefix and the document template ("{title}" is the note title and the heading
+# path). Set them only to override the profile of the model.
+# query_prefix = "task: search result | query: "
+# doc_template = "title: {title} | text: "
 # How long Ollama keeps the model loaded: an integer of seconds, -1 keeps it loaded, or a duration such as "30m".
 keep_alive = -1
 
 # The splitter joins sections with fewer words than min_words and cuts sections with more than max_words.
 min_words = 80
 max_words = 300
+# "description" puts the description of a note before the text of each of its body chunks, in the text to the model
+# only. "none" (the default) sends the chunk text alone. A change needs `ragnarok index --rebuild`.
+chunk_prefix = "none"
+# How the chunks of a note give its rank: "maxp" (the default, its best chunk), "topk_sum" (the sum of the scores of
+# its best 3 chunks in each list) or "note_vector" (also the mean chunk vector of the note as a third list; it needs
+# a new index).
+note_rank = "maxp"
 
 # A folder that holds one of these files is a project folder.
 project_markers = ["DRIVERS.md", "SUMMARY.md"]
@@ -33,8 +45,8 @@ jira_prefixes = []
 # Example: eval_exclude = ["Notes/Meta/search-eval"]
 eval_exclude = []
 
-# Put every key above this line: a key below a [vault_paths] or [vault_rules.<vault>] header belongs to that
-# table.
+# Put every key above this line: a key below a [vault_paths], [vault_rules.<vault>], [variants.<name>] or
+# [corpora.<name>] header belongs to that table.
 
 # The folder of a vault that is not in root. A vault with no entry is the folder root/<vault>.
 # The vault name stays the first part of the note paths, for example "kb/Runbooks/failover.md".
@@ -53,3 +65,18 @@ eval_exclude = []
 # project_parents = []       # folder paths whose child folders are projects, for example "Clients/Projects"
 # ignore_folders = []        # first-level folders that give no area and no project, for example "docs"
 # jira_prefixes = []         # ticket prefixes found only in this vault
+
+# The bench (`ragnarok bench index --variant <name> --corpus <name>`). A variant overrides these keys of the settings
+# above: model, dimension, query_prefix, doc_template, min_words, max_words, chunk_prefix and note_rank. A corpus is
+# a root and a list of vaults. Each pair has its own index data/variants/<variant>/<corpus>/index.db, and all index
+# files share data/embed-cache.db. The MCP server always uses the default index.
+#
+# [variants.baseline]
+#
+# [variants.qwen]
+# model = "qwen3-embedding:0.6b"
+# dimension = 1024
+#
+# [corpora.real]
+# root = "~/Documents/Vaults"
+# vaults = ["Notes"]
