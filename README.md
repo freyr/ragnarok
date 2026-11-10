@@ -166,9 +166,10 @@ It changes only `config.toml` and adds frontmatter keys. It never moves, renames
 | `root`, `vaults` | The folder that holds the vaults, and the vault folders to index. |
 | `[vault_paths]` | The folder of a vault that is not in `root`, for example `kb = "~/code/kb"`. A note key stays `<vault>/<path>`. |
 | `private_patterns` | Glob patterns of private notes, for example `"Notes/Journal/**"`. |
-| `model`, `dimension` | The Ollama embedding model and its vector size. A change needs `ragnarok index --rebuild`. |
+| `model`, `dimension` | The Ollama embedding model and its vector size. A dimension below the native dimension of the model gives a shorter vector (Ollama `dimensions`). A change needs `ragnarok index --rebuild`. |
+| `query_prefix`, `doc_template` | Override the query prefix and the document template of the model profile. `{title}` in the template is the note title and the heading path. The profiles cover `embeddinggemma-2:270m` (and `-bf16-text`), `qwen3-embedding:0.6b` and `:4b`, `snowflake-arctic-embed2` and `bge-m3`; another model gets the prefixes of `embeddinggemma-2:270m`. The old key `doc_prefix` still works as `doc_template`. A change needs `ragnarok index --rebuild`. |
 | `keep_alive` | How long Ollama keeps the embedding model in memory after a call: an integer of seconds, `-1` (the default) keeps it loaded, or a duration such as `"30m"`. A change needs no rebuild. |
-| `min_words`, `max_words` | The chunk size limits of the splitter. A change needs `ragnarok index --rebuild`. |
+| `min_words`, `max_words` | The chunk size limits of the splitter. The splitter also cuts a chunk to the token limit of the model profile (4 characters for each token), and a text that Ollama refuses as too long is embedded in two halves; Ollama never truncates a text. A change needs `ragnarok index --rebuild`. |
 | `project_markers` | A folder that holds one of these files is a project folder (default `DRIVERS.md`, `SUMMARY.md`). |
 | `jira_prefixes` | The ticket prefixes that `find_by_jira` knows. |
 | `[vault_rules.<vault>]` | The path rules of one vault: which folder gives the area and the project. |

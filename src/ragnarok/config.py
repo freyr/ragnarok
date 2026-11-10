@@ -82,8 +82,10 @@ class Config:
     eval_exclude: list[str] = field(default_factory=list)
     ollama_url: str = "http://127.0.0.1:11434"
     model: str = "embeddinggemma-2:270m"
-    query_prefix: str = "task: search result | query: "
-    doc_prefix: str = "title: {title} | text: "
+    # the query prefix and the document template ("{title}" is the note title and the heading path); unset gives the
+    # value of the model profile in embed.PROFILES
+    query_prefix: str | None = None
+    doc_template: str | None = None
     dimension: int = 768
     # how long Ollama keeps the model loaded after a call: seconds (-1 = until Ollama stops) or a duration like "30m"
     keep_alive: int | str = -1
@@ -162,6 +164,9 @@ def load_config(path: Path | None = None) -> Config:
         if key == "write":
             log.warning("%s: ragnarok does not use the [write] table any more; remove it", path)
             continue
+        if key == "doc_prefix":
+            log.warning("%s: the key doc_prefix is now doc_template; rename it", path)
+            key = "doc_template"
         if key not in Config.__dataclass_fields__:
             raise ValueError(f"unknown config key in {path}: {key}")
         if key in PATH_KEYS:
@@ -181,7 +186,7 @@ def dump_config(cfg: Config, **paths: Path | str) -> str:
     lines = [f"{key} = {json.dumps(str(value))}" for key, value in paths.items()]
     for f in fields(Config):
         value = getattr(cfg, f.name)
-        if f.name in PATH_KEYS or f.name in ("vault_paths", "vault_rules") or f.name in paths:
+        if f.name in PATH_KEYS or f.name in ("vault_paths", "vault_rules") or f.name in paths or value is None:
             continue
         lines.append(f"{f.name} = {json.dumps(sorted(value) if isinstance(value, set) else value)}")
     if cfg.vault_paths:

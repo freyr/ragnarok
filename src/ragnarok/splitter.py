@@ -121,6 +121,34 @@ def split(
     return chunks
 
 
+def _cut(text: str, limit: int) -> list[str]:
+    """Cut text into parts of at most limit characters, at the last whitespace in the limit, else at the limit."""
+    parts: list[str] = []
+    while len(text) > limit:
+        cut = max(text.rfind(" ", 0, limit + 1), text.rfind("\n", 0, limit + 1))
+        if cut <= 0:
+            parts.append(text[:limit])
+            text = text[limit:]
+        else:
+            parts.append(text[:cut].rstrip())
+            text = text[cut:].lstrip()
+    parts.append(text)
+    return parts
+
+
+def fit(cfg, chunks: list[Chunk]) -> list[Chunk]:
+    """Cut each chunk whose text to the model is above the token limit of the model profile; no text is lost."""
+    from .embed import doc_input, max_chars
+
+    limit = max_chars(cfg)
+    out: list[Chunk] = []
+    for c in chunks:
+        room = max(limit - len(doc_input(cfg, c.heading, "")), 1)  # a heading above the limit must not stop the loop
+        for part in _cut(c.text, room):
+            out.append(Chunk(len(out), c.heading, part))
+    return out
+
+
 def chunk_note(cfg, meta, body: str) -> tuple[list[Chunk], int]:
     """Redact and split the body of a resolved note. Return (chunks, number of redactions)."""
     from .redact import redact
@@ -131,7 +159,7 @@ def chunk_note(cfg, meta, body: str) -> tuple[list[Chunk], int]:
         description, n = redact(description)
         count += n
     chunks = split(meta.title, body, cfg.min_words, cfg.max_words, description, meta.project, meta.area)
-    return chunks, count
+    return fit(cfg, chunks), count
 
 
 def chunk_file(cfg, rel: str):

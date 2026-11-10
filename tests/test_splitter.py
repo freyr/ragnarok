@@ -1,4 +1,8 @@
-from ragnarok.splitter import sections, split
+import pytest
+
+from ragnarok.config import Config
+from ragnarok.embed import doc_input
+from ragnarok.splitter import chunk_note, sections, split
 
 
 def words(n: int, word: str = "w") -> str:
@@ -70,3 +74,36 @@ def test_description_chunk():
 def test_note_without_headings():
     chunks = split("N", words(50))
     assert len(chunks) == 1 and chunks[0].heading == "N"
+
+
+def note(title="N"):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(title=title, description=None, project=None, area=None)
+
+
+@pytest.mark.parametrize("model", ["embeddinggemma-2:270m", "bge-m3"])
+def test_a_chunk_is_cut_to_the_token_limit_of_the_model_and_keeps_all_text(model):
+    # 10,000 words of 39 characters: 300 words are 12,000 characters, above the 8,192 characters of bge-m3
+    long_words = [f"{i:05d}" + "x" * 34 for i in range(10_000)]
+    body = "# Long\n" + " ".join(long_words)
+    cfg = Config(model=model, max_words=1000)  # 1,000 words are 40,000 characters, above the 32,768 of gemma
+    limit = {"embeddinggemma-2:270m": 8192, "bge-m3": 2048}[model] * 4
+    chunks, _ = chunk_note(cfg, note(), body)
+    assert all(len(doc_input(cfg, c.heading, c.text)) <= limit for c in chunks)
+    assert " ".join(c.text for c in chunks).split() == long_words
+    assert [c.ord for c in chunks] == list(range(len(chunks)))
+    assert {c.heading for c in chunks} == {"N > Long"}
+
+
+def test_a_word_longer_than_the_limit_is_cut_and_kept():
+    cfg = Config(model="bge-m3")
+    chunks, _ = chunk_note(cfg, note(), "a" * 20_000)
+    assert all(len(doc_input(cfg, c.heading, c.text)) <= 8192 for c in chunks)
+    assert "".join(c.text for c in chunks) == "a" * 20_000
+
+
+def test_the_default_model_does_not_cut_a_chunk_of_normal_length():
+    body = "# A\n" + "\n\n".join(words(120) for _ in range(5))
+    chunks, _ = chunk_note(Config(), note(), body)
+    assert [len(c.text.split()) for c in chunks] == [240, 240, 120]

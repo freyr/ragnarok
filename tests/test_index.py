@@ -257,7 +257,9 @@ def test_two_index_files_share_one_cache(cfg):
     assert len(cache_rows(cfg)) == first.embedded
 
 
-@pytest.mark.parametrize("change", [{"doc_prefix": "passage: {title}\n"}, {"dimension": 16}, {"model": "other-model"}])
+@pytest.mark.parametrize(
+    "change", [{"doc_template": "passage: {title}\n"}, {"dimension": 16}, {"model": "other-model"}]
+)
 def test_an_index_with_other_embedding_settings_does_not_use_the_cache_entries(cfg, change):
     _, _, first = build(cfg)
     other = dataclasses.replace(cfg, index_path=cfg.data_dir / "other.db", **change)
