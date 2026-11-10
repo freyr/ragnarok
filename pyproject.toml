@@ -69,3 +69,10 @@ python_version = "3.12"
 # sqlite-vec ships no type information.
 module = ["sqlite_vec"]
 ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["ragnarok"]
+
+[tool.coverage.report]
+# The line coverage of the tests, rounded down. Raise it when the coverage grows.
+fail_under = 85
