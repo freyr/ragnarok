@@ -1,8 +1,8 @@
 # Changelog of the plugins
 
-All notable changes to the Claude Code plugins and the marketplace are listed here. Versions follow
-[Semantic Versioning](https://semver.org). A release is made when a commit on `main` that changes `plugins/`
-or `.claude-plugin/` holds `[major]`, `[minor]` or `[patch]`. The tags are `plugin-vX.Y.Z`.
+This file holds the plugin releases up to 0.5.0. Versions follow [Semantic Versioning](https://semver.org).
+The later releases are on the [GitHub releases](https://github.com/freyr/ragnarok-bundle/releases) page, with
+the tags `ragnarok--vX.Y.Z`. The README of the repository describes the release process.
 
 Releases 0.1.0 to 0.5.0 were made before the plugins moved into this repository. Their links go to the
 archived repository `freyr-mg/ragnarok-claude-plugin`.

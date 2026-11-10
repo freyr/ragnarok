@@ -1,19 +1,12 @@
-name: plugins-ci
+name: CI
 
-# Checks of the Claude Code plugins and the marketplace. The server has its own checks in publish.yml.
+# All checks of the MCP server and the Claude Code plugins. The one required check is `ci-gate`.
+# Publishing is in publish.yml (tags server-v*); tags come from release.yml.
 
 on:
   pull_request:
-    paths:
-      - ".claude-plugin/**"
-      - "plugins/**"
-      - "templates/**"
-      - "scripts/**"
-      - "cliff.toml"
-      - ".markdownlint-cli2.jsonc"
-      - ".github/workflows/plugins-*.yml"
-  workflow_call:
-  workflow_dispatch:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -27,6 +20,37 @@ env:
   CLAUDE_CODE_VERSION: "2.1.318"
 
 jobs:
+  test:
+    name: Test (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: false
+      - name: pytest
+        run: uv run --frozen pytest -q
+
+  build:
+    name: Build (wheel and sdist)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: false
+      - name: Build
+        run: uv build
+      - name: Check the wheel holds the config template
+        run: unzip -l dist/*.whl | grep -q 'ragnarok/config.example.toml'
+      - name: Check the MCP Registry name in the README
+        run: |
+          grep -q '<!-- mcp-name: io.github.freyr/ragnarok -->' README.md
+
   marketplace:
     name: Marketplace (Anthropic validate-plugins)
     runs-on: ubuntu-latest
@@ -59,12 +83,19 @@ jobs:
         run: scripts/validate-plugins.sh
 
   lint:
-    name: Lint (Markdown, shell, workflows)
+    name: Lint (ruff, Markdown, shell, workflows)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: false
+      - name: ruff check
+        run: uv run --frozen ruff check .
+      - name: ruff format
+        run: uv run --frozen ruff format --check .
       - name: markdownlint
         uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
         with:
@@ -91,8 +122,8 @@ jobs:
         # The gitleaks action needs a paid license on an organization repository, so run the CLI.
         # The version and the SHA-256 of the archive are pinned; .gitleaks.toml holds the allowlist.
         env:
-          GITLEAKS_VERSION: 8.24.0
-          GITLEAKS_SHA256: cb49b7de5ee986510fe8666ca0273a6cc15eb82571f2f14832c9e8920751f3a4
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
         run: |
           archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           curl -fsSLO "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
@@ -106,21 +137,12 @@ jobs:
           # Pin zizmor itself, so a new audit cannot fail CI without a change in this repository.
           version: 1.31.1
 
-  changelog:
-    name: Changelog preview
+  ci-gate:
+    # The one required check. It fails when a needed job failed or was cancelled.
+    if: always()
+    needs: [test, build, marketplace, plugins, lint, security]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: freyr/.github/actions/ci-gate@3f8fbbcf74283946ee3a7f63e21dd19bf02cdb77 # v1.0.0
         with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: git-cliff (unreleased changes)
-        id: cliff
-        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
-        with:
-          config: cliff.toml
-          args: --unreleased --strip header --include-path "plugins/**" --include-path ".claude-plugin/**"
-      - name: Write the preview to the job summary
-        env:
-          CONTENT: ${{ steps.cliff.outputs.content }}
-        run: printf '%s\n' "$CONTENT" >>"$GITHUB_STEP_SUMMARY"
+          results: ${{ join(needs.*.result, ' ') }}

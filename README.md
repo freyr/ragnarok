@@ -273,15 +273,16 @@ This repository holds the MCP server and the Claude Code plugin marketplace `rag
 ```text
 src/ragnarok/  tests/             the MCP server, the PyPI package ragnarok-mcp
 pyproject.toml  server.json       the package and the MCP Registry entry
-CHANGELOG.md                      the changelog of the server
+CHANGELOG.md                      the changelog of the server up to 2.1.1
 .claude-plugin/marketplace.json   the marketplace "ragnarok": lists each plugin and its folder
 plugins/<name>/                   one folder for each plugin, with .claude-plugin/plugin.json
-plugins/CHANGELOG.md              the changelog of the plugins
+plugins/CHANGELOG.md              the changelog of the plugins up to 0.5.0
 templates/plugin/                 the skeleton for a new plugin
-scripts/                          the version bump and the validation of the plugins
+scripts/                          the validation of the plugins
 ```
 
-The server and the plugins have separate versions and tags: `server-vX.Y.Z` and `plugin-vX.Y.Z`.
+The server and the plugin have separate versions and tags: `server-vX.Y.Z` and `ragnarok--vX.Y.Z`.
+The GitHub releases are the changelog.
 
 ## Development
 
@@ -308,36 +309,43 @@ claude plugin marketplace add <path of the checkout>
 
 To add a plugin, copy `templates/plugin/` to `plugins/<name>/`, replace `PLUGIN_NAME` and
 `ONE_LINE_DESCRIPTION`, and add an entry to `.claude-plugin/marketplace.json`. `scripts/validate-plugins.sh`
-validates all plugins. Do not change a plugin `version` by hand.
+validates all plugins. Add the plugin as a package to `.github/release.json`. Do not change a plugin
+`version` by hand.
 
-### Server release
+### Pull requests and releases
 
-1. Set the version in `pyproject.toml` and in both `version` fields of `server.json`, and add the section to
-   `CHANGELOG.md`.
-2. After the merge, push the tag: `git tag server-v1.2.3 && git push origin server-v1.2.3`.
-3. The workflow `publish.yml` checks that the three versions match the tag, runs the tests, publishes the
-   package to PyPI with trusted publishing, then publishes `server.json` to the MCP Registry.
+All changes to `main` go through a pull request. The PR is merged with squash, so the PR title is the commit
+title on `main`. The PR title follows [Conventional Commits](https://www.conventionalcommits.org) and sets the
+release:
 
-The tags `v1.0.0` to `v2.1.0` are the server releases before the plugins moved into this repository.
-
-### Plugin release
-
-All plugins and the marketplace share one version. Each push to `main` that changes `plugins/` or
-`.claude-plugin/` runs `plugins-release.yml`. It looks at the commit messages since the last `plugin-v` tag.
-A marker in a commit message selects the release:
-
-| Marker | Release | Example |
+| PR title | Release | Example |
 | --- | --- | --- |
-| `[major]` | 1.4.2 → 2.0.0 | `Rename the search skill [major]` |
-| `[minor]` | 1.4.2 → 1.5.0 | `Add the setup command [minor]` |
-| `[patch]` | 1.4.2 → 1.4.3 | `Fix the hook matcher [patch]` |
-| none, or `[none]` | no release | `Edit the README` |
+| `feat!: …`, or `BREAKING CHANGE:` in the PR body | major | `feat(server)!: remove the write tools` |
+| `feat: …` | minor | `feat(ragnarok): add the setup command` |
+| `fix: …`, `perf: …`, `revert: …` | patch | `fix(server): keep the cache on rebuild` |
+| `docs:`, `test:`, `ci:`, `build:`, `refactor:`, `chore:`, `style:` | none | `docs: explain the path rules` |
 
-Put a marker only in a commit that changes the plugins: the workflow reads all commit messages since the
-last plugin tag. When a marker is found, the workflow runs `plugins-ci.yml`, sets the new version in
-`.claude-plugin/marketplace.json` and in every `plugin.json`, adds the section to `plugins/CHANGELOG.md` with
-[git-cliff](https://git-cliff.org) (`cliff.toml`), commits, tags `plugin-vX.Y.Z` and publishes a GitHub
-release.
+The scope names the package: `server` or `ragnarok` (the plugin). `.github/release.json` gives the packages,
+their folders, their tags and their version files:
+
+| Package | Files | Tag | Version files |
+| --- | --- | --- | --- |
+| `server` | the repository, except `plugins/`, `.claude-plugin/`, `templates/`, `scripts/`, `tests/`, `docs/` and the repository files | `server-vX.Y.Z` | `pyproject.toml`, both `version` fields of `server.json` |
+| `ragnarok` | `plugins/ragnarok/`, except its `README.md` | `ragnarok--vX.Y.Z` | `plugins/ragnarok/.claude-plugin/plugin.json`, `metadata.version` of `.claude-plugin/marketplace.json` |
+
+Only a package with changed files gets a release. A change to a shipped file of the plugin is a change of
+its behavior, so the plugin gets at least a patch release, also for a `docs:` or `refactor:` title.
+
+1. The `version` job (`pr.yml`) computes the next version of each changed package from the PR title and
+   commits the version files to the PR branch. Do not change a version by hand.
+2. The required checks are `pr-title`, `version` and `ci-gate` (`ci.yml`).
+3. After the merge, `release.yml` creates the tag and the GitHub release of each package whose version
+   changed. It pushes no commit. The GitHub release is the changelog.
+4. A tag `server-vX.Y.Z` starts `publish.yml`. It checks that the versions match the tag, builds the package,
+   publishes it to PyPI with trusted publishing, then publishes `server.json` to the MCP Registry.
+
+The tags `v1.0.0` to `v2.1.0` are the server releases before the plugins moved into this repository. The tag
+`plugin-v0.5.0` is the last plugin release before the tag form `ragnarok--vX.Y.Z`.
 
 ## License
 
