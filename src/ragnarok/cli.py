@@ -76,12 +76,14 @@ def build_parser() -> argparse.ArgumentParser:
     bc.add_argument("--margin", type=float, default=0.05, help="real set: the no-regression margin (default 0.05)")
     bc.add_argument("base", metavar="A", help="the variant to compare with")
     bc.add_argument("others", metavar="B", nargs="+", help="one or more variants")
-    bv = bench.add_parser("convert", help="Convert a draft set of `ragnarok eval` to a set file of version 2")
-    bv.add_argument("old", type=Path, help="the draft set file")
+    bv = bench.add_parser("convert", help="Convert draft, health or KB sets to a set file of version 2")
+    bv.add_argument("old", type=Path, nargs="+", help="the old set files, in the order of precedence")
     bv.add_argument("--out", required=True, type=Path, help="the new set file")
     bv.add_argument("--name", required=True, help="the set name in the header")
     bv.add_argument("--kind", required=True, choices=["synthetic", "real"])
     bv.add_argument("--corpus", required=True, help="the corpus of the set, a table [corpora.<name>] of the config")
+    bv.add_argument("--path-map", type=Path, help="a TSV file with the columns old and new: the new path of an old one")
+    bv.add_argument("--area", action="append", dest="areas", help="keep only the questions of this area (repeatable)")
     return parser
 
 
@@ -251,14 +253,16 @@ def _bench_compare(cfg, args) -> int:
 def _bench_convert(cfg, args) -> int:
     from dataclasses import replace
 
-    from .bench import convert, write_set
+    from .bench import convert, read_path_map, write_set
 
     if args.corpus not in cfg.corpora:
         print(f"ragnarok bench convert: no corpus {args.corpus!r} in the configuration", file=sys.stderr)
         return 1
     corpus = cfg.corpora[args.corpus]
     ccfg = replace(cfg, root=corpus.root, vaults=list(corpus.vaults), vault_paths={})
-    questions, skipped = convert(json.loads(args.old.read_text()), ccfg)
+    old = [q for path in args.old for q in json.loads(path.read_text())]
+    path_map = read_path_map(args.path_map) if args.path_map else None
+    questions, skipped = convert(old, ccfg, path_map, args.areas)
     for qid, reason in skipped:
         print(f"not converted {qid}: {reason}", file=sys.stderr)
     write_set(args.out, args.name, args.kind, args.corpus, questions)

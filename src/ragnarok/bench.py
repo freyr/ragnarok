@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import sqlite3
@@ -105,29 +106,58 @@ def load_set(path: Path) -> dict:
     return data
 
 
-def convert(old: list[dict], cfg: Config) -> tuple[list[dict], list[tuple[str, str]]]:
-    """The questions of a draft set of evaluate.py in the format v2, and the (id, reason) of each question that it
-    cannot convert. stratum = the old type, cluster = the first expected path, area = the area that the metadata rules
-    give the first expected note on cfg ("unknown" when the note is absent)."""
+KB_KEYS = ("gold_eligibility", "gold_route", "gold_claims", "when")  # the KB model parts of the gold format
+
+
+def read_path_map(path: Path) -> dict[str, str]:
+    """The path map of a TSV file with the columns old and new (more columns are ignored)."""
+    with open(path, newline="") as f:
+        return {row["old"]: row["new"] for row in csv.DictReader(f, delimiter="\t")}
+
+
+def convert(
+    old: list[dict], cfg: Config, path_map: dict[str, str] | None = None, areas: list[str] | None = None
+) -> tuple[list[dict], list[tuple[str, str]]]:
+    """The questions of old sets in the format v2, and the (id, reason) of each question that it does not convert.
+
+    Two formats: the draft format of evaluate.py (`expected`, `type`, `note`) and the gold format of the health and
+    KB sets (`gold` as a list of {path, grade}, `class`). The gold format keeps its other keys, drops the KB keys and
+    takes a gold path of grade 1 or more (no grade counts as 1). The path map replaces old expected paths. cluster =
+    the first expected path that is a note on cfg, else the first expected path; area = the area that the metadata
+    rules give the cluster note ("unknown" when it is absent). With areas, a question of another area is not
+    converted. A question with the text of an earlier question is not converted; an id that an earlier question has
+    gets the prefix of its stratum."""
+    path_map = path_map or {}
     questions, skipped = [], []
+    texts: dict[str, str] = {}
     for q in old:
-        expected = list(q.get("expected") or [])
-        if not expected:
+        if "gold" in q:
+            paths = [g["path"] for g in q["gold"] if g.get("grade", 1) >= 1]
+            new = {k: v for k, v in q.items() if k not in KB_KEYS + ("id", "class", "gold")}
+            stratum = q.get("class") or "none"
+        else:
+            paths = list(q.get("expected") or [])
+            new = {"question": q["question"]}
+            stratum = q.get("type") or "none"
+        if not paths:
             skipped.append((q["id"], "no expected path"))
             continue
-        if not all(e.endswith(".md") for e in expected):
+        if not all(e.endswith(".md") for e in paths):
             skipped.append((q["id"], "an expected path is a folder, not a note"))
             continue
-        first = expected[0]
-        area = resolve_file(cfg, first).area if cfg.note_path(first).is_file() else "unknown"
-        new = {
-            "id": q["id"],
-            "question": q["question"],
-            "expected": expected,
-            "stratum": q.get("type") or "none",
-            "area": area,
-            "cluster": first,
-        }
+        expected = list(dict.fromkeys(path_map.get(e, e) for e in paths))
+        cluster = next((e for e in expected if cfg.note_path(e).is_file()), expected[0])
+        area = resolve_file(cfg, cluster).area if cfg.note_path(cluster).is_file() else "unknown"
+        if areas is not None and area not in areas:
+            skipped.append((q["id"], f"the area {area} is not selected"))
+            continue
+        text = q["question"].strip().lower()
+        if text in texts:
+            skipped.append((q["id"], f"the same text as {texts[text]}"))
+            continue
+        qid = q["id"] if q["id"] not in texts.values() else f"{stratum}-{q['id']}"
+        texts[text] = qid
+        new = {"id": qid, **new, "expected": expected, "stratum": stratum, "area": area, "cluster": cluster}
         if q.get("note"):
             new["notes"] = q["note"]
         questions.append(new)
