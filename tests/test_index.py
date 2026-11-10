@@ -190,10 +190,9 @@ def test_connect_migrates_an_older_index_and_its_cache_with_no_embedding(cfg, re
     _, built = old_index(cfg, release)
     conn = connect(cfg)
     assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == ("3",)
-    without_cache = schema_1_1_0()
-    del without_cache["embed_cache"]
-    without_cache["indexes"].remove("sqlite_autoindex_embed_cache_1")
-    assert tables(conn) == without_cache
+    # the old cache table stays, so a 2.0.0 server that still runs on this index keeps working
+    assert tables(conn) == schema_1_1_0()
+    assert count(conn, "SELECT COUNT(*) FROM main.embed_cache") == built.embedded
     # a 1.x index derives the metadata of all notes again on the next update; a 2.0.0 index keeps its rules hash
     assert status(cfg, conn)["rules_hash"] == (rules_hash(cfg) if release == "2.0.0" else None)
     conn.close()
@@ -213,6 +212,36 @@ def test_connect_migrates_an_older_index_and_its_cache_with_no_embedding(cfg, re
     rebuilt = run_index(cfg, monkeypatch, capsys, "--rebuild")
     assert (rebuilt["added"], rebuilt["chunks"], rebuilt["embedded"]) == (built.notes, built.chunks, 0)
     assert len(cache_rows(cfg)) == built.embedded
+
+
+@pytest.mark.parametrize("release", ["1.2.0", "2.0.0"])
+def test_a_second_migration_of_the_same_index_changes_nothing(cfg, release):
+    # two servers start at the same time: both read the old version, the second migrates after the first
+    old_index(cfg, release)
+    conn = connect(cfg)
+    update(cfg, conn, FakeEmbedder())
+    before = (tables(conn), dict(conn.execute("SELECT key, value FROM meta")), cache_rows(cfg))
+    index._migrate(cfg, conn, 1 if release == "1.2.0" else 2)
+    assert (tables(conn), dict(conn.execute("SELECT key, value FROM meta")), cache_rows(cfg)) == before
+
+
+def test_cache_entries_that_another_index_writes_during_the_embedding_do_not_stop_the_update(cfg):
+    conn, _, _ = build(cfg)
+    other = connect(dataclasses.replace(cfg, index_path=cfg.data_dir / "variants" / "v" / "c" / "index.db"))
+    os.utime(cfg.root / "Home/Heating/notes/boiler.md", ns=(1, 1))  # a touched note writes before the embedding
+    (cfg.root / "Home/new.md").write_text("# New\n\nA new note about the garden shed roof.\n")
+
+    class OtherWriterEmbedder(FakeEmbedder):
+        def embed_docs(self, items):
+            other.execute(
+                "INSERT INTO cache.embed_cache (model, dimension, template, text_hash, vector) VALUES (?, ?, ?, ?, ?)",
+                ("other-model", 8, "", "x", b""),
+            )
+            other.commit()
+            return super().embed_docs(items)
+
+    result = update(cfg, conn, OtherWriterEmbedder())
+    assert (result.touched, result.added) == (1, 1) and result.embedded > 0
 
 
 def test_two_index_files_share_one_cache(cfg):

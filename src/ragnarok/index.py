@@ -151,12 +151,18 @@ def _migrate(cfg: Config, conn: sqlite3.Connection, version: int) -> None:
 
     From version 1: drop the knowledge-base tables and columns, and remove the rules hash, so the next update derives
     the metadata of all notes again from the embedding cache, with no new embedding.
-    From versions 1 and 2: move the embedding cache of the index file to the shared cache, with the key of the current
-    model, dimension and template; the text hash of an entry does not change."""
+    From versions 1 and 2: copy the embedding cache of the index file to the shared cache, with the key of the current
+    model, dimension and template; the text hash of an entry does not change. The old table stays, because a server of
+    an older release that still runs on this index reads and writes it."""
     # IMMEDIATE takes the write locks at once (of the index, then of the cache), so the busy timeout applies while
     # another connection writes.
     conn.execute("BEGIN IMMEDIATE")
     try:
+        # another process that started at the same time can have migrated the index while this one waited for the lock
+        (current,) = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+        if current == str(SCHEMA_VERSION):
+            conn.rollback()
+            return
         if version < 2:
             for table in REMOVED_TABLES:
                 conn.execute(f"DROP TABLE IF EXISTS {table}")
@@ -170,7 +176,6 @@ def _migrate(cfg: Config, conn: sqlite3.Connection, version: int) -> None:
             " SELECT ?, ?, ?, text_hash, vector FROM main.embed_cache",
             _key(cfg),
         )
-        conn.execute("DROP TABLE main.embed_cache")
         conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION),))
         conn.commit()
     except Exception:
@@ -346,6 +351,10 @@ def update(
 
 
 def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pending], result: UpdateResult) -> None:
+    # end the transaction of the earlier writes (a touched note), so the read of the cache below is not a snapshot
+    # inside it: another index can write the cache during the embedding, and a write after a stale snapshot fails at
+    # once (SQLITE_BUSY_SNAPSHOT), with no busy timeout
+    conn.commit()
     # embed the chunks that are not in the cache, in one call for the group
     hashes = {}
     for p in pending:
@@ -418,7 +427,8 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
         conn.executemany("INSERT INTO links (from_note, target) VALUES (?, ?)", [(note_id, t) for t in p.links])
         conn.executemany("INSERT INTO jira (key, note_id) VALUES (?, ?)", [(k, note_id) for k in m.jira])
     # after the writes to the index: each writer takes the lock of the index before the lock of the shared cache, so
-    # two writers of the same index cannot wait for each other
+    # two writers of the same index cannot wait for each other; this transaction has read nothing of the cache, so the
+    # busy timeout applies to the write
     conn.executemany(
         "INSERT OR IGNORE INTO cache.embed_cache (model, dimension, template, text_hash, vector)"
         " VALUES (?, ?, ?, ?, ?)",
