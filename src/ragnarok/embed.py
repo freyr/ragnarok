@@ -18,8 +18,13 @@ def doc_input(cfg: Config, heading: str, text: str) -> str:
     return cfg.doc_prefix.format(title=heading) + text
 
 
+def template(cfg: Config) -> str:
+    """The document template part of the cache key: how a chunk becomes the text that goes to the model."""
+    return cfg.doc_prefix
+
+
 def input_hash(cfg: Config, heading: str, text: str) -> str:
-    """Cache key of a chunk: the model and the full text that goes to the model."""
+    """The text hash of a chunk in the cache key: the model and the full text that goes to the model."""
     return hashlib.sha1(f"{cfg.model}\0{doc_input(cfg, heading, text)}".encode()).hexdigest()
 
 

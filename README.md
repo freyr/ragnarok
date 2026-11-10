@@ -200,7 +200,7 @@ Without frontmatter, the path rules give the metadata. The default rules work fo
 |---|---|
 | `ragnarok init` | Sets up this computer (see Setup). |
 | `ragnarok doctor` | Checks the setup. |
-| `ragnarok index [--rebuild]` | Adds, changes and removes notes in the index. After a change of the path rules, the private paths or the markers, it derives the metadata of all notes again, with no new embeddings. When a `.md` marker file is added or removed, it does the same for the notes under the folder of that file. `--rebuild` is needed only after a change of `model`, `dimension`, `min_words` or `max_words`. |
+| `ragnarok index [--rebuild]` | Adds, changes and removes notes in the index. After a change of the path rules, the private paths or the markers, it derives the metadata of all notes again, with no new embeddings. When a `.md` marker file is added or removed, it does the same for the notes under the folder of that file. `--rebuild` is needed only after a change of `model`, `dimension`, `min_words` or `max_words`. It keeps the embedding cache, so it embeds only the chunk texts that are not in the cache. |
 | `ragnarok status` | Shows the size and the state of the index. |
 | `ragnarok search "<query>"` | Searches from the terminal. |
 | `ragnarok inspect <path>...` | Shows the metadata of notes. |
@@ -221,7 +221,8 @@ ignores `config.toml`, `data/` and `logs/`.
 | Path | What |
 |---|---|
 | `config.toml` | The configuration of this computer. |
-| `data/index.db` | The SQLite index. Copy it to a second computer to skip the first index. |
+| `data/index.db` | The SQLite index. Copy it and `data/embed-cache.db` to a second computer to skip the first index. |
+| `data/embed-cache.db` | The embedding cache that all index files share. Its key is the model, the dimension, the document template and the text hash. |
 | `data/backups/` | The vault archives that `backfill apply` makes before it writes. |
 | `data/proposals/` | The output of `backfill propose` and `backfill export`. |
 | `data/eval/` | Your question sets (`sets/`), the evaluation results and the mirror of the agent evaluation. |

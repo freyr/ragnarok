@@ -139,34 +139,68 @@ def schema_1_1_0():
     return tables(conn)
 
 
+def cache_file(cfg):
+    """The shared embedding cache of the home: data_dir/embed-cache.db."""
+    return cfg.data_dir / "embed-cache.db"
+
+
+def cache_rows(cfg) -> list[tuple]:
+    conn = sqlite3.connect(cache_file(cfg))
+    try:
+        return conn.execute("SELECT model, dimension, template, text_hash FROM embed_cache").fetchall()
+    finally:
+        conn.close()
+
+
 def old_index(cfg, release):
-    """An index of schema version 1 with the notes of the vault, as release 1.1.0 or 1.2.0 left it."""
+    """An index with the notes of the vault and the embedding cache in the index file, as release 1.1.0, 1.2.0
+    (schema version 1) or 2.0.0 (schema version 2) left it."""
     conn, emb, built = build(cfg)
+    conn.close()
+    conn = raw(cfg.index_path)
+    if cache_file(cfg).exists():
+        # the cache key of the old releases: the hash of the model and of the text that goes to the model
+        conn.execute("ATTACH DATABASE ? AS cache", (str(cache_file(cfg)),))
+        conn.execute("CREATE TABLE embed_cache (text_hash TEXT PRIMARY KEY, model TEXT NOT NULL, vector BLOB NOT NULL)")
+        conn.execute("INSERT INTO main.embed_cache SELECT text_hash, model, vector FROM cache.embed_cache")
+        conn.commit()
+        conn.execute("DETACH DATABASE cache")
+        for suffix in ("", "-wal", "-shm"):
+            cache_file(cfg).with_name(cache_file(cfg).name + suffix).unlink(missing_ok=True)
     if release == "1.2.0":
         conn.executescript(ADDED_1_2_0)
-    conn.execute("UPDATE meta SET value = '1' WHERE key = 'schema_version'")
+    version = "2" if release == "2.0.0" else "1"
+    conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (version,))
     conn.commit()
     conn.close()
     return emb, built
 
 
-def run_index(cfg, monkeypatch, capsys) -> dict:
+def run_index(cfg, monkeypatch, capsys, *args) -> dict:
     """`ragnarok index` with the fake embedder; the JSON line that it prints."""
     from ragnarok import cli, embed
 
     monkeypatch.setattr(embed, "OllamaEmbedder", lambda cfg: FakeEmbedder())
-    assert cli.cmd_index(cfg, cli.build_parser().parse_args(["index"])) == 0
+    assert cli.cmd_index(cfg, cli.build_parser().parse_args(["index", *args])) == 0
     return json.loads(capsys.readouterr().out)
 
 
-@pytest.mark.parametrize("release", ["1.1.0", "1.2.0"])
-def test_connect_migrates_an_index_of_schema_1_with_no_embedding(cfg, release, monkeypatch, capsys):
+@pytest.mark.parametrize("release", ["1.1.0", "1.2.0", "2.0.0"])
+def test_connect_migrates_an_older_index_and_its_cache_with_no_embedding(cfg, release, monkeypatch, capsys):
     _, built = old_index(cfg, release)
     conn = connect(cfg)
-    assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == ("2",)
-    assert tables(conn) == schema_1_1_0()
-    assert status(cfg, conn)["rules_hash"] is None  # the next update derives the metadata of all notes again
+    assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == ("3",)
+    without_cache = schema_1_1_0()
+    del without_cache["embed_cache"]
+    without_cache["indexes"].remove("sqlite_autoindex_embed_cache_1")
+    assert tables(conn) == without_cache
+    # a 1.x index derives the metadata of all notes again on the next update; a 2.0.0 index keeps its rules hash
+    assert status(cfg, conn)["rules_hash"] == (rules_hash(cfg) if release == "2.0.0" else None)
     conn.close()
+    # each old entry gets the key of the current model, dimension and template
+    rows = cache_rows(cfg)
+    assert len(rows) == built.embedded
+    assert {r[:3] for r in rows} == {(cfg.model, cfg.dimension, "title: {title} | text: ")}
     result = run_index(cfg, monkeypatch, capsys)
     assert result["embedded"] == 0
     assert (result["notes"], result["added"], result["changed"], result["removed"]) == (built.notes, 0, 0, 0)
@@ -175,6 +209,33 @@ def test_connect_migrates_an_index_of_schema_1_with_no_embedding(cfg, release, m
     assert st["rules_hash"] == rules_hash(cfg)
     assert st["notes"] == built.notes and st["chunks"] == st["vectors"] == built.chunks
     assert run_index(cfg, monkeypatch, capsys)["embedded"] == 0
+    # --rebuild deletes the index file, not the cache, so all chunks come from the converted entries
+    rebuilt = run_index(cfg, monkeypatch, capsys, "--rebuild")
+    assert (rebuilt["added"], rebuilt["chunks"], rebuilt["embedded"]) == (built.notes, built.chunks, 0)
+    assert len(cache_rows(cfg)) == built.embedded
+
+
+def test_two_index_files_share_one_cache(cfg):
+    _, _, first = build(cfg)
+    assert first.embedded > 0
+    other = dataclasses.replace(cfg, index_path=cfg.data_dir / "variants" / "v" / "c" / "index.db")
+    emb = FakeEmbedder()
+    result = update(other, connect(other), emb)
+    assert (result.added, result.chunks) == (first.added, first.chunks)
+    assert result.embedded == emb.calls == 0
+    for path in (cfg.index_path, other.index_path):
+        assert "embed_cache" not in tables(raw(path))
+    assert len(cache_rows(cfg)) == first.embedded
+
+
+@pytest.mark.parametrize("change", [{"doc_prefix": "passage: {title}\n"}, {"dimension": 16}, {"model": "other-model"}])
+def test_an_index_with_other_embedding_settings_does_not_use_the_cache_entries(cfg, change):
+    _, _, first = build(cfg)
+    other = dataclasses.replace(cfg, index_path=cfg.data_dir / "other.db", **change)
+    emb = FakeEmbedder(dimension=other.dimension)
+    result = update(other, connect(other), emb)
+    assert result.embedded == emb.calls == first.embedded
+    assert len(cache_rows(cfg)) == 2 * first.embedded
 
 
 def test_a_failed_migration_leaves_the_old_index_usable(cfg):
@@ -193,7 +254,7 @@ def test_a_failed_migration_leaves_the_old_index_usable(cfg):
     assert conn.execute("SELECT count(*) FROM refs").fetchone() == (1,)
 
 
-@pytest.mark.parametrize("version", ["0", "3"])
+@pytest.mark.parametrize("version", ["0", "4"])
 def test_an_index_of_another_schema_version_is_refused(cfg, version):
     conn, _, _ = build(cfg)
     conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (version,))

@@ -1,4 +1,4 @@
-"""SQLite index: notes, chunks, FTS5, sqlite-vec, embedding cache, links and Jira keys."""
+"""SQLite index: notes, chunks, FTS5, sqlite-vec, links and Jira keys, and the shared embedding cache."""
 
 from __future__ import annotations
 
@@ -9,15 +9,16 @@ import sqlite3
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import sqlite_vec
 
 from .config import Config, rules_hash
-from .embed import input_hash
+from .embed import input_hash, template
 from .metadata import iter_notes, read_note, resolve
 from .splitter import chunk_note
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 GROUP = 64  # notes per transaction during an update
 SCAN_LIMIT = 20  # changed notes for each scan before a server call
 NOT_CURRENT = "The index is not current. Run `ragnarok index`."
@@ -63,13 +64,30 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
     sensitivity TEXT,
     status TEXT
 );
-CREATE TABLE IF NOT EXISTS embed_cache (text_hash TEXT PRIMARY KEY, model TEXT NOT NULL, vector BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS links (from_note INTEGER NOT NULL, target TEXT NOT NULL, to_note INTEGER);
 CREATE INDEX IF NOT EXISTS links_from ON links (from_note);
 CREATE INDEX IF NOT EXISTS links_to ON links (to_note);
 CREATE TABLE IF NOT EXISTS jira (key TEXT NOT NULL, note_id INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS jira_key ON jira (key);
+CREATE TABLE IF NOT EXISTS cache.embed_cache (
+    model TEXT NOT NULL,
+    dimension INTEGER NOT NULL,
+    template TEXT NOT NULL,
+    text_hash TEXT NOT NULL,
+    vector BLOB NOT NULL,
+    PRIMARY KEY (model, dimension, template, text_hash)
+) WITHOUT ROWID;
 """
+
+
+def cache_path(cfg: Config) -> Path:
+    """The embedding cache that all index files of the home share: data_dir/embed-cache.db."""
+    return cfg.data_dir / "embed-cache.db"
+
+
+def _key(cfg: Config) -> tuple[str, int, str]:
+    """The embedding settings part of the cache key; the text hash completes it."""
+    return cfg.model, cfg.dimension, template(cfg)
 
 
 class IndexMismatch(RuntimeError):
@@ -77,17 +95,22 @@ class IndexMismatch(RuntimeError):
 
 
 def connect(cfg: Config) -> sqlite3.Connection:
-    """Open the index, create the schema, and check that the model and the dimension match.
+    """Open the index, attach the shared embedding cache as `cache`, create the schema, and check that the model and
+    the dimension match.
 
-    An index of the previous schema version is migrated in place, with no new embedding."""
+    An index of an older schema version is migrated in place, with no new embedding."""
     cfg.index_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg.data_dir.mkdir(parents=True, exist_ok=True)
     # the MCP server runs each call in a worker thread; it serializes the calls with a lock
     conn = sqlite3.connect(cfg.index_path, timeout=30, check_same_thread=False)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
+    # several processes (MCP servers, the CLI) write the cache; the busy timeout of the connection also applies to it
+    conn.execute("ATTACH DATABASE ? AS cache", (str(cache_path(cfg)),))
+    for schema in ("main", "cache"):
+        conn.execute(f"PRAGMA {schema}.journal_mode=WAL")
+        conn.execute(f"PRAGMA {schema}.synchronous=NORMAL")
     conn.executescript(_schema(cfg.dimension))
     expected = {"model": cfg.model, "dimension": str(cfg.dimension), "schema_version": str(SCHEMA_VERSION)}
     stored = dict(conn.execute("SELECT key, value FROM meta").fetchall())
@@ -97,11 +120,11 @@ def connect(cfg: Config) -> sqlite3.Connection:
         )
         conn.commit()
         return conn
-    if stored.get("schema_version") == str(SCHEMA_VERSION - 1) and all(
+    if stored.get("schema_version") in MIGRATES and all(
         stored.get(k) == v for k, v in expected.items() if k != "schema_version"
     ):
         try:
-            _migrate(conn)
+            _migrate(cfg, conn, int(stored["schema_version"]))
         except Exception:
             conn.close()
             raise
@@ -119,23 +142,35 @@ def connect(cfg: Config) -> sqlite3.Connection:
 # of the same version has none of them
 REMOVED_TABLES = ("entities", "entity_aliases", "refs")
 REMOVED_COLUMNS = ("note_class", "validity", "as_of", "superseded_by", "subject")
+# the schema versions that connect() migrates: 1 (1.1.0, 1.2.0) and 2 (2.0.0)
+MIGRATES = ("1", "2")
 
 
-def _migrate(conn: sqlite3.Connection) -> None:
-    """Bring an index of the previous schema version to the current schema in one transaction.
+def _migrate(cfg: Config, conn: sqlite3.Connection, version: int) -> None:
+    """Bring an index of an older schema version to the current schema in one transaction.
 
-    The rules hash is removed, so the next update derives the metadata of all notes again from the embedding cache,
-    with no new embedding."""
-    # IMMEDIATE takes the write lock at once, so the busy timeout applies while another connection writes.
+    From version 1: drop the knowledge-base tables and columns, and remove the rules hash, so the next update derives
+    the metadata of all notes again from the embedding cache, with no new embedding.
+    From versions 1 and 2: move the embedding cache of the index file to the shared cache, with the key of the current
+    model, dimension and template; the text hash of an entry does not change."""
+    # IMMEDIATE takes the write locks at once (of the index, then of the cache), so the busy timeout applies while
+    # another connection writes.
     conn.execute("BEGIN IMMEDIATE")
     try:
-        for table in REMOVED_TABLES:
-            conn.execute(f"DROP TABLE IF EXISTS {table}")
-        have = {r[1] for r in conn.execute("PRAGMA table_info(notes)")}
-        for column in REMOVED_COLUMNS:
-            if column in have:
-                conn.execute(f"ALTER TABLE notes DROP COLUMN {column}")
-        conn.execute("DELETE FROM meta WHERE key = 'rules_hash'")
+        if version < 2:
+            for table in REMOVED_TABLES:
+                conn.execute(f"DROP TABLE IF EXISTS {table}")
+            have = {r[1] for r in conn.execute("PRAGMA table_info(notes)")}
+            for column in REMOVED_COLUMNS:
+                if column in have:
+                    conn.execute(f"ALTER TABLE notes DROP COLUMN {column}")
+            conn.execute("DELETE FROM meta WHERE key = 'rules_hash'")
+        conn.execute(
+            "INSERT OR IGNORE INTO cache.embed_cache (model, dimension, template, text_hash, vector)"
+            " SELECT ?, ?, ?, text_hash, vector FROM main.embed_cache",
+            _key(cfg),
+        )
+        conn.execute("DROP TABLE main.embed_cache")
         conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(SCHEMA_VERSION),))
         conn.commit()
     except Exception:
@@ -316,19 +351,20 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
     for p in pending:
         for c in p.chunks:
             hashes[input_hash(cfg, c.heading, c.text)] = (c.heading, c.text)
-    cached = set()
+    key = _key(cfg)
+    vectors = {}
     keys = list(hashes)
     for i in range(0, len(keys), 500):
         part = keys[i : i + 500]
-        q = f"SELECT text_hash FROM embed_cache WHERE text_hash IN ({','.join('?' * len(part))})"
-        cached.update(r[0] for r in conn.execute(q, part))
-    missing = [k for k in keys if k not in cached]
-    if missing:
-        vectors = embedder.embed_docs([hashes[k] for k in missing])
-        conn.executemany(
-            "INSERT OR REPLACE INTO embed_cache (text_hash, model, vector) VALUES (?, ?, ?)",
-            [(k, cfg.model, sqlite_vec.serialize_float32(v)) for k, v in zip(missing, vectors, strict=True)],
+        q = (
+            "SELECT text_hash, vector FROM cache.embed_cache WHERE model = ? AND dimension = ? AND template = ?"
+            f" AND text_hash IN ({','.join('?' * len(part))})"
         )
+        vectors.update(conn.execute(q, (*key, *part)))
+    missing = [k for k in keys if k not in vectors]
+    if missing:
+        embedded = embedder.embed_docs([hashes[k] for k in missing])
+        vectors.update((k, sqlite_vec.serialize_float32(v)) for k, v in zip(missing, embedded, strict=True))
         result.embedded += len(missing)
 
     for p in pending:
@@ -375,13 +411,19 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
             ).lastrowid
             conn.execute("INSERT INTO chunks_fts (rowid, heading, text) VALUES (?, ?, ?)", (cid, c.heading, c.text))
             conn.execute(
-                "INSERT INTO chunks_vec (chunk_id, embedding, vault, sensitivity, status)"
-                " SELECT ?, vector, ?, ?, ? FROM embed_cache WHERE text_hash = ?",
-                (cid, m.vault, m.sensitivity, m.status, th),
+                "INSERT INTO chunks_vec (chunk_id, embedding, vault, sensitivity, status) VALUES (?, ?, ?, ?, ?)",
+                (cid, vectors[th], m.vault, m.sensitivity, m.status),
             )
             result.chunks += 1
         conn.executemany("INSERT INTO links (from_note, target) VALUES (?, ?)", [(note_id, t) for t in p.links])
         conn.executemany("INSERT INTO jira (key, note_id) VALUES (?, ?)", [(k, note_id) for k in m.jira])
+    # after the writes to the index: each writer takes the lock of the index before the lock of the shared cache, so
+    # two writers of the same index cannot wait for each other
+    conn.executemany(
+        "INSERT OR IGNORE INTO cache.embed_cache (model, dimension, template, text_hash, vector)"
+        " VALUES (?, ?, ?, ?, ?)",
+        [(*key, k, vectors[k]) for k in missing],
+    )
 
 
 def _link_key(path: str) -> str:
@@ -461,7 +503,7 @@ def status(cfg: Config, conn: sqlite3.Connection) -> dict:
         "archived_notes": one("SELECT count(*) FROM notes WHERE status = 'archived'"),
         "chunks": one("SELECT count(*) FROM chunks"),
         "vectors": one("SELECT count(*) FROM chunks_vec"),
-        "cache": one("SELECT count(*) FROM embed_cache"),
+        "cache": one("SELECT count(*) FROM cache.embed_cache"),
         "links": one("SELECT count(*) FROM links"),
         "resolved_links": one("SELECT count(*) FROM links WHERE to_note IS NOT NULL"),
         "jira_keys": one("SELECT count(DISTINCT key) FROM jira"),
