@@ -10,3 +10,8 @@ dist/
 config.toml
 data/
 logs/
+.DS_Store
+node_modules/
+# Types that Claude Code generates when it loads a mod from disk
+**/.claude-plugin/types/
+.coverage

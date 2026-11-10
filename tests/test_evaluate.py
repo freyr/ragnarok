@@ -49,7 +49,8 @@ def test_inside_prefix():
 
 def test_bootstrap_interval():
     d, lo, hi = bootstrap([1, 1, 1, 0], [0, 0, 0, 0])
-    assert d == 0.75 and lo <= d <= hi
+    assert d == 0.75
+    assert lo <= d <= hi
 
 
 def test_note_precision_uses_checked_notes():

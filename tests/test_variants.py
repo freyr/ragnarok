@@ -83,7 +83,7 @@ def test_a_variant_on_a_corpus_has_its_own_index_and_shares_the_data_folder(tmp_
 def test_wrong_variant_and_corpus_tables_are_refused(tmp_path, text):
     path = tmp_path / "config.toml"
     path.write_text(text)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError):  # noqa: PT011 - each case has its own message
         load_config(path)
 
 
@@ -227,7 +227,8 @@ def test_note_vector_rows_follow_the_notes(tmp_path):
     (cfg.root / "V/R.md").write_text(sections("wr1", "wr2"))
     update(cfg, conn, emb)
     ids = {nid for (nid,) in conn.execute("SELECT note_id FROM notes_vec")}
-    assert ids == {nid for (nid,) in conn.execute("SELECT id FROM notes")} and len(ids) == 2
+    assert ids == {nid for (nid,) in conn.execute("SELECT id FROM notes")}
+    assert len(ids) == 2
     hits = search(cfg, conn, emb, "q", mode="dense")
     assert [h.path for h in hits] == ["V/Q.md", "V/R.md"]
 
@@ -364,10 +365,12 @@ def test_bench_index_refuses_an_index_of_other_variant_settings(tmp_path, monkey
     assert code == 1
     # the way out of a variant index is to delete its folder, not the index_path advice of the default index
     assert f"Delete the folder {home / 'data/variants/v/real'}" in out.err
-    assert "ragnarok bench index" in out.err and "index_path" not in out.err
+    assert "ragnarok bench index" in out.err
+    assert "index_path" not in out.err
 
 
 def test_bench_index_of_an_unknown_variant_fails(tmp_path, monkeypatch, capsys):
     bench_home(tmp_path, monkeypatch, PREFIX)
     code, out = run(capsys, "bench", "index", "--variant", "nope", "--corpus", "real")
-    assert code == 1 and "nope" in out.err
+    assert code == 1
+    assert "nope" in out.err

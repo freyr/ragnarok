@@ -21,10 +21,12 @@ import tempfile
 import threading
 import time
 import tomllib
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from string import Template
+from typing import Any
 
 from .bench import set_hash, write_set
 from .config import home_dir
@@ -181,7 +183,7 @@ def stratum_counts(n: int) -> dict[str, int]:
     return counts
 
 
-def world_config(seed: int, questions: int) -> dict:
+def world_config(seed: int, questions: int) -> dict[str, Any]:
     return {
         "generator_version": GENERATOR_VERSION,
         "seed": seed,
@@ -194,7 +196,7 @@ def world_config(seed: int, questions: int) -> dict:
     }
 
 
-def graph_hash(graph: dict) -> str:
+def graph_hash(graph: dict[str, Any]) -> str:
     body = {k: v for k, v in graph.items() if k != "hash"}
     return hashlib.sha256(
         json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
@@ -202,15 +204,15 @@ def graph_hash(graph: dict) -> str:
 
 
 class _Builder:
-    def __init__(self, world: dict):
+    def __init__(self, world: dict[str, Any]):
         self.world = world
-        self.rng = random.Random(world["seed"])
+        self.rng = random.Random(world["seed"])  # noqa: S311 - a seeded generator gives the same graph twice
         self.vault = world["vault"]
-        self.subjects: list[dict] = []
-        self.facts: list[dict] = []
-        self.notes: list[dict] = []
+        self.subjects: list[dict[str, Any]] = []
+        self.facts: list[dict[str, Any]] = []
+        self.notes: list[dict[str, Any]] = []
         self.words: set[str] = set()
-        self.tuples: set[tuple] = set()
+        self.tuples: set[tuple[Any, ...]] = set()
         self.tokens: list[str] = []
         self.dates: set[str] = set()
 
@@ -269,7 +271,9 @@ class _Builder:
 
     # subjects, facts and notes
 
-    def subject(self, cls: str, area: str, props: dict | None = None, fixed: dict | None = None) -> dict:
+    def subject(
+        self, cls: str, area: str, props: dict[str, Any] | None = None, fixed: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         while True:
             p = props or {}
             if not props:
@@ -284,15 +288,15 @@ class _Builder:
                 raise ValueError("a subject with these properties exists")
         self.tuples.add(key)
         word = self.word()
-        main = list(p.values())[0]
+        main = next(iter(p.values()))
         name = f"{word} {self.word()}" if cls == "person" else f"{word} {main}"
         s = {"id": f"s{len(self.subjects) + 1:04d}", "class": cls, "name": name, "word": word, "area": area, "props": p}
         self.subjects.append(s)
         return s
 
-    def sibling(self, s: dict) -> dict:
+    def sibling(self, s: dict[str, Any]) -> dict[str, Any]:
         """A subject of the same class, kind and area with one other property."""
-        keys = [k for k in PROPERTIES[s["class"]] if k != list(PROPERTIES[s["class"]])[0]]
+        keys = [k for k in PROPERTIES[s["class"]] if k != next(iter(PROPERTIES[s["class"]]))]
         for _ in range(200):
             k = self.rng.choice(keys)
             p = dict(s["props"])
@@ -301,7 +305,15 @@ class _Builder:
                 return self.subject(s["class"], s["area"], p)
         raise ValueError("no sibling")
 
-    def fact(self, s: dict, attribute: str, heading: str, kind: str, current=True, before=None) -> dict:
+    def fact(
+        self,
+        s: dict[str, Any],
+        attribute: str,
+        heading: str,
+        kind: str,
+        current: bool = True,
+        before: int | None = None,
+    ) -> dict[str, Any]:
         value, token = self.value(kind, before)
         f = {
             "id": f"f{len(self.facts) + 1:04d}",
@@ -317,7 +329,16 @@ class _Builder:
         self.facts.append(f)
         return f
 
-    def note(self, role: str, s: dict, facts: list[dict], area: str, in_project: bool, long=False, **kw) -> dict:
+    def note(
+        self,
+        role: str,
+        s: dict[str, Any],
+        facts: list[dict[str, Any]],
+        area: str,
+        in_project: bool,
+        long: bool = False,
+        **kw: Any,
+    ) -> dict[str, Any]:
         n = {
             "id": f"n{len(self.notes) + 1:04d}",
             "role": role,
@@ -335,10 +356,10 @@ class _Builder:
         return n
 
 
-def _pick_props(subjects: list[dict], s: dict, rng: random.Random) -> dict:
+def _pick_props(subjects: list[dict[str, Any]], s: dict[str, Any], rng: random.Random) -> dict[str, Any]:
     """The smallest property set (at least 2, the main one first, the others in a seeded order) that matches only s."""
     keys = list(s["props"])
-    order = [keys[0]] + rng.sample(keys[1:], len(keys) - 1)
+    order = [keys[0], *rng.sample(keys[1:], len(keys) - 1)]
     for size in range(2, len(order) + 1):
         props = {k: s["props"][k] for k in order[:size]}
         if matches(subjects, s["class"], props) == [s["id"]]:
@@ -346,7 +367,7 @@ def _pick_props(subjects: list[dict], s: dict, rng: random.Random) -> dict:
     raise ValueError(f"no unique property set for {s['id']}")
 
 
-def matches(subjects: list[dict], cls: str, props: dict) -> list[str]:
+def matches(subjects: list[dict[str, Any]], cls: str, props: dict[str, Any]) -> list[str]:
     return [s["id"] for s in subjects if s["class"] == cls and all(s["props"].get(k) == v for k, v in props.items())]
 
 
@@ -354,7 +375,7 @@ def _words(text: str) -> set[str]:
     return set(re.findall(r"[a-z]+", text.lower()))
 
 
-def build_graph(world: dict) -> dict:
+def build_graph(world: dict[str, Any]) -> dict[str, Any]:
     """The fact graph of a world config. The same config gives the same graph."""
     b = _Builder(world)
     rng = b.rng
@@ -363,7 +384,10 @@ def build_graph(world: dict) -> dict:
     areas = rng.sample(AREAS, max(2, min(len(AREAS), n // 40)))
     plan = [s for s, c in counts.items() for _ in range(c)]
     rng.shuffle(plan)
-    pending = []  # (stratum, question subject, asked fact, gold note, notes needed, bridge fact)
+    # (stratum, question subject, asked fact, gold note, notes needed, bridge fact)
+    pending: list[
+        tuple[str, dict[str, Any], dict[str, Any], dict[str, Any], list[dict[str, Any]], dict[str, Any] | None]
+    ] = []
     continuation_areas = []
     for stratum in plan:
         area = rng.choice(areas)
@@ -426,7 +450,7 @@ def build_graph(world: dict) -> dict:
             made.append((p, drivers, summary, nxt))
         projects += made
         # outdated notes stay in the folder of their gold note
-        by_subject = {}
+        by_subject: dict[str, Any] = {}
         for i, x in enumerate(m for m in members if m["role"] != "outdated"):
             x["project"] = made[i % len(made)][0]["id"]
             by_subject.setdefault(x["subject"], x["project"])
@@ -446,7 +470,7 @@ def build_graph(world: dict) -> dict:
     # questions, in the order of the plan, with halves in each stratum
     pending.sort(key=lambda x: b.notes.index(x[3]))
     questions = []
-    for i, (stratum, s, f, gold, needed, bridge) in enumerate(pending, start=1):
+    for i, (stratum, s, f, gold, needed, asked_bridge) in enumerate(pending, start=1):
         props = _pick_props(b.subjects, s, rng)
         fact_subject = subjects[f["subject"]]
         forbidden = [s["name"], s["word"], gold["title"], f["heading"], f["value"], f["token"]]
@@ -474,7 +498,7 @@ def build_graph(world: dict) -> dict:
                 "half": None,
                 "forbidden": list(dict.fromkeys(forbidden)),
                 "notes": [x["id"] for x in needed],
-                "bridge": bridge["id"] if bridge else None,
+                "bridge": asked_bridge["id"] if asked_bridge else None,
             }
         )
     for stratum in STRATA:
@@ -498,10 +522,10 @@ def build_graph(world: dict) -> dict:
     return graph
 
 
-def _place_notes(b: _Builder, subjects: dict, facts: dict) -> None:
+def _place_notes(b: _Builder, subjects: dict[str, Any], facts: dict[str, Any]) -> None:
     """Title, type and path of each note."""
     rng = b.rng
-    titles = {}
+    titles: dict[str, Any] = {}
     for x in b.notes:
         s = subjects[x["subject"]]
         if x["role"] in ("drivers", "summary"):
@@ -529,13 +553,13 @@ def _place_notes(b: _Builder, subjects: dict, facts: dict) -> None:
         x.setdefault("project", None)
 
 
-def _style_notes(b: _Builder, subjects: dict, facts: dict) -> None:
+def _style_notes(b: _Builder, subjects: dict[str, Any], facts: dict[str, Any]) -> None:
     """Length, headings, table, code, list, links and description of each note from the aggregate style targets."""
     rng = b.rng
     mu = math.log(STYLE["words_median"])
     sigma = math.log(STYLE["words_p90"] / STYLE["words_median"]) / 1.2816
     per_heading = STYLE["words_median"] / STYLE["headings_median"]
-    linkable = {}
+    linkable: dict[str, list[str]] = {}
     for x in b.notes:
         if x["role"] not in ("drivers", "summary"):
             linkable.setdefault(x["area"], []).append(x["title"])
@@ -575,7 +599,7 @@ def _style_notes(b: _Builder, subjects: dict, facts: dict) -> None:
         )
 
 
-def property_failures(graph: dict) -> list[tuple[str, str]]:
+def property_failures(graph: dict[str, Any]) -> list[tuple[str, str]]:
     """The (question id, detail) of each question whose property set does not match exactly its subject."""
     out = []
     classes = {s["id"]: s["class"] for s in graph["subjects"]}
@@ -589,7 +613,7 @@ def property_failures(graph: dict) -> list[tuple[str, str]]:
 # --- the work folder -----------------------------------------------------------------------------------------------
 
 
-def write_graph(out: Path, seed: int, questions: int) -> dict:
+def write_graph(out: Path, seed: int, questions: int) -> dict[str, Any]:
     out = Path(out)
     if (out / "graph.json").exists():
         raise SynthError(f"{out / 'graph.json'} exists; use a new folder")
@@ -601,14 +625,15 @@ def write_graph(out: Path, seed: int, questions: int) -> dict:
     return graph
 
 
-def _load(work: Path) -> dict:
+def _load(work: Path) -> dict[str, Any]:
     path = Path(work) / "graph.json"
     if not path.exists():
         raise SynthError(f"no graph at {path}; run `ragnarok synth graph` first")
-    return json.loads(path.read_text())
+    graph: dict[str, Any] = json.loads(path.read_text())
+    return graph
 
 
-def _state(work: Path, name: str) -> dict:
+def _state(work: Path, name: str) -> dict[str, Any]:
     path = Path(work) / name
     return json.loads(path.read_text()) if path.exists() else {}
 
@@ -621,7 +646,7 @@ class _State:
         self.data = json.loads(path.read_text()) if path.exists() else {}
         self.lock = threading.Lock()
 
-    def set(self, key: str, value: dict) -> None:
+    def set(self, key: str, value: dict[str, Any]) -> None:
         with self.lock:
             self.data[key] = value
             tmp = self.path.with_suffix(".tmp")
@@ -630,6 +655,7 @@ class _State:
 
 
 CLAUDE_WAITS = (30, 60, 120, 240, 480)
+Runner = Callable[[str, str], tuple[str, str]]  # (prompt, model) -> (text, model ID)
 
 
 def claude(prompt: str, model: str) -> tuple[str, str]:
@@ -655,7 +681,8 @@ def claude(prompt: str, model: str) -> tuple[str, str]:
     for wait in (*CLAUDE_WAITS, None):
         try:
             with tempfile.TemporaryDirectory(prefix="ragnarok-synth-") as cwd:
-                out = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=900)
+                # a fixed argument list with no shell; the prompt is one argument
+                out = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=900)  # noqa: S603
         except subprocess.TimeoutExpired:
             error = "claude -p failed: no answer in 900 s"
         else:
@@ -683,7 +710,7 @@ def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _run(items: list, fn, jobs: int) -> None:
+def _run(items: list[Any], fn: Callable[[Any], None], jobs: int) -> None:
     if jobs <= 1:
         for item in items:
             fn(item)
@@ -696,11 +723,11 @@ def _run(items: list, fn, jobs: int) -> None:
 # --- notes ---------------------------------------------------------------------------------------------------------
 
 
-def _describe(s: dict) -> str:
+def _describe(s: dict[str, Any]) -> str:
     return f"{s['name']}, a {s['class']} ({'; '.join(f'{k}: {v}' for k, v in s['props'].items())})"
 
 
-def _context(note: dict, s: dict) -> str:
+def _context(note: dict[str, Any], s: dict[str, Any]) -> str:
     if note["role"] == "outdated":
         return f"This note is archived. It records the state in {note['year']}; later notes replace its values."
     if note["role"] == "drivers":
@@ -710,7 +737,9 @@ def _context(note: dict, s: dict) -> str:
     return ""
 
 
-def note_prompts(graph: dict, note: dict, template: str, feedback: str = "", scale: float = 1.0) -> list[str]:
+def note_prompts(
+    graph: dict[str, Any], note: dict[str, Any], template: str, feedback: str = "", scale: float = 1.0
+) -> list[str]:
     """The prompts of a note: one, or one for each part of a long note (the facts go into the last part). `scale`
     multiplies the length that the prompts ask for."""
     subjects = {s["id"]: s for s in graph["subjects"]}
@@ -775,7 +804,7 @@ def _clean(text: str) -> str:
     return "\n".join(lines).strip()
 
 
-def note_text(graph: dict, note: dict, bodies: list[str]) -> str:
+def note_text(graph: dict[str, Any], note: dict[str, Any], bodies: list[str]) -> str:
     project = next((x for x in graph["subjects"] if x["id"] == note["project"]), None)
     front = [
         "---",
@@ -792,7 +821,7 @@ def note_text(graph: dict, note: dict, bodies: list[str]) -> str:
 class _Tokens:
     """Finds the value tokens of all facts (no bridge) in a text, without case."""
 
-    def __init__(self, graph: dict):
+    def __init__(self, graph: dict[str, Any]):
         self.by_token = {f["token"].lower(): f for f in graph["facts"] if not f["bridge"]}
         tokens = sorted(self.by_token, key=len, reverse=True)
         self.pattern = re.compile("|".join(map(re.escape, tokens))) if tokens else None
@@ -803,7 +832,7 @@ class _Tokens:
         return {self.by_token[m.group(0)]["id"] for m in self.pattern.finditer(text.lower())}
 
 
-def required_properties(graph: dict) -> dict[str, list[str]]:
+def required_properties(graph: dict[str, Any]) -> dict[str, list[str]]:
     """The property values that each note must state, so that the notes separate the subjects as the questions do:
     the properties of each question (no area: the frontmatter holds it) in its gold note (the bridge note for
     multi-hop), and for a distractor question each sibling's own values of those properties in its note."""
@@ -830,7 +859,11 @@ def _states(value: str, text: str) -> bool:
 
 
 def note_failures(
-    graph: dict, note: dict, text: str, tokens: _Tokens | None = None, required: dict | None = None
+    graph: dict[str, Any],
+    note: dict[str, Any],
+    text: str,
+    tokens: _Tokens | None = None,
+    required: dict[str, Any] | None = None,
 ) -> list[tuple[str, str]]:
     """The (check, detail) of each failed string check of a note."""
     tokens = tokens or _Tokens(graph)
@@ -866,7 +899,7 @@ def note_failures(
     return out
 
 
-def _length_scale(note: dict, text: str) -> float:
+def _length_scale(note: dict[str, Any], text: str) -> float:
     """The factor for the next attempt of a long note outside the word range: a model that writes too much is asked
     for fewer words, aimed at 90% of the maximum (or 110% of the minimum)."""
     if not note["long"]:
@@ -879,7 +912,9 @@ def _length_scale(note: dict, text: str) -> float:
     return 1.0
 
 
-def render(work: Path, runner=claude, model: str = "sonnet", jobs: int = 4, prompts: Path = PROMPTS) -> dict:
+def render(
+    work: Path, runner: Runner = claude, model: str = "sonnet", jobs: int = 4, prompts: Path = PROMPTS
+) -> dict[str, Any]:
     """Write each note that is not written yet. A note that fails its string checks is written again at most twice
     and then removed."""
     work = Path(work)
@@ -891,7 +926,7 @@ def render(work: Path, runner=claude, model: str = "sonnet", jobs: int = 4, prom
     required = required_properties(graph)
     vault = work / "vault"
 
-    def one(note: dict) -> None:
+    def one(note: dict[str, Any]) -> None:
         if note["id"] in state.data:
             return
         path = vault / note["path"]
@@ -955,7 +990,7 @@ def forbidden_hits(text: str, forbidden: list[str]) -> list[str]:
     return hits
 
 
-def _ask(graph: dict, q: dict) -> str:
+def _ask(graph: dict[str, Any], q: dict[str, Any]) -> str:
     facts = {f["id"]: f for f in graph["facts"]}
     subjects = {s["id"]: s for s in graph["subjects"]}
     f = facts[q["fact"]]
@@ -969,7 +1004,9 @@ def _ask(graph: dict, q: dict) -> str:
     return f"the {f['attribute']} of a {s['class']}"
 
 
-def question_prompt(graph: dict, q: dict, template: str, instructions: dict, feedback: str = "") -> str:
+def question_prompt(
+    graph: dict[str, Any], q: dict[str, Any], template: str, instructions: dict[str, Any], feedback: str = ""
+) -> str:
     return Template(template).substitute(
         ask=_ask(graph, q),
         properties="\n".join(f"- {k}: {v}" for k, v in q["props"].items()),
@@ -979,7 +1016,7 @@ def question_prompt(graph: dict, q: dict, template: str, instructions: dict, fee
     )
 
 
-def candidates(graph: dict, q: dict) -> list[dict]:
+def candidates(graph: dict[str, Any], q: dict[str, Any]) -> list[dict[str, Any]]:
     """The subjects that the question can match: the same class and the same area, and the subjects of the same class
     in any area that differ from the property set of the question in at most one property."""
     s = next(x for x in graph["subjects"] if x["id"] == q["subject"])
@@ -993,7 +1030,7 @@ def candidates(graph: dict, q: dict) -> list[dict]:
     return out
 
 
-def check_prompt(graph: dict, q: dict, question: str, template: str) -> str:
+def check_prompt(graph: dict[str, Any], q: dict[str, Any], question: str, template: str) -> str:
     rows = [f"- {c['name']} | " + "; ".join(f"{k}: {v}" for k, v in c["props"].items()) for c in candidates(graph, q)]
     return Template(template).substitute(question=question, candidates="\n".join(rows))
 
@@ -1002,7 +1039,9 @@ def _answer(text: str) -> str:
     return text.strip().strip("`*\"'. ").splitlines()[0].strip() if text.strip() else ""
 
 
-def write_questions(work: Path, runner=claude, model: str = "sonnet", jobs: int = 4, prompts: Path = PROMPTS) -> dict:
+def write_questions(
+    work: Path, runner: Runner = claude, model: str = "sonnet", jobs: int = 4, prompts: Path = PROMPTS
+) -> dict[str, Any]:
     """Write each question from its fact tuple, check its forbidden words and resolve it with the blind subject check.
     A failed question is written again at most twice and then removed; a question of a removed note is removed."""
     work = Path(work)
@@ -1021,7 +1060,7 @@ def write_questions(work: Path, runner=claude, model: str = "sonnet", jobs: int 
     state = _State(work / "written.json")
     subjects = {s["id"]: s for s in graph["subjects"]}
 
-    def one(q: dict) -> None:
+    def one(q: dict[str, Any]) -> None:
         if q["id"] in state.data:
             return
         missing = [n for n in q["notes"] if notes[n]["status"] == "removed"]
@@ -1096,7 +1135,7 @@ CHECKS = (
 )
 
 
-def verify(work: Path) -> dict:
+def verify(work: Path) -> dict[str, Any]:
     """Each check of the graph, the kept notes and the kept questions. Writes verify.json; removed notes and
     questions are listed, not failed."""
     work = Path(work)
@@ -1184,7 +1223,7 @@ def verify(work: Path) -> dict:
     return report
 
 
-def set_questions(work: Path) -> list[dict]:
+def set_questions(work: Path) -> list[dict[str, Any]]:
     """The kept questions of a verified work folder in the set format v2, with the half."""
     graph = _load(work)
     written = _state(work, "written.json")
@@ -1243,25 +1282,28 @@ def archive_hits(path: Path, terms: list[str]) -> list[tuple[str, str]]:
     with tarfile.open(path) as tar:
         for m in tar.getmembers():
             if m.isfile():
-                text = tar.extractfile(m).read().decode(errors="ignore")
+                f = tar.extractfile(m)
+                text = f.read().decode(errors="ignore") if f else ""
                 out += [(m.name, t) for t in deny_hits(m.name + "\n" + text, terms)]
     return out
 
 
 def _archive(files: list[tuple[str, bytes]]) -> bytes:
     raw = io.BytesIO()
-    with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0, filename="") as gz:
-        with tarfile.open(fileobj=gz, mode="w", format=tarfile.PAX_FORMAT) as tar:
-            for name, data in sorted(files):
-                info = tarfile.TarInfo(name)
-                info.size = len(data)
-                info.mtime = 0
-                info.mode = 0o644
-                tar.addfile(info, io.BytesIO(data))
+    with (
+        gzip.GzipFile(fileobj=raw, mode="wb", mtime=0, filename="") as gz,
+        tarfile.open(fileobj=gz, mode="w", format=tarfile.PAX_FORMAT) as tar,
+    ):
+        for name, data in sorted(files):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            info.mtime = 0
+            info.mode = 0o644
+            tar.addfile(info, io.BytesIO(data))
     return raw.getvalue()
 
 
-def freeze(works: list[Path], name: str, out: Path, deny: Path, prompts: Path = PROMPTS) -> dict:
+def freeze(works: list[Path], name: str, out: Path, deny: Path, prompts: Path = PROMPTS) -> dict[str, Any]:
     """Freeze one or more verified work folders into one set folder: vault.tar.gz, questions.json, the world config
     and the graph of each seed, the prompts, verify.json and manifest.json with the SHA-256 of each file."""
     out = Path(out)

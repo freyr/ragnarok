@@ -1,0 +1,43 @@
+{
+  "packages": [
+    {
+      "name": "server",
+      "path": ".",
+      "tag": "server-v{version}",
+      "version_files": [
+        { "file": "pyproject.toml", "format": "pyproject" },
+        { "file": "server.json", "format": "json", "key": "version" },
+        { "file": "server.json", "format": "json", "key": "packages.0.version" }
+      ],
+      "ignore": [
+        "plugins/**",
+        ".claude-plugin/**",
+        "templates/**",
+        "scripts/**",
+        "tests/**",
+        "docs/**",
+        ".github/**",
+        ".claude/**",
+        "README.md",
+        "CHANGELOG.md",
+        "LICENSE",
+        ".gitignore",
+        ".gitleaks.toml",
+        ".markdownlint-cli2.jsonc"
+      ],
+      "min_bump": "none"
+    },
+    {
+      "name": "ragnarok",
+      "path": "plugins/ragnarok",
+      "tag": "ragnarok--v{version}",
+      "legacy_tags": ["plugin-v{version}"],
+      "version_files": [
+        { "file": "plugins/ragnarok/.claude-plugin/plugin.json", "format": "json", "key": "version" },
+        { "file": ".claude-plugin/marketplace.json", "format": "json", "key": "metadata.version" }
+      ],
+      "ignore": ["plugins/ragnarok/README.md", "plugins/ragnarok/tests/**"],
+      "min_bump": "patch"
+    }
+  ]
+}

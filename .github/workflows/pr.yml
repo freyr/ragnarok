@@ -1,0 +1,29 @@
+# The PR checks of the freyr standard. Required checks: pr-title, version, ci-gate (ci.yml).
+# The version job sets the versions of the changed packages (.github/release.json) from the PR title
+# and commits them to the PR branch.
+name: PR
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-title:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: freyr/.github/actions/pr-title@3f8fbbcf74283946ee3a7f63e21dd19bf02cdb77 # v1.0.0
+
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: freyr/.github/actions/version@3f8fbbcf74283946ee3a7f63e21dd19bf02cdb77 # v1.0.0
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}

@@ -1,13 +1,12 @@
 name: publish
 
-# A pull request runs the checks and the build. A tag v<version> also publishes the package to PyPI
-# (trusted publishing, environment "pypi") and then server.json to the MCP Registry.
+# Publishes the MCP server. release.yml pushes the tag server-v<version> when a merged PR changes the server
+# version. This workflow then checks the versions, builds the package, publishes it to PyPI (trusted
+# publishing, environment "pypi") and then publishes server.json to the MCP Registry. ci.yml runs the checks.
 
 on:
-  pull_request:
   push:
-    branches: [main]
-    tags: ["v*"]
+    tags: ["server-v*"]
 
 permissions: {}
 
@@ -29,7 +28,6 @@ jobs:
           enable-cache: false
       - name: Check the versions
         env:
-          REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           package=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
@@ -40,17 +38,11 @@ jobs:
             echo "::error::the versions in pyproject.toml and server.json differ"
             exit 1
           fi
-          if [ "$REF_TYPE" = "tag" ] && [ "$REF_NAME" != "v$package" ]; then
-            echo "::error::the tag $REF_NAME is not v$package"
+          if [ "$REF_NAME" != "server-v$package" ]; then
+            echo "::error::the tag $REF_NAME is not server-v$package"
             exit 1
           fi
           grep -q '<!-- mcp-name: io.github.freyr/ragnarok -->' README.md
-      - name: Lint
-        run: |
-          uv run --frozen ruff check .
-          uv run --frozen ruff format --check .
-      - name: Test
-        run: uv run --frozen pytest -q
       - name: Build
         run: uv build
       - name: Check the wheel holds the config template
@@ -62,7 +54,6 @@ jobs:
           if-no-files-found: error
 
   pypi:
-    if: github.ref_type == 'tag'
     needs: build
     runs-on: ubuntu-latest
     environment:
@@ -81,7 +72,6 @@ jobs:
           skip-existing: true
 
   registry:
-    if: github.ref_type == 'tag'
     needs: pypi
     runs-on: ubuntu-latest
     permissions:
@@ -112,10 +102,10 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
         run: |
           for _ in $(seq 30); do
-            if curl -fsS "https://pypi.org/pypi/ragnarok-mcp/${REF_NAME#v}/json" >/dev/null; then exit 0; fi
+            if curl -fsS "https://pypi.org/pypi/ragnarok-mcp/${REF_NAME#server-v}/json" >/dev/null; then exit 0; fi
             sleep 10
           done
-          echo "::error::ragnarok-mcp ${REF_NAME#v} is not on PyPI after 5 minutes"
+          echo "::error::ragnarok-mcp ${REF_NAME#server-v} is not on PyPI after 5 minutes"
           exit 1
       - name: Publish to the MCP Registry
         run: |

@@ -5,10 +5,12 @@ from __future__ import annotations
 import re
 import sqlite3
 from dataclasses import asdict, dataclass
+from typing import Any
 
 import sqlite_vec
 
 from .config import Config
+from .embed import Embedder
 
 RRF_K = 60
 CANDIDATES = 200  # chunks from each list
@@ -17,7 +19,8 @@ SNIPPET_WORDS = 120
 TOPK = 3  # chunks of a note that note_rank = topk_sum adds
 
 STOP = set(
-    "a an the and or of to in on for with is are was were be been do does did i my me we our you your it its this "
+    # One string keeps the word list short to read, so SIM905 does not apply.
+    "a an the and or of to in on for with is are was were be been do does did i my me we our you your it its this "  # noqa: SIM905
     "that these those what which who where when how why can could should would will there their from at by as about "
     "into than then also any all some find check show list tell give please".split()
 )
@@ -43,7 +46,7 @@ class Hit:
     dense_rank: int | None
     fts_rank: int | None
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -53,8 +56,16 @@ def fts_query(query: str) -> str:
     return " OR ".join(f'"{w}"' for w in dict.fromkeys(words))
 
 
-def _note_filters(vault, project, area, type_, include_archived, include_private) -> tuple[str, list]:
-    where, params = [], []
+def _note_filters(
+    vault: str | None,
+    project: str | None,
+    area: str | None,
+    type_: str | None,
+    include_archived: bool,
+    include_private: bool,
+) -> tuple[str, list[Any]]:
+    where: list[str] = []
+    params: list[Any] = []
     for column, value in (("vault", vault), ("project", project), ("area", area), ("type", type_)):
         if value is not None:
             where.append(f"n.{column} = ?")
@@ -66,8 +77,11 @@ def _note_filters(vault, project, area, type_, include_archived, include_private
     return (" AND " + " AND ".join(where)) if where else "", params
 
 
-def _vec_where(vector, k, vault, include_archived, include_private) -> tuple[str, list]:
-    where, params = ["embedding MATCH ?", "k = ?"], [sqlite_vec.serialize_float32(vector), k]
+def _vec_where(
+    vector: list[float], k: int, vault: str | None, include_archived: bool, include_private: bool
+) -> tuple[str, list[Any]]:
+    where = ["embedding MATCH ?", "k = ?"]
+    params: list[Any] = [sqlite_vec.serialize_float32(vector), k]
     if vault is not None:
         where.append("vault = ?")
         params.append(vault)
@@ -78,14 +92,23 @@ def _vec_where(vector, k, vault, include_archived, include_private) -> tuple[str
     return " AND ".join(where), params
 
 
-def _dense(conn, vector, k, vault, include_archived, include_private) -> list[tuple[int, float]]:
+def _dense(
+    conn: sqlite3.Connection,
+    vector: list[float],
+    k: int,
+    vault: str | None,
+    include_archived: bool,
+    include_private: bool,
+) -> list[tuple[int, float]]:
     """Ranked (chunk_id, cosine similarity)."""
     where, params = _vec_where(vector, k, vault, include_archived, include_private)
     sql = f"SELECT chunk_id, distance FROM chunks_vec WHERE {where} ORDER BY distance"
     return [(cid, 1.0 - distance) for cid, distance in conn.execute(sql, params)]
 
 
-def _fts(conn, query, k, note_where, note_params) -> list[tuple[int, float]]:
+def _fts(
+    conn: sqlite3.Connection, query: str, k: int, note_where: str, note_params: list[Any]
+) -> list[tuple[int, float]]:
     """Ranked (chunk_id, BM25 score); SQLite gives a lower bm25() value for a better match."""
     match = fts_query(query)
     if not match:
@@ -97,7 +120,9 @@ def _fts(conn, query, k, note_where, note_params) -> list[tuple[int, float]]:
     return [(cid, score) for cid, score in conn.execute(sql, [match, *note_params, k])]
 
 
-def _by_note(conn, scored: list[tuple[int, float]], note_where: str, note_params: list, note_rank: str):
+def _by_note(
+    conn: sqlite3.Connection, scored: list[tuple[int, float]], note_where: str, note_params: list[Any], note_rank: str
+) -> list[tuple[int, int | None]]:
     """Change a ranked (chunk_id, score) list into a ranked list of (note_id, best chunk_id), with the note filters.
 
     maxp: the rank of a note is the rank of its best chunk. topk_sum: the score of a note is the sum of the scores of
@@ -123,7 +148,16 @@ def _by_note(conn, scored: list[tuple[int, float]], note_where: str, note_params
     return [(nid, best[nid]) for nid in order]
 
 
-def _note_vectors(conn, vector, k, vault, include_archived, include_private, note_where, note_params):
+def _note_vectors(
+    conn: sqlite3.Connection,
+    vector: list[float],
+    k: int,
+    vault: str | None,
+    include_archived: bool,
+    include_private: bool,
+    note_where: str,
+    note_params: list[Any],
+) -> list[tuple[int, int | None]]:
     """Ranked (note_id, None) by the mean chunk vector of each note, with the note filters."""
     where, params = _vec_where(vector, k, vault, include_archived, include_private)
     ranked = [nid for (nid,) in conn.execute(f"SELECT note_id FROM notes_vec WHERE {where} ORDER BY distance", params)]
@@ -138,7 +172,7 @@ def _note_vectors(conn, vector, k, vault, include_archived, include_private, not
 def search(
     cfg: Config,
     conn: sqlite3.Connection,
-    embedder,
+    embedder: Embedder | None,
     query: str,
     *,
     vault: str | None = None,
@@ -158,6 +192,8 @@ def search(
     lists: list[list[tuple[int, int | None]]] = [[], []]
     if mode in ("hybrid", "dense"):
         k = FILTERED_CANDIDATES if (project or area or type) else CANDIDATES
+        if embedder is None:
+            raise ValueError(f"mode {mode!r} needs an embedder")
         vector = embedder.embed_query(query)
         scored = _dense(conn, vector, k, vault, include_archived, include_private)
         lists[0] = _by_note(conn, scored, note_where, note_params, rank)
@@ -195,5 +231,23 @@ def search(
         heading, text = row
         words = text.split()
         snippet = " ".join(words[:SNIPPET_WORDS]) + (" …" if len(words) > SNIPPET_WORDS else "")
-        hits.append(Hit(*n, heading, snippet, round(scores[nid], 5), *ranks[nid]))
+        path, vault_, title, project_, area_, type_, status, description = n
+        dense_rank, fts_rank = ranks[nid]
+        hits.append(
+            Hit(
+                path,
+                vault_,
+                title,
+                project_,
+                area_,
+                type_,
+                status,
+                description,
+                heading,
+                snippet,
+                round(scores[nid], 5),
+                dense_rank,
+                fts_rank,
+            )
+        )
     return hits

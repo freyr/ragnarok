@@ -4,7 +4,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+This file holds the server releases up to 2.1.1. The later releases are on the
+[GitHub releases](https://github.com/freyr/ragnarok-bundle/releases) page, with the tags `server-vX.Y.Z`.
+
+## [2.1.1] - 2026-11-10
+
+### Changed
+
+- The repository is `freyr/ragnarok-bundle`. It holds the server and the Claude Code plugin marketplace
+  `ragnarok`; add the marketplace with `/plugin marketplace add freyr/ragnarok-bundle`.
+- Server release tags are `server-vX.Y.Z`. The plugins have their own tags, `plugin-vX.Y.Z`, and their own
+  changelog, `plugins/CHANGELOG.md`.
 
 ## [2.1.0] - 2026-11-10
 
@@ -127,7 +137,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 First public release.
 
-[2.0.0]: https://github.com/freyr/ragnarok/releases/tag/v2.0.0
-[1.2.0]: https://github.com/freyr/ragnarok/releases/tag/v1.2.0
-[1.1.0]: https://github.com/freyr/ragnarok/releases/tag/v1.1.0
-[1.0.0]: https://github.com/freyr/ragnarok/releases/tag/v1.0.0
+[2.1.1]: https://github.com/freyr/ragnarok-bundle/releases/tag/server-v2.1.1
+[2.1.0]: https://github.com/freyr/ragnarok-bundle/releases/tag/v2.1.0
+[2.0.0]: https://github.com/freyr/ragnarok-bundle/releases/tag/v2.0.0
+[1.2.0]: https://github.com/freyr/ragnarok-bundle/releases/tag/v1.2.0
+[1.1.0]: https://github.com/freyr/ragnarok-bundle/releases/tag/v1.1.0
+[1.0.0]: https://github.com/freyr/ragnarok-bundle/releases/tag/v1.0.0

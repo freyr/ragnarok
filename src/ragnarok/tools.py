@@ -7,13 +7,15 @@ import posixpath
 import re
 import sqlite3
 from dataclasses import dataclass, field
+from typing import Any
 
 from .config import Config
+from .embed import Embedder
 from .index import SCAN_LIMIT, update
 from .metadata import read_note
 from .redact import redact
 from .search import PrivateNotAllowed, search
-from .splitter import sections
+from .splitter import Section, sections
 
 PROJECT_POOL = 50  # notes that find_projects groups into projects
 DESCRIPTION_WORDS = 60
@@ -22,7 +24,7 @@ FIRST_WORDS = 25
 OPEN_STATES = ("in-progress", "paused")
 
 
-def _plain(value):
+def _plain(value: Any) -> Any:
     """A frontmatter value that JSON can carry."""
     if isinstance(value, (dt.date, dt.datetime)):
         return value.isoformat()
@@ -42,7 +44,7 @@ def _first_sentence(lines: list[str]) -> str:
     return " ".join(words[:FIRST_WORDS]) + (" …" if len(words) > FIRST_WORDS else "")
 
 
-def _outline(secs) -> list[dict]:
+def _outline(secs: list[Section]) -> list[dict[str, Any]]:
     return [
         {
             "heading": " > ".join(s.path),
@@ -63,7 +65,7 @@ def _first_paragraph(body: str) -> str | None:
     return None
 
 
-def _state(fm: dict, archived: bool) -> str:
+def _state(fm: dict[str, Any], archived: bool) -> str:
     """The state in SUMMARY.md; without one, a project is done when archived by path or its stage is DONE."""
     state = str(fm.get("state") or "").strip().lower()
     if state:
@@ -75,9 +77,9 @@ def _state(fm: dict, archived: bool) -> str:
 class Tools:
     cfg: Config
     conn: sqlite3.Connection
-    embedder: object
+    embedder: Embedder
     scan_limit: int | None = SCAN_LIMIT
-    last_scan: dict = field(default_factory=dict)
+    last_scan: dict[str, Any] = field(default_factory=dict)
 
     def scan(self) -> list[str]:
         result = update(self.cfg, self.conn, self.embedder, limit=self.scan_limit)
@@ -90,7 +92,7 @@ class Tools:
     def _visible(self) -> str:
         return "" if self.cfg.allow_private else " AND n.sensitivity = 'normal'"
 
-    def _note_row(self, path: str):
+    def _note_row(self, path: str) -> Any:
         return self.conn.execute(
             "SELECT id, vault, title, project, area, type, status, sensitivity, description FROM notes n"
             " WHERE path = ?",
@@ -103,15 +105,15 @@ class Tools:
 
     # --- tools -------------------------------------------------------------------------------------------------
 
-    def search(self, query: str, **filters) -> dict:
+    def search(self, query: str, **filters: Any) -> dict[str, Any]:
         warnings = self.scan()
         hits = search(self.cfg, self.conn, self.embedder, query, **filters)
         return {"results": [h.as_dict() for h in hits], "warnings": warnings}
 
-    def find_projects(self, query: str, vault: str | None = None, limit: int = 5) -> dict:
+    def find_projects(self, query: str, vault: str | None = None, limit: int = 5) -> dict[str, Any]:
         warnings = self.scan()
         hits = search(self.cfg, self.conn, self.embedder, query, vault=vault, limit=PROJECT_POOL)
-        groups: dict[tuple[str, str], dict] = {}
+        groups: dict[tuple[str, str], dict[str, Any]] = {}
         for h in hits:
             if h.project == "none":
                 continue
@@ -125,7 +127,7 @@ class Tools:
             projects.append({**info, "score": round(g["score"], 5), "matching_notes": g["notes"]})
         return {"results": projects, "warnings": warnings}
 
-    def list_project(self, project: str, vault: str | None = None) -> dict:
+    def list_project(self, project: str, vault: str | None = None) -> dict[str, Any]:
         warnings = self.scan()
         where, params = "n.project = ?", [project]
         if vault:
@@ -136,7 +138,7 @@ class Tools:
             " ORDER BY vault, path",
             params,
         ).fetchall()
-        by_vault: dict[str, list[dict]] = {}
+        by_vault: dict[str, list[dict[str, Any]]] = {}
         for v, path, title, type_, status, description in rows:
             by_vault.setdefault(v, []).append(
                 {"path": path, "title": title, "type": type_, "status": status, "description": description}
@@ -144,7 +146,7 @@ class Tools:
         results = [{**self._project_info(v, project), "notes": notes} for v, notes in by_vault.items()]
         return {"results": results, "warnings": warnings}
 
-    def open_projects(self, states: list[str] | None = None, vault: str | None = None) -> dict:
+    def open_projects(self, states: list[str] | None = None, vault: str | None = None) -> dict[str, Any]:
         warnings = self.scan()
         wanted = {st.strip().lower() for st in (states or OPEN_STATES)}
         where, params = "(n.path LIKE '%/SUMMARY.md' OR n.path = 'SUMMARY.md')", []
@@ -163,14 +165,14 @@ class Tools:
                 continue
             info = self._project_info(v, project)
             projects.append({**info, "state": state, "updated": _plain(fm.get("updated")), "gate": fm.get("gate")})
-        by_state: dict[str, list[dict]] = {}
+        by_state: dict[str, list[dict[str, Any]]] = {}
         for p in projects:
             by_state.setdefault(p["state"], []).append(p)
         for group in by_state.values():
             group.sort(key=lambda p: str(p["updated"] or ""), reverse=True)
         return {"results": by_state, "count": len(projects), "warnings": warnings}
 
-    def open_note(self, path: str, heading: str | None = None, outline: bool | None = None) -> dict:
+    def open_note(self, path: str, heading: str | None = None, outline: bool | None = None) -> dict[str, Any]:
         warnings = self.scan()
         row = self._note_row(path)
         if row is None:
@@ -189,6 +191,7 @@ class Tools:
             outline = False
         elif outline is None:
             outline = len(body.split()) > LONG_NOTE_WORDS
+        content: dict[str, Any]
         if outline:
             content = {"outline": _outline(sections(redact(body)[0]))}
         else:
@@ -221,7 +224,7 @@ class Tools:
             "warnings": warnings,
         }
 
-    def find_by_jira(self, key: str) -> dict:
+    def find_by_jira(self, key: str) -> dict[str, Any]:
         warnings = self.scan()
         rows = self.conn.execute(
             "SELECT DISTINCT n.path, n.title, n.project, n.type, n.status FROM jira j JOIN notes n ON n.id = j.note_id"
@@ -233,7 +236,7 @@ class Tools:
 
     # --- project summary ---------------------------------------------------------------------------------------
 
-    def _project_info(self, vault: str, project: str) -> dict:
+    def _project_info(self, vault: str, project: str) -> dict[str, Any]:
         rows = self.conn.execute(
             f"SELECT path, sensitivity FROM notes n WHERE n.vault = ? AND n.project = ?{self._visible()}",
             (vault, project),

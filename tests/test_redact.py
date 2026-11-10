@@ -13,11 +13,13 @@ KEY_BLOCK = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY--
 @pytest.mark.parametrize("secret", [AWS, GH, SK, SLACK, KEY_BLOCK])
 def test_tokens_are_redacted(secret):
     text, n = redact(f"before {secret} after")
-    assert secret not in text and MARK in text and n == 1
+    assert secret not in text
+    assert MARK in text
+    assert n == 1
 
 
 @pytest.mark.parametrize(
-    "line, kept",
+    ("line", "kept"),
     [
         ("password: Hunter2Hunter2", "password: "),
         ("DB_PASSWORD=s3cr3tValue", "DB_PASSWORD="),
@@ -29,7 +31,9 @@ def test_tokens_are_redacted(secret):
 )
 def test_key_value_literals_are_redacted(line, kept):
     text, n = redact(line)
-    assert text.startswith(kept) and MARK in text and n == 1
+    assert text.startswith(kept)
+    assert MARK in text
+    assert n == 1
 
 
 @pytest.mark.parametrize(
@@ -55,4 +59,5 @@ def test_references_and_prose_stay(line):
 
 def test_url_credentials():
     text, n = redact("mysql://root:Pa55word@db:3306/app")
-    assert text == f"mysql://root:{MARK}@db:3306/app" and n == 1
+    assert text == f"mysql://root:{MARK}@db:3306/app"
+    assert n == 1

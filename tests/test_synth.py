@@ -45,7 +45,7 @@ def test_one_seed_gives_the_same_graph_hash_twice():
 
 
 @pytest.mark.parametrize(
-    "n, counts",
+    ("n", "counts"),
     [
         # the shares 20/20/20/15/10/10/5 of the spec
         (100, (20, 20, 20, 15, 10, 10, 5)),
@@ -135,33 +135,41 @@ def test_the_notes_of_each_stratum(graph):
     for q in graph["questions"]:
         gold = _note(graph, q["cluster"])
         fact = _fact(graph, q["fact"])
-        assert fact["note"] == gold["id"] and fact["current"]
+        assert fact["note"] == gold["id"]
+        assert fact["current"]
         assert q["cluster"] == q["expected"][0]
         if q["stratum"] == "distractor":
             others = [n for n in graph["notes"] if n["role"] == "distractor" and n["id"] in q["notes"]]
             assert 1 <= len(others) <= 3
             for n in others:
                 s, g = subjects[n["subject"]], subjects[fact["subject"]]
-                assert s["id"] != g["id"] and s["class"] == g["class"] and s["area"] == g["area"]
-                assert list(s["props"].values())[0] == list(g["props"].values())[0]  # the same kind
+                assert s["id"] != g["id"]
+                assert s["class"] == g["class"]
+                assert s["area"] == g["area"]
+                assert next(iter(s["props"].values())) == next(iter(g["props"].values()))  # the same kind
                 assert [_fact(graph, f)["attribute"] for f in n["facts"]] == [fact["attribute"]]
         elif q["stratum"] == "outdated":
             old = [n for n in graph["notes"] if n["role"] == "outdated" and n["id"] in q["notes"]]
-            assert len(old) == 1 and old[0]["status"] == "archived"
+            assert len(old) == 1
+            assert old[0]["status"] == "archived"
             old_fact = _fact(graph, old[0]["facts"][0])
             assert (old_fact["subject"], old_fact["attribute"]) == (fact["subject"], fact["attribute"])
-            assert not old_fact["current"] and old_fact["token"] != fact["token"]
+            assert not old_fact["current"]
+            assert old_fact["token"] != fact["token"]
         elif q["stratum"] == "deep-section":
-            assert gold["long"] and 3000 <= gold["words"] <= 10000
+            assert gold["long"]
+            assert 3000 <= gold["words"] <= 10000
             assert fact["heading"] == gold["headings"][-1]
         elif q["stratum"] == "continuation":
-            assert len(q["expected"]) == 1 and q["expected"][0].endswith("/SUMMARY.md")
+            assert len(q["expected"]) == 1
+            assert q["expected"][0].endswith("/SUMMARY.md")
             assert subjects[q["subject"]]["class"] == "project"
         elif q["stratum"] == "multi-hop":
             assert len(q["expected"]) == 2
             bridge = _note(graph, q["expected"][1])
             bridge_fact = _fact(graph, q["bridge"])
-            assert bridge_fact["note"] == bridge["id"] and bridge_fact["bridge"]
+            assert bridge_fact["note"] == bridge["id"]
+            assert bridge_fact["bridge"]
             assert bridge_fact["value"] == subjects[fact["subject"]]["name"]
             assert q["subject"] == bridge["subject"]
     for project in (s for s in graph["subjects"] if s["class"] == "project"):
@@ -180,7 +188,8 @@ def test_the_forbidden_words_of_a_question(graph):
         if q["stratum"] == "multi-hop":
             # the device is the bridge: neither its name nor its kind may be in the question
             device = subjects[fact["subject"]]
-            assert device["name"] in q["forbidden"] and device["props"]["kind"] in q["forbidden"]
+            assert device["name"] in q["forbidden"]
+            assert device["props"]["kind"] in q["forbidden"]
 
 
 # --- a fake writer instead of claude -p ----------------------------------------------------------------------------
@@ -257,7 +266,8 @@ def test_render_questions_and_verify_pass_with_a_correct_writer(work):
     assert fake.calls > len(graph["notes"]) + len(long_notes) + 2 * 20 - 1
     vault = out / "vault"
     text = (vault / graph["notes"][0]["path"]).read_text()
-    assert text.startswith("---\n") and f"\n# {graph['notes'][0]['title']}\n" in text
+    assert text.startswith("---\n")
+    assert f"\n# {graph['notes'][0]['title']}\n" in text
 
 
 def test_a_failed_note_is_written_again_twice_and_then_removed_with_its_question(work):
@@ -377,7 +387,7 @@ def test_verify_reports_each_failed_check_of_a_broken_fixture(work):
 
 
 def test_verify_reports_the_strata_and_the_halves(work):
-    out, graph = work
+    out, _graph = work
     g = json.loads((out / "graph.json").read_text())
     next(q for q in g["questions"] if q["stratum"] == "direct")["stratum"] = "lexical-gap"
     next(q for q in g["questions"] if q["stratum"] == "outdated")["half"] = "both"
@@ -452,11 +462,12 @@ def test_freeze_refuses_a_deny_word_a_missing_deny_list_a_failed_verify_and_an_e
     (out / "vault" / first["path"]).unlink()
     with pytest.raises(SynthError, match="verify"):
         freeze([out], "pilot", tmp_path / "d", deny)
-    assert not (tmp_path / "a").exists() and not (tmp_path / "d").exists()
+    assert not (tmp_path / "a").exists()
+    assert not (tmp_path / "d").exists()
 
 
 @pytest.mark.parametrize(
-    "text, hits",
+    ("text", "hits"),
     [
         ("A note about Kelso and more.", ["kelso"]),
         ("kelsos are not a hit", []),
@@ -476,11 +487,13 @@ def test_the_synth_commands_graph_and_verify(tmp_path, capsys):
     assert main(["synth", "graph", "--seed", "3", "--questions", "20", "--out", str(out)]) == 0
     graph = json.loads((out / "graph.json").read_text())
     printed = capsys.readouterr().out
-    assert graph["hash"] in printed and "20 questions" in printed
+    assert graph["hash"] in printed
+    assert "20 questions" in printed
     # nothing is written yet: each note and each question is missing
     assert main(["synth", "verify", str(out)]) == 1
     printed = capsys.readouterr().out
-    assert "note-missing" in printed and "question-missing" in printed
+    assert "note-missing" in printed
+    assert "question-missing" in printed
 
 
 # --- review round 1 ------------------------------------------------------------------------------------------------
@@ -496,7 +509,7 @@ def test_the_note_prompt_asks_for_the_properties_and_verify_checks_them(work):
     vault = out / "vault"
     dq = next(q for q in graph["questions"] if q["stratum"] == "distractor")
     # the gold note no longer states a property that the question uses (not the area: the frontmatter holds it)
-    key, value = next((k, v) for k, v in dq["props"].items() if k != "area")
+    _key, value = next((k, v) for k, v in dq["props"].items() if k != "area")
     gold = vault / dq["cluster"]
     gold.write_text(re.sub(rf"\b{re.escape(value)}\b", "gone", gold.read_text()))
     # a sibling note no longer states its own value of the property that differs from the gold subject
@@ -517,7 +530,7 @@ def test_the_blind_check_shows_a_near_twin_of_another_area(graph):
     q = next(q for q in graph["questions"] if "area" not in q["props"] and q["stratum"] != "continuation")
     s = next(x for x in graph["subjects"] if x["id"] == q["subject"])
     other_area = next(a for a in graph["areas"] if a != s["area"])
-    key = next(k for k in q["props"] if k != list(s["props"])[0])
+    key = next(k for k in q["props"] if k != next(iter(s["props"])))
     twin_props = {**s["props"], "area": other_area.lower()}
     twin_props[key] = "something else"
     broken = json.loads(json.dumps(graph))
@@ -532,7 +545,8 @@ def test_the_blind_check_shows_a_near_twin_of_another_area(graph):
         }
     )
     names = [c["name"] for c in candidates(broken, q)]
-    assert "Near twin" in names and s["name"] in names
+    assert "Near twin" in names
+    assert s["name"] in names
 
 
 def test_questions_refuse_to_run_before_each_note_is_rendered(work):

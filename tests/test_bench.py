@@ -21,7 +21,7 @@ from ragnarok.config import Config
 
 
 @pytest.mark.parametrize(
-    "ranks, recall, rr",
+    ("ranks", "recall", "rr"),
     [
         ([1], 1, 1.0),
         ([3], 1, 1 / 3),
@@ -77,7 +77,8 @@ def test_cluster_bootstrap_level_widens_the_interval():
     clusters = [f"c{i}" for i in range(60)]
     _, lo95, hi95, _ = cluster_bootstrap(d, clusters, alpha=0.05)
     _, lo99, hi99, _ = cluster_bootstrap(d, clusters, alpha=0.01)
-    assert lo99 < lo95 and hi99 > hi95
+    assert lo99 < lo95
+    assert hi99 > hi95
 
 
 def test_holm_levels_of_two_variants():
@@ -153,7 +154,7 @@ def test_a_wrong_set_is_refused(tmp_path, change):
     if "hash" in data and data["questions"][0].get("question") != "changed":
         data["hash"] = set_hash(data["questions"])
     path.write_text(json.dumps(data))
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError):  # noqa: PT011 - each case has its own message
         load_set(path)
 
 
@@ -493,8 +494,10 @@ def test_bench_run_writes_the_ranks_and_the_times(home, capsys):
     assert len(rows["q4"]["ranks"]) == 2
     for r in rows.values():
         assert {"scan_ms", "search_ms", "total_ms", "overlap", "bm25_rank"} <= set(r)
-        assert r["total_ms"] >= r["search_ms"] >= 0 and r["scan_ms"] >= 0
-    assert rows["q1"]["overlap"] == 1.0 and rows["q1"]["bm25_rank"] == 1
+        assert r["total_ms"] >= r["search_ms"] >= 0
+        assert r["scan_ms"] >= 0
+    assert rows["q1"]["overlap"] == 1.0
+    assert rows["q1"]["bm25_rank"] == 1
     # the other variant writes its own file
     assert run(capsys, "bench", "index", "--variant", "other", "--corpus", "real")[0] == 0
     assert run(capsys, "bench", "run", "--set", path, "--variant", "other")[0] == 0
@@ -513,7 +516,8 @@ def test_bench_compare_of_the_baseline_against_itself_is_no_win(home, capsys, ki
     assert "recall@5 B-A +0.000 [+0.000, +0.000]" in text
     assert "MRR B-A +0.000 [+0.000, +0.000]" in text
     assert "discordant 0.00" in text
-    assert "stratum lookup" in text and "area heating" in text
+    assert "stratum lookup" in text
+    assert "area heating" in text
     last = text.strip().splitlines()[-1]
     assert last.startswith("verdict baseline: no win")
     if kind == "synthetic":
@@ -526,4 +530,5 @@ def test_bench_compare_needs_a_run_of_each_variant(home, capsys):
     path = home / "set.json"
     write_set(path, "pilot", "real", "real", fixture_questions())
     code, out = run(capsys, "bench", "compare", "--set", path, "baseline", "other")
-    assert code == 1 and "bench run" in out.err
+    assert code == 1
+    assert "bench run" in out.err

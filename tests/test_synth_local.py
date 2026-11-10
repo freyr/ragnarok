@@ -24,13 +24,16 @@ def test_a_vault_of_20_questions_goes_through_all_commands_with_claude(tmp_path,
     print(printed)
     assert code == 0
     report = json.loads((work / "verify.json").read_text())
-    assert report["passed"] and report["questions"]["kept"] >= 15
+    assert report["passed"]
+    assert report["questions"]["kept"] >= 15
     out = tmp_path / "frozen"
     assert main(["synth", "freeze", str(work), "--name", "local-20", "--out", str(out)]) == 0
     bench_set = load_set(out / "questions.json")
-    assert bench_set["kind"] == "synthetic" and len(bench_set["questions"]) == report["questions"]["kept"]
+    assert bench_set["kind"] == "synthetic"
+    assert len(bench_set["questions"]) == report["questions"]["kept"]
     manifest = json.loads((out / "manifest.json").read_text())
-    assert manifest["models"] and all(m.startswith("claude-") for m in manifest["models"])
+    assert manifest["models"]
+    assert all(m.startswith("claude-") for m in manifest["models"])
     assert archive_hits(out / "vault.tar.gz", read_deny(deny_path())) == []
 
 

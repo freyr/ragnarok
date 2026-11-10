@@ -11,11 +11,15 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
+from .config import Config
+from .embed import Embedder
 from .metadata import is_private, iter_notes
 from .search import STOP, search
 
@@ -24,7 +28,7 @@ PAIRS = [("hybrid", "grep"), ("hybrid", "fts"), ("hybrid", "dense"), ("dense", "
 DEPTH = 50
 
 
-def excluded(cfg, rel: str) -> bool:
+def excluded(cfg: Config, rel: str) -> bool:
     """A note the evaluation ignores (eval_exclude), for example a note that quotes the questions."""
     return rel.startswith(tuple(cfg.eval_exclude))
 
@@ -36,7 +40,7 @@ def keywords(query: str) -> list[str]:
 class Grep:
     """The baseline: rank notes by the number of distinct query words they contain, then by the total hits."""
 
-    def __init__(self, cfg):
+    def __init__(self, cfg: Config) -> None:
         self.texts = {
             rel: cfg.note_path(rel).read_text(errors="ignore").lower()
             for rel in iter_notes(cfg)
@@ -55,7 +59,7 @@ class Grep:
         return [rel for _, _, rel in scored[:DEPTH]]
 
 
-def rankings(cfg, conn, embedder, grep: Grep, query: str) -> dict[str, list[str]]:
+def rankings(cfg: Config, conn: sqlite3.Connection, embedder: Embedder, grep: Grep, query: str) -> dict[str, list[str]]:
     out = {"grep": grep.rank(query)}
     for mode in ("fts", "dense", "hybrid"):
         out[mode] = [h.path for h in search(cfg, conn, embedder, query, limit=DEPTH + 20, mode=mode)]
@@ -66,7 +70,9 @@ def inside(note: str, prefix: str) -> bool:
     return note == prefix or note.startswith(prefix.rstrip("/") + "/")
 
 
-def score_draft(q: dict, ranked: dict[str, list[str]], known: set[str], methods=METHODS) -> dict | None:
+def score_draft(
+    q: dict[str, Any], ranked: dict[str, list[str]], known: set[str], methods: list[str] = METHODS
+) -> dict[str, Any] | None:
     expected = [e for e in q.get("expected", []) if e in known]
     if not expected:
         return None
@@ -83,7 +89,7 @@ def score_draft(q: dict, ranked: dict[str, list[str]], known: set[str], methods=
     return out
 
 
-def score_hard(q: dict, ranked: dict[str, list[str]], methods=METHODS) -> dict:
+def score_hard(q: dict[str, Any], ranked: dict[str, list[str]], methods: list[str] = METHODS) -> dict[str, Any]:
     exp = q["expected"]
     out = {"id": q["id"], "type": q["type"], "subtype": q.get("subtype"), "grep_finds": q.get("grep_finds")}
     for m in methods:
@@ -110,7 +116,7 @@ def bootstrap(a: list[float], b: list[float], n: int = 5000, seed: int = 0) -> t
     return float(d.mean()), float(np.percentile(s, 2.5)), float(np.percentile(s, 97.5))
 
 
-def _table(rows: list[dict], measure: str, title: str) -> list[str]:
+def _table(rows: list[dict[str, Any]], measure: str, title: str) -> list[str]:
     lines = [
         f"{title} n={len(rows)}",
         "  " + "  ".join(f"{m} {np.mean([r[f'{m}_{measure}'] for r in rows]):.2f}" for m in METHODS),
@@ -121,7 +127,7 @@ def _table(rows: list[dict], measure: str, title: str) -> list[str]:
     return lines
 
 
-def report_draft(results: list[dict], name: str) -> list[str]:
+def report_draft(results: list[dict[str, Any]], name: str) -> list[str]:
     lines = [f"## {name}: recall@K and any-hit@K"]
     lines += _table(results, "recall", "recall all")
     lines += ["  any-hit " + "  ".join(f"{m} {np.mean([r[f'{m}_any'] for r in results]):.2f}" for m in METHODS)]
@@ -136,7 +142,7 @@ def report_draft(results: list[dict], name: str) -> list[str]:
     return lines
 
 
-def report_hard(results: list[dict]) -> list[str]:
+def report_hard(results: list[dict[str, Any]]) -> list[str]:
     lines = ["## hard set"]
     for typ, measures in (("continuation", ["prim@5", "proj@5", "proj@10"]), ("category", ["prec@5", "any@5"])):
         rs = [r for r in results if r["type"] == typ]
@@ -156,7 +162,9 @@ def report_hard(results: list[dict]) -> list[str]:
     return lines
 
 
-def mechanical(cfg, conn, embedder, sets_dir: Path, out_dir: Path | None = None) -> list[str]:
+def mechanical(
+    cfg: Config, conn: sqlite3.Connection, embedder: Embedder, sets_dir: Path, out_dir: Path | None = None
+) -> list[str]:
     grep = Grep(cfg)
     known = {p for (p,) in conn.execute("SELECT path FROM notes WHERE sensitivity = 'normal'")}
     lines: list[str] = []
@@ -179,14 +187,14 @@ def mechanical(cfg, conn, embedder, sets_dir: Path, out_dir: Path | None = None)
     return lines
 
 
-def pool(cfg, conn, embedder, sets_dir: Path, out: Path, k: int = 5) -> int:
+def pool(cfg: Config, conn: sqlite3.Connection, embedder: Embedder, sets_dir: Path, out: Path, k: int = 5) -> int:
     """Write the union of the top K notes of each method for each question, for the user to mark."""
     grep = Grep(cfg)
     rows = []
     for path in sorted(sets_dir.glob("*.json")):
         for q in json.loads(path.read_text()):
             ranked = rankings(cfg, conn, embedder, grep, q["question"])
-            found = {}
+            found: dict[str, list[str]] = {}
             for m in METHODS:
                 for n in ranked[m][:k]:
                     found.setdefault(n, []).append(m)
@@ -204,9 +212,9 @@ def pool(cfg, conn, embedder, sets_dir: Path, out: Path, k: int = 5) -> int:
     return len(rows)
 
 
-def pool_markdown(rows: list[dict]) -> str:
+def pool_markdown(rows: list[dict[str, Any]]) -> str:
     """A checklist for the user: one section per question id, the expected notes already checked."""
-    by_id: dict[str, dict] = {}
+    by_id: dict[str, dict[str, Any]] = {}
     for r in rows:
         q = by_id.setdefault(r["id"], {"questions": [], "expected": r["expected"], "pool": {}})
         q["questions"].append(r["question"])

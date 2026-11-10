@@ -19,6 +19,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 
@@ -44,7 +45,7 @@ with one JSON object and nothing after it:
 {{"notes": ["<note path relative to the current directory>", ...]}}
 List at most 10 notes, the best first."""
 
-Runner = Callable[[list[str], Path, dict], dict]
+Runner = Callable[[list[str], Path, dict[str, Any]], dict[str, Any]]
 
 
 def eval_home(cfg: Config) -> Path:
@@ -100,15 +101,16 @@ def command(agent: str, question: str, calls: int, model: str, mcp_json: Path | 
     # restricted: no settings files, no hooks, file tools only inside the working directory
     cmd += ["--restricted", "--strict-mcp-config", "--permission-mode", "dontAsk", "--no-session-persistence"]
     if agent == "grep":
-        return cmd + ["--tools", "Grep,Glob,Read", "--allowedTools", "Grep,Glob,Read"]
+        return [*cmd, "--tools", "Grep,Glob,Read", "--allowedTools", "Grep,Glob,Read"]
     tools = ",".join(f"mcp__ragnarok__{t}" for t in MCP_TOOLS)
-    return cmd + ["--tools", "Read", "--mcp-config", str(mcp_json), "--allowedTools", f"Read,{tools}"]
+    return [*cmd, "--tools", "Read", "--mcp-config", str(mcp_json), "--allowedTools", f"Read,{tools}"]
 
 
-def run_claude(cmd: list[str], cwd: Path, env: dict) -> dict:
-    out = subprocess.run(cmd, cwd=cwd, env={**os.environ, **env}, capture_output=True, text=True, timeout=900)
+def run_claude(cmd: list[str], cwd: Path, env: dict[str, Any]) -> dict[str, Any]:
+    # cmd is the argument list of claude_command(), with no shell.
+    out = subprocess.run(cmd, cwd=cwd, env={**os.environ, **env}, capture_output=True, text=True, timeout=900)  # noqa: S603
     try:
-        return json.loads(out.stdout)
+        return cast(dict[str, Any], json.loads(out.stdout))
     except ValueError:
         return {"is_error": True, "result": "", "stderr": out.stderr[-2000:], "stdout": out.stdout[-2000:]}
 
@@ -134,13 +136,13 @@ def parse_notes(text: str, mirror: Path) -> list[str]:
 
 def run_all(
     cfg: Config,
-    sets: dict[str, list[dict]],
+    sets: dict[str, list[dict[str, Any]]],
     out_dir: Path,
     calls: int,
     model: str,
     workers: int = 4,
     runner: Runner = run_claude,
-) -> dict[str, dict[str, dict]]:
+) -> dict[str, dict[str, dict[str, Any]]]:
     """Run each question with each agent. A result file that exists is used again, so a stopped run continues."""
     ecfg = prepare(cfg)
     mcp_json = mcp_config(cfg)
@@ -151,16 +153,16 @@ def run_all(
             for agent in AGENTS:
                 jobs.append((name, q, agent, out_dir / name / f"{q['id']}.{agent}.json"))
 
-    def one(job):
+    def one(job: tuple[str, dict[str, Any], str, Path]) -> tuple[str, str, str, dict[str, Any]]:
         name, q, agent, path = job
         if not path.exists():
             raw = runner(command(agent, q["question"], calls, model, mcp_json, cfg.vaults), mirror, {})
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(raw, indent=1))
         raw = json.loads(path.read_text())
-        return name, q["id"], agent, raw
+        return name, str(q["id"]), agent, raw
 
-    results: dict[str, dict[str, dict]] = {}
+    results: dict[str, dict[str, dict[str, Any]]] = {}
     with ThreadPoolExecutor(workers) as pool:
         for name, qid, agent, raw in pool.map(one, jobs):
             r = results.setdefault(name, {}).setdefault(qid, {})
@@ -187,13 +189,16 @@ def _interval(values: list[float]) -> str:
     return f"{mean:.2f} [{lo:.2f}, {hi:.2f}]"
 
 
-def _diff(rows: list[dict], measure: str) -> str:
+def _diff(rows: list[dict[str, Any]], measure: str) -> str:
     d, lo, hi = bootstrap([r[f"mcp_{measure}"] for r in rows], [r[f"grep_{measure}"] for r in rows])
     return f"{d:+.2f} [{lo:+.2f}, {hi:+.2f}]"
 
 
 def report(
-    cfg: Config, sets: dict[str, list[dict]], results: dict[str, dict[str, dict]], latency: list[int]
+    cfg: Config,
+    sets: dict[str, list[dict[str, Any]]],
+    results: dict[str, dict[str, dict[str, Any]]],
+    latency: list[int],
 ) -> list[str]:
     known = set(mirror_notes(cfg))
     draft, hard = [], []
@@ -211,7 +216,7 @@ def report(
     cat = [r for r in hard if r["type"] == "category"]
     synth = [r for r in draft if str(r["type"]).startswith("synthesis")]
 
-    def mean(rows, key):
+    def mean(rows: list[dict[str, Any]], key: str) -> str:
         return f"{np.mean([r[key] for r in rows]):.2f}" if rows else "-"
 
     lines = ["| Quality attribute | Target | Measured | 95% interval |", "|---|---|---|---|"]
@@ -260,7 +265,9 @@ def report(
     return lines
 
 
-def evaluate(cfg: Config, sets_dir: Path, names: list[str], out_dir: Path, calls: int, model: str, limit: int | None):
+def evaluate(
+    cfg: Config, sets_dir: Path, names: list[str], out_dir: Path, calls: int, model: str, limit: int | None
+) -> list[str]:
     sets = {}
     for name in names:
         questions = json.loads((sets_dir / f"{name}.json").read_text())

@@ -1,0 +1,11 @@
+{
+  "config": {
+    // Long lines are normal in prose, tables and skill instructions.
+    "MD013": false,
+    // Several sections may share a heading name (for example "Install") across releases.
+    "MD024": { "siblings_only": true },
+    // SKILL.md and agent files start with YAML frontmatter, not a heading.
+    "MD041": false
+  },
+  "ignores": ["**/CHANGELOG.md", "**/node_modules/**", ".claude/**"]
+}

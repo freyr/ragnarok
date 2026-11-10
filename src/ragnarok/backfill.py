@@ -13,6 +13,7 @@ import tarfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, cast
 
 import yaml
 
@@ -45,7 +46,7 @@ def backup_dir(cfg: Config) -> Path:
 
 
 def _hash(text: str) -> str:
-    return hashlib.sha1(text.encode()).hexdigest()
+    return hashlib.sha1(text.encode(), usedforsecurity=False).hexdigest()
 
 
 def _words(text: str) -> set[str]:
@@ -63,7 +64,7 @@ def _match_project(name: str, slugs: set[str]) -> str | None:
     return best
 
 
-def propose(cfg: Config, vault: str) -> dict:
+def propose(cfg: Config, vault: str) -> dict[str, Any]:
     """Return the proposal for one vault: one row for each note with a missing schema key."""
     notes, malformed = [], []
     for rel in iter_notes(cfg):
@@ -107,7 +108,7 @@ def propose(cfg: Config, vault: str) -> dict:
     return {"vault": vault, "created": time.strftime("%Y-%m-%d %H:%M:%S"), "malformed": malformed, "rows": rows}
 
 
-def coverage(cfg: Config) -> dict:
+def coverage(cfg: Config) -> dict[str, Any]:
     """The share of notes in each vault whose frontmatter has each schema key."""
     counts: dict[str, dict[str, int]] = {}
     for rel in iter_notes(cfg):
@@ -122,22 +123,22 @@ def coverage(cfg: Config) -> dict:
     }
 
 
-def write_proposal(cfg: Config, vault: str, proposal: dict) -> Path:
+def write_proposal(cfg: Config, vault: str, proposal: dict[str, Any]) -> Path:
     path = proposal_path(cfg, vault)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(proposal, allow_unicode=True, sort_keys=False, width=1000))
     return path
 
 
-def read_proposal(cfg: Config, vault: str) -> dict:
-    return yaml.safe_load(proposal_path(cfg, vault).read_text())
+def read_proposal(cfg: Config, vault: str) -> dict[str, Any]:
+    return cast(dict[str, Any], yaml.safe_load(proposal_path(cfg, vault).read_text()))
 
 
 def describe_path(cfg: Config, vault: str) -> Path:
     return cfg.data_dir / "proposals" / f"describe-{vault}.json"
 
 
-def export_rows(cfg: Config, proposal: dict) -> list[dict]:
+def export_rows(cfg: Config, proposal: dict[str, Any]) -> list[dict[str, Any]]:
     """One item for each public row that needs a description: path, title, type and the redacted first lines."""
     items = []
     for row in proposal["rows"]:
@@ -159,7 +160,7 @@ def export_rows(cfg: Config, proposal: dict) -> list[dict]:
     return items
 
 
-def write_export(cfg: Config, vault: str, proposal: dict) -> tuple[Path, int]:
+def write_export(cfg: Config, vault: str, proposal: dict[str, Any]) -> tuple[Path, int]:
     items = export_rows(cfg, proposal)
     path = describe_path(cfg, vault)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -179,7 +180,7 @@ class MergeResult:
     unknown: list[str] = field(default_factory=list)
 
 
-def merge_descriptions(proposal: dict, descriptions: dict) -> MergeResult:
+def merge_descriptions(proposal: dict[str, Any], descriptions: dict[str, Any]) -> MergeResult:
     """Put the descriptions and the types from Claude into the proposal rows. approve and hash do not change."""
     result = MergeResult(rows=len(proposal["rows"]))
     paths = {row["path"] for row in proposal["rows"]}
@@ -247,7 +248,7 @@ def _split_frontmatter(text: str) -> tuple[int, str] | None:
     return m.start(), nl
 
 
-def insert_keys(text: str, values: dict) -> str:
+def insert_keys(text: str, values: dict[str, Any]) -> str:
     """Add the keys to the frontmatter of text (or a new frontmatter), with no other change."""
     block = yaml.safe_dump(values, allow_unicode=True, sort_keys=False, width=1000)
     split = _split_frontmatter(text)
@@ -260,7 +261,7 @@ def insert_keys(text: str, values: dict) -> str:
     return text[:at] + block.replace("\n", nl) + text[at:]
 
 
-def _checked_insert(text: str, fm: dict, body: str, values: dict) -> str | None:
+def _checked_insert(text: str, fm: dict[str, Any], body: str, values: dict[str, Any]) -> str | None:
     """insert_keys, but None when the result does not parse to the same body and frontmatter plus the new keys."""
     new = insert_keys(text, values)
     new_fm, new_body = parse_note(new)
@@ -277,7 +278,7 @@ class ApplyResult:
     skipped: list[str] = field(default_factory=list)
 
 
-def apply(cfg: Config, vault: str, proposal: dict) -> ApplyResult:
+def apply(cfg: Config, vault: str, proposal: dict[str, Any]) -> ApplyResult:
     if proposal.get("vault") != vault:
         raise ValueError(f"the proposal is for the vault {proposal.get('vault')}, not {vault}")
     result = ApplyResult(archive=str(archive(cfg, vault)))

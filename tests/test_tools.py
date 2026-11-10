@@ -110,7 +110,8 @@ def test_open_note_redacts_and_hides_private_links(tools):
     assert {"target": "boiler", "path": "Home/Heating/notes/boiler.md"} in note["links"]
     assert all(link["target"] != "2026" for link in note["links"])
     section = tools.open_note("Home/Heating/notes/boiler.md", heading="Wiring")
-    assert "hunter2" not in section["text"] and "[REDACTED]" in section["text"]
+    assert "hunter2" not in section["text"]
+    assert "[REDACTED]" in section["text"]
     assert "weather curve" not in section["text"]
     assert section["backlinks"] == ["Home/Heating/SUMMARY.md"]
 
@@ -146,7 +147,8 @@ def test_open_note_gives_the_outline_of_a_long_note(tools):
     rel = "Home/Heating/long.md"
     part = "The pump runs. " * 700
     (tools.cfg.root / rel).write_text(f"# Long\n\n## Results\n{part}\n## Plan\n{part}\n### Results\nShort.\n")
-    assert "outline" in tools.open_note(rel) and "text" not in tools.open_note(rel)
+    assert "outline" in tools.open_note(rel)
+    assert "text" not in tools.open_note(rel)
     assert "text" in tools.open_note(rel, outline=False)
     assert "text" in tools.open_note("Home/Heating/notes/boiler.md")
     assert tools.open_note(rel, heading="Plan > Results")["text"].strip() == "Short."
@@ -180,7 +182,8 @@ def test_server_search_has_no_subject_and_no_include_superseded(tools):
     server = build(tools=tools)
     search_tool = next(t for t in asyncio.run(server.list_tools()) if t.name == "search")
     assert not {"subject", "include_superseded"} & search_tool.input_schema["properties"].keys()
-    assert "superseded" not in search_tool.description and "class" not in search_tool.description
+    assert "superseded" not in search_tool.description
+    assert "class" not in search_tool.description
 
 
 def test_server_lists_the_six_tools(tools):

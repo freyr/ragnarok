@@ -15,6 +15,7 @@ import re
 import tomllib
 from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
+from typing import Any
 
 PATH_KEYS = ("root", "data_dir", "index_path")
 
@@ -120,13 +121,14 @@ class Config:
     # TOPK chunks in each list) or "note_vector" (also the mean chunk vector of each note as a third list)
     note_rank: str = "maxp"
     # bench: settings that override the keys in VARIANT_KEYS, and sets of vaults to index with a variant
-    variants: dict[str, dict] = field(default_factory=dict)
+    variants: dict[str, dict[str, Any]] = field(default_factory=dict)
     corpora: dict[str, Corpus] = field(default_factory=dict)
     # data_dir holds index.db, backups/ and proposals/; without index_path the index is data_dir/index.db
-    data_dir: Path | None = None
-    index_path: Path | None = None
+    # Both may be None in the constructor; __post_init__ always sets them, so the type is Path.
+    data_dir: Path = None  # type: ignore[assignment]
+    index_path: Path = None  # type: ignore[assignment]
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         # Ollama takes seconds as an integer or a duration with a unit ("30m"); it refuses "-1", a bool or a float.
         ok_int = isinstance(self.keep_alive, int) and not isinstance(self.keep_alive, bool)
         ok_str = isinstance(self.keep_alive, str) and not self.keep_alive.lstrip("-").isdigit()
@@ -204,7 +206,7 @@ def rules_hash(cfg: Config) -> str:
     values["vault_rules"] = {vault: asdict(rules) for vault, rules in sorted(cfg.vault_rules.items())}
     if cfg.vault_paths:  # only when set, so that an index made before vault_paths keeps its hash
         values["vault_paths"] = {vault: str(path) for vault, path in sorted(cfg.vault_paths.items())}
-    return hashlib.sha1(json.dumps(values, sort_keys=True).encode()).hexdigest()
+    return hashlib.sha1(json.dumps(values, sort_keys=True).encode(), usedforsecurity=False).hexdigest()
 
 
 def config_path() -> Path:
@@ -241,7 +243,7 @@ def load_config(path: Path | None = None) -> Config:
     return Config(**values)
 
 
-def _corpus(path: Path, name: str, values: dict) -> Corpus:
+def _corpus(path: Path, name: str, values: dict[str, Any]) -> Corpus:
     if set(values) != {"root", "vaults"}:
         raise ValueError(f"corpus {name} in {path} needs the keys root and vaults, and no other key")
     return Corpus(path.parent / Path(values["root"]).expanduser(), list(values["vaults"]))
@@ -254,7 +256,7 @@ def variant_hash(cfg: Config) -> str:
     p = profile(cfg)
     values = {key: getattr(cfg, key) for key in VARIANT_KEYS}
     values.update(query_prefix=p.query_prefix, doc_template=p.doc_template)
-    return hashlib.sha1(json.dumps(values, sort_keys=True).encode()).hexdigest()[:12]
+    return hashlib.sha1(json.dumps(values, sort_keys=True).encode(), usedforsecurity=False).hexdigest()[:12]
 
 
 def dump_config(cfg: Config, **paths: Path | str) -> str:

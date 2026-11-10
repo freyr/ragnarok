@@ -4,16 +4,16 @@
   "title": "ragnarok",
   "description": "Local RAG search over Obsidian vaults: SQLite hybrid search with local Ollama embeddings.",
   "repository": {
-    "url": "https://github.com/freyr/ragnarok",
+    "url": "https://github.com/freyr/ragnarok-bundle",
     "source": "github"
   },
-  "version": "2.1.0",
+  "version": "2.1.1",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "ragnarok-mcp",
-      "version": "2.1.0",
+      "version": "2.1.1",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
