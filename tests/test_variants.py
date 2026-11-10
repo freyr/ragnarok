@@ -343,7 +343,14 @@ def test_bench_index_of_the_baseline_on_real_gives_the_default_chunks_with_no_em
     assert hashes(variant) == hashes(home / "data/index.db")
 
 
-def test_bench_index_refuses_an_index_of_other_variant_settings(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize(
+    "changed",
+    [
+        "[variants.v]\nmin_words = 50",  # a setting that only the variant hash holds
+        "[variants.v]\nmin_words = 1\ndimension = 4",  # a setting that the index check of connect() holds
+    ],
+)
+def test_bench_index_refuses_an_index_of_other_variant_settings(tmp_path, monkeypatch, capsys, changed):
     home = bench_home(
         tmp_path,
         monkeypatch,
@@ -351,11 +358,13 @@ def test_bench_index_refuses_an_index_of_other_variant_settings(tmp_path, monkey
         '\n[variants.v]\nmin_words = 1\n\n[corpora.real]\nroot = "vaults"\nvaults = ["V"]\n',
     )
     assert run(capsys, "bench", "index", "--variant", "v", "--corpus", "real")[0] == 0
-    text = (home / "config.toml").read_text().replace("[variants.v]\nmin_words = 1", "[variants.v]\nmin_words = 50")
+    text = (home / "config.toml").read_text().replace("[variants.v]\nmin_words = 1", changed)
     (home / "config.toml").write_text(text)
     code, out = run(capsys, "bench", "index", "--variant", "v", "--corpus", "real")
     assert code == 1
-    assert "variants/v/real" in out.err
+    # the way out of a variant index is to delete its folder, not the index_path advice of the default index
+    assert f"Delete the folder {home / 'data/variants/v/real'}" in out.err
+    assert "ragnarok bench index" in out.err and "index_path" not in out.err
 
 
 def test_bench_index_of_an_unknown_variant_fails(tmp_path, monkeypatch, capsys):
