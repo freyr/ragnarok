@@ -20,9 +20,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/freyr/ragnarok"
-Changelog = "https://github.com/freyr/ragnarok/blob/main/CHANGELOG.md"
-Issues = "https://github.com/freyr/ragnarok/issues"
+Homepage = "https://github.com/freyr/ragnarok-bundle"
+Changelog = "https://github.com/freyr/ragnarok-bundle/blob/main/CHANGELOG.md"
+Issues = "https://github.com/freyr/ragnarok-bundle/issues"
 
 [project.scripts]
 ragnarok = "ragnarok.cli:main"

@@ -4,7 +4,7 @@
   "title": "ragnarok",
   "description": "Local RAG search over Obsidian vaults: SQLite hybrid search with local Ollama embeddings.",
   "repository": {
-    "url": "https://github.com/freyr/ragnarok",
+    "url": "https://github.com/freyr/ragnarok-bundle",
     "source": "github"
   },
   "version": "2.1.0",

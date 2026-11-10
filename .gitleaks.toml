@@ -1,0 +1,8 @@
+# The server tests hold fake credentials on purpose: they check that the indexer and open_note redact them.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fake credentials in the redaction tests"
+paths = ['''(^|/)tests/''']

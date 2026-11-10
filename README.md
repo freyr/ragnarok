@@ -55,7 +55,7 @@ ragnarok is on [PyPI](https://pypi.org/p/ragnarok-mcp) as `ragnarok-mcp` and in 
 In Claude Code:
 
 ```text
-/plugin marketplace add freyr/ragnarok-claude-plugin
+/plugin marketplace add freyr/ragnarok-bundle
 /plugin install ragnarok@ragnarok
 ```
 
@@ -72,8 +72,8 @@ folder is `~/.ragnarok`. To use a different folder, set `RAGNAROK_HOME` in the `
 ### From a checkout
 
 ```bash
-git clone https://github.com/freyr/ragnarok.git
-cd ragnarok
+git clone https://github.com/freyr/ragnarok-bundle.git
+cd ragnarok-bundle
 ./setup.sh                      # installs uv if needed, then runs `ragnarok init`
 ```
 
@@ -266,20 +266,78 @@ ignores `config.toml`, `data/` and `logs/`.
 
 Ollama keeps the model in `~/.ollama`.
 
+## Repository layout
+
+This repository holds the MCP server and the Claude Code plugin marketplace `ragnarok`.
+
+```text
+src/ragnarok/  tests/             the MCP server, the PyPI package ragnarok-mcp
+pyproject.toml  server.json       the package and the MCP Registry entry
+CHANGELOG.md                      the changelog of the server
+.claude-plugin/marketplace.json   the marketplace "ragnarok": lists each plugin and its folder
+plugins/<name>/                   one folder for each plugin, with .claude-plugin/plugin.json
+plugins/CHANGELOG.md              the changelog of the plugins
+templates/plugin/                 the skeleton for a new plugin
+scripts/                          the version bump and the validation of the plugins
+```
+
+The server and the plugins have separate versions and tags: `server-vX.Y.Z` and `plugin-vX.Y.Z`.
+
 ## Development
+
+### Server
 
 ```bash
 uv run pytest
 uv run ruff check . && uv run ruff format --check .
 ```
 
-### Release
+### Plugins
+
+Load a plugin from its folder for one session:
+
+```text
+claude --plugin-dir plugins/<name>
+```
+
+Or add the checkout as a local marketplace. Then `/reload-plugins` reads your edits with no new version:
+
+```text
+claude plugin marketplace add <path of the checkout>
+```
+
+To add a plugin, copy `templates/plugin/` to `plugins/<name>/`, replace `PLUGIN_NAME` and
+`ONE_LINE_DESCRIPTION`, and add an entry to `.claude-plugin/marketplace.json`. `scripts/validate-plugins.sh`
+validates all plugins. Do not change a plugin `version` by hand.
+
+### Server release
 
 1. Set the version in `pyproject.toml` and in both `version` fields of `server.json`, and add the section to
    `CHANGELOG.md`.
-2. After the merge, push the tag: `git tag v1.2.3 && git push origin v1.2.3`.
+2. After the merge, push the tag: `git tag server-v1.2.3 && git push origin server-v1.2.3`.
 3. The workflow `publish.yml` checks that the three versions match the tag, runs the tests, publishes the
    package to PyPI with trusted publishing, then publishes `server.json` to the MCP Registry.
+
+The tags `v1.0.0` to `v2.1.0` are the server releases before the plugins moved into this repository.
+
+### Plugin release
+
+All plugins and the marketplace share one version. Each push to `main` that changes `plugins/` or
+`.claude-plugin/` runs `plugins-release.yml`. It looks at the commit messages since the last `plugin-v` tag.
+A marker in a commit message selects the release:
+
+| Marker | Release | Example |
+| --- | --- | --- |
+| `[major]` | 1.4.2 → 2.0.0 | `Rename the search skill [major]` |
+| `[minor]` | 1.4.2 → 1.5.0 | `Add the setup command [minor]` |
+| `[patch]` | 1.4.2 → 1.4.3 | `Fix the hook matcher [patch]` |
+| none, or `[none]` | no release | `Edit the README` |
+
+Put a marker only in a commit that changes the plugins: the workflow reads all commit messages since the
+last plugin tag. When a marker is found, the workflow runs `plugins-ci.yml`, sets the new version in
+`.claude-plugin/marketplace.json` and in every `plugin.json`, adds the section to `plugins/CHANGELOG.md` with
+[git-cliff](https://git-cliff.org) (`cliff.toml`), commits, tags `plugin-vX.Y.Z` and publishes a GitHub
+release.
 
 ## License
 
