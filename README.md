@@ -244,6 +244,28 @@ The verdict of `bench compare`:
 - A synthetic set: B wins when the interval of B − A at its Holm level is above 0 for recall@5 or for MRR, the point difference of the other measure is not below 0, and the p95 search time (scan included) is below 500 ms. The report also gives the sign of the difference in each vault.
 - A real set does not decide a win. It checks that B does not get worse: the lower end of the interval of B − A must be above −margin for recall@5 and for MRR. It also checks the p95 time.
 
+### The synthetic set
+
+`ragnarok synth` makes a synthetic vault with known answers in a work folder, one folder for each seed. Run the
+commands in a checkout: they read the prompts in `bench/synthetic/prompts/` and call `claude -p` (no tools, no
+settings, no `CLAUDE.md`).
+
+| Command | What it does |
+|---|---|
+| `ragnarok synth graph --seed <n> --questions <n> --out <folder>` | Builds the seeded fact graph of the vault `seed<n>`: areas, projects with `DRIVERS.md` and `SUMMARY.md`, devices, places, people and their facts, each with a unique value in exactly one current note, plus distractor notes, archived notes with an older value and long notes (3,000-10,000 words) with the fact in the last section. It plans one question for each gold note, in the strata `direct` 20%, `lexical-gap` 20%, `deep-section` 20%, `distractor` 15%, `outdated` 10%, `continuation` 10% and `multi-hop` 5%, each with a `dev` or `test` half and a property set that matches exactly one subject. It writes `world.json` and `graph.json` and prints the graph hash; the same seed gives the same hash. |
+| `ragnarok synth render <folder> [--model sonnet] [--jobs 4]` | Writes each note with `claude -p` from its facts and the style targets (aggregate numbers only) into `<folder>/vault/seed<n>/`. A note that fails its string checks is written again at most twice and then removed with its question. A second run continues. |
+| `ragnarok synth questions <folder> [--model sonnet] [--jobs 4]` | Writes each question from its fact tuple only, with the forbidden words and the instruction of its stratum, and gives it to a blind `claude -p` call with the subjects of the same class and area. A question with a forbidden word or that the blind call does not resolve to its subject is written again at most twice and then removed. |
+| `ragnarok synth verify <folder>` | Checks the graph hash, the property sets, the strata and the halves, that each value is in its note and in no other note (a distractor holds no gold value), the length of each long note and the position of its fact, the forbidden words and the answer of the blind check. It lists each failed check, writes `verify.json` and fails when a kept note or question fails. |
+| `ragnarok synth freeze <folder>... --name <set> [--out bench/synthetic/<set>]` | Freezes verified work folders into one set folder: `vault.tar.gz`, `questions.json` (a set of kind `synthetic` whose corpus is the set name, with the `half` of each question), the `world-` and `graph-` file of each seed, the prompts, `verify.json` and `manifest.json` with the SHA-256 of each file and the model IDs. It refuses when a check fails or when the notes, the questions or the graphs hold a term of the deny list. |
+
+The deny list holds the terms that must never be in a synthetic set: vault names, real names, real paths. It stays
+outside the repo, in `RAGNAROK_SYNTH_DENY`, else `data/synth-deny.txt` of the home folder: one term on each line, `#`
+starts a comment, no case, whole words for a term of letters. The tests marked `local` call `claude -p` and read the
+deny list; CI skips them, `uv run pytest -m local` runs them.
+
+To measure a frozen set, unpack `vault.tar.gz` into a folder and add `[corpora.<set>]` with that folder as `root` and
+the vaults `seed<n>` of the manifest.
+
 Run each command with `uvx ragnarok-mcp`, for example `uvx ragnarok-mcp search "boiler"`, or with `uv run` in the
 checkout.
 

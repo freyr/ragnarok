@@ -47,3 +47,6 @@ select = ["E", "F", "I", "B", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# a local test calls claude -p or reads the local deny list; CI skips it, `uv run pytest -m local` runs it
+markers = ["local: needs claude -p or the deny list of this computer"]
+addopts = "-m 'not local'"

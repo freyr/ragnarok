@@ -20,6 +20,7 @@ COMMANDS = {
     "init": "Set up this computer: config, Ollama, model, index and the MCP server in Claude Code",
     "doctor": "Check the six parts of the setup and print the fix for each failure",
     "bench": "Measure the variants of the index settings",
+    "synth": "Generate, verify and freeze a synthetic vault and its question set",
 }
 
 
@@ -84,7 +85,59 @@ def build_parser() -> argparse.ArgumentParser:
     bv.add_argument("--corpus", required=True, help="the corpus of the set, a table [corpora.<name>] of the config")
     bv.add_argument("--path-map", type=Path, help="a TSV file with the columns old and new: the new path of an old one")
     bv.add_argument("--area", action="append", dest="areas", help="keep only the questions of this area (repeatable)")
+    synth = parsers["synth"].add_subparsers(dest="synth", required=True)
+    sg = synth.add_parser("graph", help="Build the seeded fact graph of one vault")
+    sg.add_argument("--seed", required=True, type=int)
+    sg.add_argument("--questions", required=True, type=int, help="the number of questions (one for each gold note)")
+    sg.add_argument("--out", required=True, type=Path, help="a new work folder")
+    for name, help_text in (("render", "Write the notes with claude -p"), ("questions", "Write the questions")):
+        sp = synth.add_parser(name, help=help_text)
+        sp.add_argument("work", type=Path, help="the work folder of `synth graph`")
+        sp.add_argument("--model", default="sonnet", help="the Claude model (default sonnet)")
+        sp.add_argument("--jobs", type=int, default=4, help="parallel claude -p calls (default 4)")
+    sy = synth.add_parser("verify", help="Run each check of the graph, the notes and the questions")
+    sy.add_argument("work", type=Path)
+    sf = synth.add_parser("freeze", help="Freeze verified work folders into one set folder")
+    sf.add_argument("works", type=Path, nargs="+", help="one work folder for each seed")
+    sf.add_argument("--name", required=True, help="the set name, also the corpus name")
+    sf.add_argument("--out", type=Path, help="the set folder (default bench/synthetic/<name>)")
     return parser
+
+
+def cmd_synth(cfg, args) -> int:
+    from . import synth
+
+    try:
+        if args.synth == "graph":
+            graph = synth.write_graph(args.out, args.seed, args.questions)
+            print(
+                f"graph {graph['hash']}: vault {graph['vault']}, {len(graph['notes'])} notes, "
+                f"{len(graph['questions'])} questions, written to {args.out}"
+            )
+        elif args.synth == "render":
+            result = synth.render(args.work, model=args.model, jobs=args.jobs)
+            print(f"{result['ok']} notes written, {result['removed']} removed, of {result['notes']}")
+        elif args.synth == "questions":
+            result = synth.write_questions(args.work, model=args.model, jobs=args.jobs)
+            print(f"{result['ok']} questions written, {result['removed']} removed, of {result['questions']}")
+        elif args.synth == "verify":
+            report = synth.verify(args.work)
+            for f in report["failures"]:
+                print(f"{f['check']} {f['id']}: {f['detail']}")
+            n, q = report["notes"], report["questions"]
+            print(
+                f"{len(report['failures'])} failed checks; notes kept {n['kept']} removed {n['removed']}; "
+                f"questions kept {q['kept']} removed {q['removed']}; report {Path(args.work) / 'verify.json'}"
+            )
+            return 0 if report["passed"] else 1
+        else:
+            out = args.out or Path("bench") / "synthetic" / args.name
+            manifest = synth.freeze(args.works, args.name, out, synth.deny_path())
+            print(f"set {args.name} frozen to {out}: {sum(v['questions'] for v in manifest['vaults'])} questions")
+    except synth.SynthError as e:
+        print(f"ragnarok synth {args.synth}: {e}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _relative(cfg, raw: str) -> str:
@@ -524,6 +577,7 @@ HANDLERS = {
     "status": cmd_status,
     "search": cmd_search,
     "bench": cmd_bench,
+    "synth": cmd_synth,
 }
 
 
