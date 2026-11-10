@@ -839,8 +839,8 @@ def note_failures(
             out.append(("property-in-note", f"the note does not state the property value {value!r}"))
     if note["long"]:
         words = len(text.split())
-        if words < LONG_WORDS[0]:
-            out.append(("long-note-length", f"{words} words, not {LONG_WORDS[0]} or more"))
+        if not LONG_WORDS[0] <= words <= LONG_WORDS[1]:
+            out.append(("long-note-length", f"{words} words, not {LONG_WORDS[0]} to {LONG_WORDS[1]}"))
         for fid in note["facts"]:
             at = text.find(facts[fid]["token"])
             if fid in asked and 0 <= at < len(text) / 2:

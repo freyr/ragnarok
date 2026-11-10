@@ -189,11 +189,12 @@ def test_the_forbidden_words_of_a_question(graph):
 class Fake:
     """Writes each note with the values of its prompt at the end, each question from its properties, and answers the
     subject check with the candidate whose properties the question names. `omit` holds the titles of notes that it
-    always writes without values."""
+    always writes without values; `long_once` holds the titles of notes whose first version is 11,000 words too long."""
 
-    def __init__(self, graph, omit=()):
+    def __init__(self, graph, omit=(), long_once=()):
         self.values = [f["value"] for f in graph["facts"]]
         self.omit = set(omit)
+        self.long_once = set(long_once)
         self.calls = 0
 
     def __call__(self, prompt, model):
@@ -203,6 +204,9 @@ class Fake:
             words = int(re.search(r"about (\d+) words", prompt).group(1))
             headings = re.findall(r"^## (.+)$", prompt, re.M)
             body = "\n\n".join(f"## {h}\n\n" + "lorem " * (words // max(len(headings), 1)) for h in headings)
+            if title in self.long_once and "Start with the first heading" in prompt:
+                self.long_once.discard(title)
+                body = "ipsum " * 11000 + body
             if title not in self.omit:
                 about = re.search(r"^The note is about: (.+)$", prompt, re.M).group(1)
                 body += f"\n\nThis is {about}."
@@ -270,6 +274,25 @@ def test_a_failed_note_is_written_again_twice_and_then_removed_with_its_question
     assert report["passed"]
     assert report["removed"] == {"notes": [gold["path"]], "questions": [q["id"]]}
     assert report["questions"]["kept"] == 19
+
+
+def test_a_long_note_above_the_maximum_is_written_again_and_verify_reports_it(work):
+    out, graph = work
+    q = next(q for q in graph["questions"] if q["stratum"] == "deep-section")
+    gold = _note(graph, q["cluster"])
+    fake = Fake(graph, long_once=[gold["title"]])
+    render(out, fake, jobs=1)
+    render_state = json.loads((out / "notes.json").read_text())
+    assert render_state[gold["id"]]["status"] == "ok"
+    assert render_state[gold["id"]]["attempts"] == 2
+    write_questions(out, fake, jobs=1)
+    assert verify(out)["passed"]
+    # a note above the maximum: padding before the body keeps the deep value in the second half
+    p = out / "vault" / gold["path"]
+    head, body = p.read_text().split("\n## ", 1)
+    p.write_text(head + "\n" + "ipsum " * 11000 + "\n## " + body)
+    found = {(f["check"], f["id"]) for f in verify(out)["failures"]}
+    assert found == {("long-note-length", gold["path"])}
 
 
 def test_verify_reports_each_failed_check_of_a_broken_fixture(work):
