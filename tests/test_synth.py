@@ -189,19 +189,21 @@ def test_the_forbidden_words_of_a_question(graph):
 class Fake:
     """Writes each note with the values of its prompt at the end, each question from its properties, and answers the
     subject check with the candidate whose properties the question names. `omit` holds the titles of notes that it
-    always writes without values; `long_once` holds the titles of notes whose first version is 11,000 words too long."""
+    always writes without values; `long_once` holds the titles of notes whose first version is 11,000 words too long;
+    `stretch` multiplies the length that each prompt asks for, as a model that writes too much."""
 
-    def __init__(self, graph, omit=(), long_once=()):
+    def __init__(self, graph, omit=(), long_once=(), stretch=1.0):
         self.values = [f["value"] for f in graph["facts"]]
         self.omit = set(omit)
         self.long_once = set(long_once)
+        self.stretch = stretch
         self.calls = 0
 
     def __call__(self, prompt, model):
         self.calls += 1
         if prompt.startswith("You write one note"):
             title = re.search(r"^Title of the note: (.+)$", prompt, re.M).group(1)
-            words = int(re.search(r"about (\d+) words", prompt).group(1))
+            words = int(int(re.search(r"about (\d+) words", prompt).group(1)) * self.stretch)
             headings = re.findall(r"^## (.+)$", prompt, re.M)
             body = "\n\n".join(f"## {h}\n\n" + "lorem " * (words // max(len(headings), 1)) for h in headings)
             if title in self.long_once and "Start with the first heading" in prompt:
@@ -293,6 +295,18 @@ def test_a_long_note_above_the_maximum_is_written_again_and_verify_reports_it(wo
     p.write_text(head + "\n" + "ipsum " * 11000 + "\n## " + body)
     found = {(f["check"], f["id"]) for f in verify(out)["failures"]}
     assert found == {("long-note-length", gold["path"])}
+
+
+def test_a_long_note_written_too_long_is_asked_again_with_fewer_words(work):
+    out, graph = work
+    longest = max((n for n in graph["notes"] if n["long"]), key=lambda n: n["words"])
+    longest["words"] = 9500
+    (out / "graph.json").write_text(json.dumps(graph))
+    fake = Fake(graph, stretch=1.4)
+    render(out, fake, jobs=1)
+    state = json.loads((out / "notes.json").read_text())[longest["id"]]
+    assert (state["status"], state["attempts"]) == ("ok", 2)
+    assert 3000 <= len((out / "vault" / longest["path"]).read_text().split()) <= 10000
 
 
 def test_verify_reports_each_failed_check_of_a_broken_fixture(work):

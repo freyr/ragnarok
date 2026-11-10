@@ -695,8 +695,9 @@ def _context(note: dict, s: dict) -> str:
     return ""
 
 
-def note_prompts(graph: dict, note: dict, template: str, feedback: str = "") -> list[str]:
-    """The prompts of a note: one, or one for each part of a long note (the facts go into the last part)."""
+def note_prompts(graph: dict, note: dict, template: str, feedback: str = "", scale: float = 1.0) -> list[str]:
+    """The prompts of a note: one, or one for each part of a long note (the facts go into the last part). `scale`
+    multiplies the length that the prompts ask for."""
     subjects = {s["id"]: s for s in graph["subjects"]}
     facts = {f["id"]: f for f in graph["facts"]}
     s = subjects[note["subject"]]
@@ -720,7 +721,7 @@ def note_prompts(graph: dict, note: dict, template: str, feedback: str = "") -> 
     parts = math.ceil(note["words"] / PART_WORDS) if note["long"] else 1
     size = math.ceil(len(note["headings"]) / parts)
     groups = [note["headings"][i : i + size] for i in range(0, len(note["headings"]), size)]
-    words = math.ceil(note["words"] / len(groups))
+    words = math.ceil(note["words"] * scale / len(groups))
     prompts = []
     for i, headings in enumerate(groups):
         last = i == len(groups) - 1
@@ -850,6 +851,19 @@ def note_failures(
     return out
 
 
+def _length_scale(note: dict, text: str) -> float:
+    """The factor for the next attempt of a long note outside the word range: a model that writes too much is asked
+    for fewer words, aimed at 90% of the maximum (or 110% of the minimum)."""
+    if not note["long"]:
+        return 1.0
+    words = len(text.split())
+    if words > LONG_WORDS[1]:
+        return 0.9 * LONG_WORDS[1] / words
+    if words < LONG_WORDS[0]:
+        return 1.1 * LONG_WORDS[0] / words
+    return 1.0
+
+
 def render(work: Path, runner=claude, model: str = "sonnet", jobs: int = 4, prompts: Path = PROMPTS) -> dict:
     """Write each note that is not written yet. A note that fails its string checks is written again at most twice
     and then removed."""
@@ -869,16 +883,18 @@ def render(work: Path, runner=claude, model: str = "sonnet", jobs: int = 4, prom
         failures: list[tuple[str, str]] = []
         models = set()
         attempt = 0
+        scale = 1.0
         while attempt <= RETRIES:
             attempt += 1
             feedback = "; ".join(f"{c}: {d}" for c, d in failures)
             bodies = []
-            for prompt in note_prompts(graph, note, template, feedback):
+            for prompt in note_prompts(graph, note, template, feedback, scale):
                 text, model_id = runner(prompt, model)
                 bodies.append(text)
                 models.add(model_id)
             text = note_text(graph, note, bodies)
             failures = note_failures(graph, note, text, tokens, required)
+            scale *= _length_scale(note, text)
             if not failures:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(text)
