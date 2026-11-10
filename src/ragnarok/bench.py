@@ -13,7 +13,7 @@ import numpy as np
 
 from .config import Config, variant_hash
 from .evaluate import keywords
-from .index import IndexMismatch, connect
+from .index import IndexMismatch, connect, update
 from .metadata import resolve_file
 from .search import CANDIDATES, search
 from .tools import Tools
@@ -95,6 +95,8 @@ def load_set(path: Path) -> dict:
             bad.append("expected")
         if bad:
             raise ValueError(f"{path}: question {q.get('id')!r} has no valid {', '.join(bad)}")
+        if q["cluster"] not in expected:
+            raise ValueError(f"{path}: the cluster of question {q['id']!r} is not one of its expected paths")
         if q["id"] in ids:
             raise ValueError(f"{path}: the question id {q['id']!r} is not unique")
         ids.add(q["id"])
@@ -136,15 +138,22 @@ def convert(old: list[dict], cfg: Config) -> tuple[list[dict], list[tuple[str, s
 
 
 class MissingGold(ValueError):
-    def __init__(self, missing: list[tuple[str, str]]):
-        super().__init__(f"{len(missing)} expected paths are not in the index")
+    def __init__(self, missing: list[tuple[str, str, str]]):
+        super().__init__(f"{len(missing)} expected paths cannot be found")
         self.missing = missing
 
 
-def missing_gold(conn: sqlite3.Connection, questions: list[dict]) -> list[tuple[str, str]]:
-    """The (id, path) of each expected path that the search cannot return: not in the index, or private."""
-    known = {p for (p,) in conn.execute("SELECT path FROM notes WHERE sensitivity = 'normal'")}
-    return [(q["id"], e) for q in questions for e in q["expected"] if e not in known]
+def missing_gold(conn: sqlite3.Connection, questions: list[dict]) -> list[tuple[str, str, str]]:
+    """The (id, path, reason) of each expected path that the search cannot return: "not in the index" or "private"."""
+    sensitivity = dict(conn.execute("SELECT path, sensitivity FROM notes"))
+    missing = []
+    for q in questions:
+        for e in q["expected"]:
+            if e not in sensitivity:
+                missing.append((q["id"], e, "not in the index"))
+            elif sensitivity[e] != "normal":
+                missing.append((q["id"], e, "private"))
+    return missing
 
 
 def overlap(cfg: Config, question: str, path: str) -> float:
@@ -169,9 +178,12 @@ def result_path(vcfg: Config, bench_set: dict) -> Path:
 
 def run_set(vcfg: Config, conn: sqlite3.Connection, embedder, bench_set: dict, variant: str) -> dict:
     """Each question through Tools.search with limit 20 and the change scan. Raise MissingGold before the first
-    question when an expected path is not in the index."""
+    question when an expected path is not in the index.
+
+    One update with no limit first makes the index current: the change scan of a tool call takes at most SCAN_LIMIT
+    notes, so an index far behind would give false missing paths and would change between the timed questions."""
+    update(vcfg, conn, embedder, limit=None)
     tools = Tools(vcfg, conn, embedder)
-    tools.scan()
     if missing := missing_gold(conn, bench_set["questions"]):
         raise MissingGold(missing)
     embedder.embed_query("warm up")  # the times are with the model warm
@@ -187,6 +199,7 @@ def run_set(vcfg: Config, conn: sqlite3.Connection, embedder, bench_set: dict, v
                 "id": q["id"],
                 "ranks": [paths.index(e) + 1 if e in paths else None for e in q["expected"]],
                 "scan_ms": scan,
+                "scan_changed": tools.last_scan["changed"],
                 "search_ms": round(max(total - scan, 0.0), 1),
                 "total_ms": round(total, 1),
                 "overlap": overlap(vcfg, q["question"], q["cluster"]),

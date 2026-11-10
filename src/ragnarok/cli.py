@@ -203,8 +203,8 @@ def _bench_run(cfg, args) -> int:
     try:
         result = run_set(vcfg, conn, OllamaEmbedder(vcfg), bench_set, args.variant)
     except MissingGold as e:
-        for qid, path in e.missing:
-            print(f"{qid}: {path}", file=sys.stderr)
+        for qid, path, reason in e.missing:
+            print(f"{qid}: {path} ({reason})", file=sys.stderr)
         print(f"ragnarok bench run: {e}. Correct the set; no question ran.", file=sys.stderr)
         return 1
     except EmbedError as e:

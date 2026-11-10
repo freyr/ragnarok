@@ -1,6 +1,7 @@
 """The set format v2, `bench run` and `bench compare`."""
 
 import json
+import os
 
 import numpy as np
 import pytest
@@ -136,6 +137,7 @@ def test_a_set_keeps_the_header_and_the_hash_of_the_questions(tmp_path):
         lambda d: d.update(version=1),
         lambda d: d["questions"][0].update(expected=[]),
         lambda d: d["questions"][0].pop("cluster"),
+        lambda d: d["questions"][1].update(cluster="V/c.md"),  # the cluster is not an expected path
     ],
 )
 def test_a_wrong_set_is_refused(tmp_path, change):
@@ -259,15 +261,43 @@ def fixture_questions():
 def test_bench_run_refuses_a_set_with_a_missing_gold_path(home, capsys):
     questions = fixture_questions()
     questions[1]["expected"] = ["V/Heating/pump.md", "V/Heating/gone.md"]
-    questions[3]["expected"] = ["W/Astro/old.md"]
+    questions[3]["expected"] = ["W/Astro/mount.md"]
+    questions[3]["cluster"] = "W/Astro/mount.md"
     path = home / "set.json"
     write_set(path, "pilot", "real", "real", questions)
+    config = home / "config.toml"
+    config.write_text('private_patterns = ["W/Astro/mount.md"]\n' + config.read_text())
     assert run(capsys, "bench", "index", "--variant", "baseline", "--corpus", "real")[0] == 0
     code, out = run(capsys, "bench", "run", "--set", path, "--variant", "baseline")
     assert code == 1
-    assert "q2: V/Heating/gone.md" in out.err and "q4: W/Astro/old.md" in out.err
-    assert "2 expected paths are not in the index" in out.err
+    assert "q2: V/Heating/gone.md (not in the index)" in out.err
+    assert "q4: W/Astro/mount.md (private)" in out.err
+    assert "2 expected paths cannot be found" in out.err
     assert not (home / "data/bench").exists()
+
+
+def test_bench_run_brings_an_index_far_behind_current_before_the_gold_check(home, capsys):
+    from ragnarok.index import SCAN_LIMIT
+
+    path = home / "set.json"
+    questions = fixture_questions()
+    questions[0]["expected"] = ["V/New/n00.md"]
+    questions[0]["cluster"] = "V/New/n00.md"
+    questions[0]["question"] = "note zero"
+    write_set(path, "pilot", "real", "real", questions)
+    assert run(capsys, "bench", "index", "--variant", "baseline", "--corpus", "real")[0] == 0
+    # more new notes than one change scan takes; the gold note is the oldest, so a scan with the limit defers it
+    for i in range(SCAN_LIMIT + 5):
+        note = home / "vaults/V/New" / f"n{i:02d}.md"
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text(f"# N{i}\nnote {'zero' if i == 0 else i}\n")
+        os.utime(note, (1_000_000 + i, 1_000_000 + i))
+    code, out = run(capsys, "bench", "run", "--set", path, "--variant", "baseline")
+    assert code == 0, out.err
+    result = json.loads(next((home / "data/bench").glob("*.json")).read_text())
+    # the index was current before the first question, so no timed scan changed a note
+    assert [r["scan_changed"] for r in result["questions"]] == [0, 0, 0, 0]
+    assert result["questions"][0]["ranks"][0] is not None
 
 
 def test_bench_run_writes_the_ranks_and_the_times(home, capsys):
