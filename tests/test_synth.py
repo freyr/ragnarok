@@ -10,9 +10,13 @@ import pytest
 from ragnarok.bench import load_set
 from ragnarok.cli import main
 from ragnarok.synth import (
+    ATTRIBUTES,
+    PROMPTS,
     SynthError,
     build_graph,
+    candidates,
     deny_hits,
+    forbidden_hits,
     freeze,
     graph_hash,
     property_failures,
@@ -200,6 +204,8 @@ class Fake:
             headings = re.findall(r"^## (.+)$", prompt, re.M)
             body = "\n\n".join(f"## {h}\n\n" + "lorem " * (words // max(len(headings), 1)) for h in headings)
             if title not in self.omit:
+                about = re.search(r"^The note is about: (.+)$", prompt, re.M).group(1)
+                body += f"\n\nThis is {about}."
                 body += "\n\n" + "\n".join(f"The value is {v}." for v in self.values if v in prompt)
             return body, "fake-model"
         if prompt.startswith("You write one search question"):
@@ -322,6 +328,7 @@ def test_verify_reports_each_failed_check_of_a_broken_fixture(work):
         ("distractor-holds-gold", distractor["path"]),
         ("long-note-length", deep["expected"][0]),
         ("deep-fact-position", deep["expected"][0]),
+        ("property-in-note", deep["expected"][0]),  # the short text no longer states the properties
         ("forbidden-word", lex["id"]),
         ("subject-check", cont["id"]),
         ("note-missing", old["path"]),
@@ -437,3 +444,105 @@ def test_the_synth_commands_graph_and_verify(tmp_path, capsys):
     assert main(["synth", "verify", str(out)]) == 1
     printed = capsys.readouterr().out
     assert "note-missing" in printed and "question-missing" in printed
+
+
+# --- review round 1 ------------------------------------------------------------------------------------------------
+
+
+def test_the_note_prompt_asks_for_the_properties_and_verify_checks_them(work):
+    out, graph = work
+    assert "State each property of the subject in the note" in (PROMPTS / "note.md").read_text()
+    fake = Fake(graph)
+    render(out, fake, jobs=2)
+    write_questions(out, fake, jobs=2)
+    assert verify(out)["passed"]
+    vault = out / "vault"
+    dq = next(q for q in graph["questions"] if q["stratum"] == "distractor")
+    # the gold note no longer states a property that the question uses (not the area: the frontmatter holds it)
+    key, value = next((k, v) for k, v in dq["props"].items() if k != "area")
+    gold = vault / dq["cluster"]
+    gold.write_text(re.sub(rf"\b{re.escape(value)}\b", "gone", gold.read_text()))
+    # a sibling note no longer states its own value of the property that differs from the gold subject
+    subjects = {s["id"]: s for s in graph["subjects"]}
+    sib_note = next(n for n in graph["notes"] if n["role"] == "distractor" and n["id"] in dq["notes"])
+    sib, gsub = subjects[sib_note["subject"]], subjects[dq["subject"]]
+    differs = next(k for k in sib["props"] if sib["props"][k] != gsub["props"][k])
+    if differs in dq["props"]:
+        p = vault / sib_note["path"]
+        p.write_text(re.sub(rf"\b{re.escape(sib['props'][differs])}\b", "gone", p.read_text()))
+    found = {(f["check"], f["id"]) for f in verify(out)["failures"]}
+    assert ("property-in-note", dq["cluster"]) in found
+    if differs in dq["props"]:
+        assert ("property-in-note", sib_note["path"]) in found
+
+
+def test_the_blind_check_shows_a_near_twin_of_another_area(graph):
+    q = next(q for q in graph["questions"] if "area" not in q["props"] and q["stratum"] != "continuation")
+    s = next(x for x in graph["subjects"] if x["id"] == q["subject"])
+    other_area = next(a for a in graph["areas"] if a != s["area"])
+    key = next(k for k in q["props"] if k != list(s["props"])[0])
+    twin_props = {**s["props"], "area": other_area.lower()}
+    twin_props[key] = "something else"
+    broken = json.loads(json.dumps(graph))
+    broken["subjects"].append(
+        {
+            "id": "near",
+            "class": s["class"],
+            "name": "Near twin",
+            "word": "Near",
+            "area": other_area,
+            "props": twin_props,
+        }
+    )
+    names = [c["name"] for c in candidates(broken, q)]
+    assert "Near twin" in names and s["name"] in names
+
+
+def test_questions_refuse_to_run_before_each_note_is_rendered(work):
+    out, graph = work
+    fake = Fake(graph)
+    render(out, fake, jobs=1)
+    state = json.loads((out / "notes.json").read_text())
+    unrendered = graph["notes"][0]["id"]
+    del state[unrendered]
+    (out / "notes.json").write_text(json.dumps(state))
+    with pytest.raises(SynthError, match="not rendered"):
+        write_questions(out, fake, jobs=1)
+    assert not (out / "written.json").exists() or json.loads((out / "written.json").read_text()) == {}
+
+
+def test_no_heading_is_a_word_of_an_attribute_name_of_its_class():
+    for cls, attributes in ATTRIBUTES.items():
+        words = {w for attribute, _, _ in attributes for w in attribute.split()}
+        for _, heading, _ in attributes:
+            assert heading.lower() not in words, (cls, heading)
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_no_forbidden_word_is_a_property_value_of_the_question(seed):
+    graph = build_graph(world_config(seed, 650))
+    facts = {f["id"]: f for f in graph["facts"]}
+    for q in graph["questions"]:
+        assert forbidden_hits(" ".join(q["props"].values()), q["forbidden"]) == [], q["id"]
+        # the value and the full token stay forbidden
+        assert {facts[q["fact"]]["value"], facts[q["fact"]]["token"]} <= set(q["forbidden"])
+
+
+def test_freeze_refuses_notes_or_questions_from_other_prompts(work, tmp_path):
+    out, graph = work
+    changed = tmp_path / "prompts"
+    import shutil
+
+    shutil.copytree(PROMPTS, changed)
+    (changed / "note.md").write_text((changed / "note.md").read_text() + "\nOne more rule.\n")
+    fake = Fake(graph)
+    render(out, fake, jobs=2, prompts=changed)
+    write_questions(out, fake, jobs=2, prompts=changed)
+    state = json.loads((out / "notes.json").read_text())
+    assert all(set(v["prompts"]) == {"note.md"} for v in state.values())
+    deny = tmp_path / "deny.txt"
+    deny.write_text("qqzzxx\n")
+    with pytest.raises(SynthError, match="prompt"):
+        freeze([out], "pilot", tmp_path / "a", deny)
+    manifest = freeze([out], "pilot", tmp_path / "b", deny, prompts=changed)
+    assert manifest["prompts"]["note.md"] == hashlib.sha256((changed / "note.md").read_bytes()).hexdigest()

@@ -124,9 +124,9 @@ ATTRIBUTES = {
     "device": [
         ("part number", "Parts", "part"),
         ("serial number", "Parts", "serial"),
-        ("firmware version", "Firmware", "version"),
+        ("firmware version", "Software", "version"),
         ("measured power draw", "Measurements", "watts"),
-        ("calibration offset", "Calibration", "offset"),
+        ("calibration offset", "Adjustment", "offset"),
         ("flow rate", "Measurements", "flow"),
     ],
     "place": [
@@ -456,6 +456,10 @@ def build_graph(world: dict) -> dict:
         if stratum == "lexical-gap":
             allowed = _words(" ".join(f"{k} {v}" for k, v in props.items()))
             forbidden += sorted(w for w in _words(f["attribute"]) if len(w) >= 4 and w not in allowed)
+        # the question must be able to name its properties: no forbidden word may be one of them (a year of a date
+        # token, a word of the bridge kind); the value and the full token stay forbidden
+        props_text = " ".join(props.values())
+        forbidden = [w for w in forbidden if w in (f["value"], f["token"]) or not forbidden_hits(props_text, [w])]
         questions.append(
             {
                 "id": f"{b.vault}-q{i:04d}",
@@ -653,6 +657,13 @@ def claude(prompt: str, model: str) -> tuple[str, str]:
     return data["result"], next(iter(data.get("modelUsage") or {model: None}))
 
 
+def prompt_hashes(prompts: Path, names: tuple[str, ...] | None = None) -> dict[str, str]:
+    """The SHA-256 of each prompt file (all files of the folder when names is None)."""
+    folder = Path(prompts)
+    names = names or tuple(sorted(p.relative_to(folder).as_posix() for p in folder.rglob("*") if p.is_file()))
+    return {n: hashlib.sha256((folder / n).read_bytes()).hexdigest() for n in names}
+
+
 def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -776,9 +787,38 @@ class _Tokens:
         return {self.by_token[m.group(0)]["id"] for m in self.pattern.finditer(text.lower())}
 
 
-def note_failures(graph: dict, note: dict, text: str, tokens: _Tokens | None = None) -> list[tuple[str, str]]:
+def required_properties(graph: dict) -> dict[str, list[str]]:
+    """The property values that each note must state, so that the notes separate the subjects as the questions do:
+    the properties of each question (no area: the frontmatter holds it) in its gold note (the bridge note for
+    multi-hop), and for a distractor question each sibling's own values of those properties in its note."""
+    subjects = {s["id"]: s for s in graph["subjects"]}
+    notes = {n["id"]: n for n in graph["notes"]}
+    paths = {n["path"]: n["id"] for n in graph["notes"]}
+    out: dict[str, list[str]] = {}
+    for q in graph["questions"]:
+        keys = [k for k in q["props"] if k != "area"]
+        target = paths[q["expected"][1]] if q["stratum"] == "multi-hop" else paths[q["cluster"]]
+        out.setdefault(target, []).extend(q["props"][k] for k in keys)
+        if q["stratum"] == "distractor":
+            for nid in q["notes"]:
+                if notes[nid]["role"] == "distractor":
+                    sib = subjects[notes[nid]["subject"]]
+                    out.setdefault(nid, []).extend(sib["props"][k] for k in keys)
+    return {k: list(dict.fromkeys(v)) for k, v in out.items()}
+
+
+def _states(value: str, text: str) -> bool:
+    """A property value is in a text as whole words, without case; a space also matches a hyphen."""
+    pattern = r"(?<!\w)" + r"[\s-]+".join(map(re.escape, value.split())) + r"(?!\w)"
+    return re.search(pattern, text, re.I) is not None
+
+
+def note_failures(
+    graph: dict, note: dict, text: str, tokens: _Tokens | None = None, required: dict | None = None
+) -> list[tuple[str, str]]:
     """The (check, detail) of each failed string check of a note."""
     tokens = tokens or _Tokens(graph)
+    required = required_properties(graph) if required is None else required
     facts = {f["id"]: f for f in graph["facts"]}
     asked = {q["fact"] for q in graph["questions"]}
     out = []
@@ -794,6 +834,9 @@ def note_failures(graph: dict, note: dict, text: str, tokens: _Tokens | None = N
         else:
             check = "value-elsewhere"
         out.append((check, f"the value {f['value']!r} of {fid} belongs to another note"))
+    for value in required.get(note["id"], []):
+        if not _states(value, text):
+            out.append(("property-in-note", f"the note does not state the property value {value!r}"))
     if note["long"]:
         words = len(text.split())
         if words < LONG_WORDS[0]:
@@ -813,8 +856,10 @@ def render(work: Path, runner=claude, model: str = "sonnet", jobs: int = 4, prom
     work = Path(work)
     graph = _load(work)
     template = (Path(prompts) / "note.md").read_text()
+    hashes = prompt_hashes(prompts, ("note.md",))
     state = _State(work / "notes.json")
     tokens = _Tokens(graph)
+    required = required_properties(graph)
     vault = work / "vault"
 
     def one(note: dict) -> None:
@@ -833,7 +878,7 @@ def render(work: Path, runner=claude, model: str = "sonnet", jobs: int = 4, prom
                 bodies.append(text)
                 models.add(model_id)
             text = note_text(graph, note, bodies)
-            failures = note_failures(graph, note, text, tokens)
+            failures = note_failures(graph, note, text, tokens, required)
             if not failures:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(text)
@@ -848,6 +893,7 @@ def render(work: Path, runner=claude, model: str = "sonnet", jobs: int = 4, prom
                 "attempts": attempt,
                 "failures": [list(f) for f in failures],
                 "models": sorted(models),
+                "prompts": hashes,
                 "date": _now(),
             },
         )
@@ -903,9 +949,17 @@ def question_prompt(graph: dict, q: dict, template: str, instructions: dict, fee
 
 
 def candidates(graph: dict, q: dict) -> list[dict]:
-    """The subjects that share the topic of the question: the same class and the same area."""
+    """The subjects that the question can match: the same class and the same area, and the subjects of the same class
+    in any area that differ from the property set of the question in at most one property."""
     s = next(x for x in graph["subjects"] if x["id"] == q["subject"])
-    return [x for x in graph["subjects"] if x["class"] == s["class"] and x["area"] == s["area"]]
+    out = []
+    for x in graph["subjects"]:
+        if x["class"] != s["class"]:
+            continue
+        differ = sum(x["props"].get(k) != v for k, v in q["props"].items())
+        if x["area"] == s["area"] or differ <= 1:
+            out.append(x)
+    return out
 
 
 def check_prompt(graph: dict, q: dict, question: str, template: str) -> str:
@@ -925,15 +979,21 @@ def write_questions(work: Path, runner=claude, model: str = "sonnet", jobs: int 
     prompts = Path(prompts)
     template = (prompts / "question.md").read_text()
     check = (prompts / "subject-check.md").read_text()
+    hashes = prompt_hashes(prompts, ("question.md", "subject-check.md", "strata.toml"))
     instructions = tomllib.loads((prompts / "strata.toml").read_text())
     notes = _state(work, "notes.json")
+    if unrendered := [n["path"] for n in graph["notes"] if n["id"] not in notes]:
+        raise SynthError(
+            f"{len(unrendered)} notes are not rendered; run `ragnarok synth render` first "
+            f"(for example {', '.join(unrendered[:3])})"
+        )
     state = _State(work / "written.json")
     subjects = {s["id"]: s for s in graph["subjects"]}
 
     def one(q: dict) -> None:
         if q["id"] in state.data:
             return
-        missing = [n for n in q["notes"] if notes.get(n, {}).get("status") != "ok"]
+        missing = [n for n in q["notes"] if notes[n]["status"] == "removed"]
         if missing:
             state.set(q["id"], {"status": "removed", "attempts": 0, "failures": [["note-removed", ", ".join(missing)]]})
             return
@@ -968,6 +1028,7 @@ def write_questions(work: Path, runner=claude, model: str = "sonnet", jobs: int 
                 "question": text,
                 "answer": answer,
                 "models": sorted(models),
+                "prompts": hashes,
                 "date": _now(),
             },
         )
@@ -991,6 +1052,7 @@ CHECKS = (
     "note-missing",
     "gold-in-note",
     "fact-in-note",
+    "property-in-note",
     "gold-elsewhere",
     "distractor-holds-gold",
     "value-elsewhere",
@@ -1175,6 +1237,7 @@ def freeze(works: list[Path], name: str, out: Path, deny: Path, prompts: Path = 
     if (out / "manifest.json").exists():
         raise SynthError(f"a frozen set exists at {out}")
     terms = read_deny(deny)
+    current = prompt_hashes(prompts)
     reports, files, questions, models, dates, vaults, extra = {}, [], [], set(), [], [], {}
     for work in map(Path, works):
         report = verify(work)
@@ -1190,6 +1253,8 @@ def freeze(works: list[Path], name: str, out: Path, deny: Path, prompts: Path = 
                 files.append((note["path"], (work / "vault" / note["path"]).read_bytes()))
         questions += set_questions(work)
         for v in [*_state(work, "notes.json").values(), *_state(work, "written.json").values()]:
+            if any(current.get(n) != h for n, h in v.get("prompts", {}).items()):
+                raise SynthError(f"{work}: notes or questions were written with other prompts than {prompts}")
             models.update(v.get("models", []))
             if v.get("date"):
                 dates.append(v["date"])
@@ -1231,6 +1296,7 @@ def freeze(works: list[Path], name: str, out: Path, deny: Path, prompts: Path = 
         "llm_dates": [min(dates), max(dates)] if dates else [],
         "vaults": vaults,
         "set_hash": set_hash(questions),
+        "prompts": current,
         "files": hashes,
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=1) + "\n")
