@@ -39,7 +39,7 @@ def _stamp(path: Path) -> tuple[int, int] | None:
 
 
 def _digest(path: Path) -> str | None:
-    return hashlib.sha1(path.read_bytes()).hexdigest() if path.exists() else None
+    return hashlib.sha1(path.read_bytes(), usedforsecurity=False).hexdigest() if path.exists() else None
 
 
 SETTLE_NS = 10**9  # a config file changed less than one second ago can still be in the middle of a write

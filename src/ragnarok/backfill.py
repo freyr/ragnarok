@@ -45,7 +45,7 @@ def backup_dir(cfg: Config) -> Path:
 
 
 def _hash(text: str) -> str:
-    return hashlib.sha1(text.encode()).hexdigest()
+    return hashlib.sha1(text.encode(), usedforsecurity=False).hexdigest()
 
 
 def _words(text: str) -> set[str]:

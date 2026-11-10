@@ -65,7 +65,7 @@ def example_config() -> Path:
 def ollama_models(cfg: Config) -> list[str] | None:
     """The model names in Ollama, or None when Ollama does not answer."""
     try:
-        with urllib.request.urlopen(f"{cfg.ollama_url}/api/tags", timeout=3) as resp:
+        with urllib.request.urlopen(f"{cfg.ollama_url}/api/tags", timeout=3) as resp:  # noqa: S310 - the configured Ollama URL
             return [m["name"] for m in json.load(resp)["models"]]
     except (OSError, ValueError, KeyError):
         return None
@@ -75,7 +75,13 @@ def brew_service_running() -> bool:
     """True when `brew services` runs Ollama: it starts at login and does not stop with a terminal or a session."""
     if not shutil.which("brew"):
         return False
-    out = subprocess.run(["brew", "services", "info", "--json", "ollama"], capture_output=True, text=True, timeout=60)
+    # A fixed argument list with no shell; brew is found on PATH like in a terminal.
+    out = subprocess.run(
+        ["brew", "services", "info", "--json", "ollama"],  # noqa: S607
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
     try:
         info = json.loads(out.stdout)[0]
     except (ValueError, IndexError):
@@ -99,7 +105,13 @@ def plugin_server() -> bool:
     """True when the Claude Code plugin ragnarok gives the MCP server."""
     if not shutil.which("claude"):
         return False
-    out = subprocess.run(["claude", "mcp", "get", PLUGIN_SERVER], capture_output=True, text=True, timeout=120)
+    # A fixed argument list with no shell; claude is found on PATH like in a terminal.
+    out = subprocess.run(  # noqa: S603
+        ["claude", "mcp", "get", PLUGIN_SERVER],  # noqa: S607
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
     return out.returncode == 0
 
 
@@ -107,7 +119,13 @@ def mcp_command() -> str | None:
     """The command line of the ragnarok server registered at a scope of Claude Code, or None."""
     if not shutil.which("claude"):
         return None
-    out = subprocess.run(["claude", "mcp", "get", MCP_NAME], capture_output=True, text=True, timeout=120)
+    # A fixed argument list with no shell; claude is found on PATH like in a terminal.
+    out = subprocess.run(  # noqa: S603
+        ["claude", "mcp", "get", MCP_NAME],  # noqa: S607
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
     if out.returncode != 0:
         return None
     command = re.search(r"^\s*Command:\s*(.+)$", out.stdout, re.M)

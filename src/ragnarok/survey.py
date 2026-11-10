@@ -75,9 +75,8 @@ def survey(cfg: Config, vault: str, top: int = 30) -> dict:
         stem = name.removesuffix(".md")
         if DATE_RE.match(stem):
             date_prefixed += 1
-        elif not private:
-            if (m := PREFIX_RE.match(stem)) and not m.group(1)[:-1].isdigit():
-                prefixes[m.group(1)] += 1
+        elif not private and (m := PREFIX_RE.match(stem)) and not m.group(1)[:-1].isdigit():
+            prefixes[m.group(1)] += 1
         if not private:
             folders_of_name[name].add("/".join(folders))
 

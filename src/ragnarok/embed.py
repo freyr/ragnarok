@@ -68,7 +68,7 @@ def template(cfg: Config) -> str:
 
 def input_hash(cfg: Config, heading: str, text: str) -> str:
     """The text hash of a chunk in the cache key: the model and the full text that goes to the model."""
-    return hashlib.sha1(f"{cfg.model}\0{doc_input(cfg, heading, text)}".encode()).hexdigest()
+    return hashlib.sha1(f"{cfg.model}\0{doc_input(cfg, heading, text)}".encode(), usedforsecurity=False).hexdigest()
 
 
 class _TooLong(Exception):
@@ -95,13 +95,13 @@ class OllamaEmbedder:
         native = profile(self.cfg).native_dimension
         if native is not None and self.cfg.dimension < native:
             body["dimensions"] = self.cfg.dimension
-        req = urllib.request.Request(
+        req = urllib.request.Request(  # noqa: S310 - the configured Ollama URL
             f"{self.cfg.ollama_url}/api/embed",
             data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310 - the configured Ollama URL
                 vectors = json.load(resp)["embeddings"]
         except urllib.error.HTTPError as e:
             message = e.read().decode(errors="replace")

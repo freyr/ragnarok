@@ -45,7 +45,7 @@ def sections(body: str) -> list[Section]:
         m = None if in_fence else HEADING.match(line)
         if m:
             level = len(m.group(1))
-            path = path[: level - 1] + [m.group(2).strip()]
+            path = [*path[: level - 1], m.group(2).strip()]
             result.append(Section(tuple(path), []))
         else:
             result[-1].lines.append(line)

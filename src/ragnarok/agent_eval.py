@@ -100,13 +100,14 @@ def command(agent: str, question: str, calls: int, model: str, mcp_json: Path | 
     # restricted: no settings files, no hooks, file tools only inside the working directory
     cmd += ["--restricted", "--strict-mcp-config", "--permission-mode", "dontAsk", "--no-session-persistence"]
     if agent == "grep":
-        return cmd + ["--tools", "Grep,Glob,Read", "--allowedTools", "Grep,Glob,Read"]
+        return [*cmd, "--tools", "Grep,Glob,Read", "--allowedTools", "Grep,Glob,Read"]
     tools = ",".join(f"mcp__ragnarok__{t}" for t in MCP_TOOLS)
-    return cmd + ["--tools", "Read", "--mcp-config", str(mcp_json), "--allowedTools", f"Read,{tools}"]
+    return [*cmd, "--tools", "Read", "--mcp-config", str(mcp_json), "--allowedTools", f"Read,{tools}"]
 
 
 def run_claude(cmd: list[str], cwd: Path, env: dict) -> dict:
-    out = subprocess.run(cmd, cwd=cwd, env={**os.environ, **env}, capture_output=True, text=True, timeout=900)
+    # cmd is the argument list of claude_command(), with no shell.
+    out = subprocess.run(cmd, cwd=cwd, env={**os.environ, **env}, capture_output=True, text=True, timeout=900)  # noqa: S603
     try:
         return json.loads(out.stdout)
     except ValueError:

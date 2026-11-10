@@ -17,7 +17,8 @@ SNIPPET_WORDS = 120
 TOPK = 3  # chunks of a note that note_rank = topk_sum adds
 
 STOP = set(
-    "a an the and or of to in on for with is are was were be been do does did i my me we our you your it its this "
+    # One string keeps the word list short to read, so SIM905 does not apply.
+    "a an the and or of to in on for with is are was were be been do does did i my me we our you your it its this "  # noqa: SIM905
     "that these those what which who where when how why can could should would will there their from at by as about "
     "into than then also any all some find check show list tell give please".split()
 )

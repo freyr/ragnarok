@@ -41,7 +41,7 @@ def test_config_refuses_a_keep_alive_that_ollama_refuses():
     import pytest
 
     for bad in ("-1", "900", True, 1.5, None):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="keep_alive must be"):
             Config(dimension=4, keep_alive=bad)
     for good in (-1, 0, 900, "30m", "1h"):
         assert Config(dimension=4, keep_alive=good).keep_alive == good
@@ -102,7 +102,8 @@ def test_the_old_doc_prefix_key_still_sets_the_document_template(tmp_path, caplo
     path.write_text('doc_prefix = "passage: {title}\\n"\n')
     cfg = load_config(path)
     assert cfg.doc_template == "passage: {title}\n"
-    assert "doc_prefix" in caplog.text and "doc_template" in caplog.text
+    assert "doc_prefix" in caplog.text
+    assert "doc_template" in caplog.text
 
 
 def test_a_model_with_no_profile_keeps_the_default_prefixes_and_sends_no_dimensions(monkeypatch):

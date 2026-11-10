@@ -200,7 +200,7 @@ def _migrate(cfg: Config, conn: sqlite3.Connection, version: int) -> None:
 
 
 def _hash_file(data: bytes) -> str:
-    return hashlib.sha1(data).hexdigest()
+    return hashlib.sha1(data, usedforsecurity=False).hexdigest()
 
 
 def _delete_note(conn: sqlite3.Connection, note_id: int, notes_vec: bool = False) -> None:

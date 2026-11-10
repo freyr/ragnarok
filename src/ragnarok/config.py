@@ -204,7 +204,7 @@ def rules_hash(cfg: Config) -> str:
     values["vault_rules"] = {vault: asdict(rules) for vault, rules in sorted(cfg.vault_rules.items())}
     if cfg.vault_paths:  # only when set, so that an index made before vault_paths keeps its hash
         values["vault_paths"] = {vault: str(path) for vault, path in sorted(cfg.vault_paths.items())}
-    return hashlib.sha1(json.dumps(values, sort_keys=True).encode()).hexdigest()
+    return hashlib.sha1(json.dumps(values, sort_keys=True).encode(), usedforsecurity=False).hexdigest()
 
 
 def config_path() -> Path:
@@ -254,7 +254,7 @@ def variant_hash(cfg: Config) -> str:
     p = profile(cfg)
     values = {key: getattr(cfg, key) for key in VARIANT_KEYS}
     values.update(query_prefix=p.query_prefix, doc_template=p.doc_template)
-    return hashlib.sha1(json.dumps(values, sort_keys=True).encode()).hexdigest()[:12]
+    return hashlib.sha1(json.dumps(values, sort_keys=True).encode(), usedforsecurity=False).hexdigest()[:12]
 
 
 def dump_config(cfg: Config, **paths: Path | str) -> str:

@@ -190,7 +190,8 @@ def test_home_is_the_checkout_or_the_default_folder(monkeypatch):
 
 def test_the_package_holds_the_config_template():
     example = bootstrap.example_config()
-    assert example.parent.name == "ragnarok" and "vaults = " in example.read_text()
+    assert example.parent.name == "ragnarok"
+    assert "vaults = " in example.read_text()
 
 
 def test_a_package_home_registers_uvx_with_its_home(package_home):
@@ -223,7 +224,8 @@ def test_doctor_accepts_the_plugin_server(home, monkeypatch):
     fake_setup(monkeypatch, None, None)
     monkeypatch.setattr(bootstrap, "plugin_server", lambda: True)
     mcp = bootstrap.doctor(load_config(home / "config.toml"), home / "config.toml", home)[-1]
-    assert mcp.ok and "plugin ragnarok" in mcp.detail
+    assert mcp.ok
+    assert "plugin ragnarok" in mcp.detail
 
 
 def test_doctor_fails_for_the_plugin_and_a_registration(home, monkeypatch):

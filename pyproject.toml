@@ -43,7 +43,13 @@ line-length = 120
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP"]
+select = ["E", "F", "I", "B", "UP", "S", "SIM", "RUF", "PT", "C4"]
+
+[tool.ruff.lint.per-file-ignores]
+# pytest uses assert; the tests also hold fake paths such as /tmp/v that are never opened.
+"tests/**" = ["S101", "S108"]
+# The SQL joins constant fragments and `?` placeholders; every value is a bound parameter.
+"src/ragnarok/{index,search,tools}.py" = ["S608"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
