@@ -170,6 +170,10 @@ It changes only `config.toml` and adds frontmatter keys. It never moves, renames
 | `query_prefix`, `doc_template` | Override the query prefix and the document template of the model profile. `{title}` in the template is the note title and the heading path. The profiles cover `embeddinggemma-2:270m` (and `-bf16-text`), `qwen3-embedding:0.6b` and `:4b`, `snowflake-arctic-embed2` and `bge-m3`; another model gets the prefixes of `embeddinggemma-2:270m`. The old key `doc_prefix` still works as `doc_template`. A change needs `ragnarok index --rebuild`. |
 | `keep_alive` | How long Ollama keeps the embedding model in memory after a call: an integer of seconds, `-1` (the default) keeps it loaded, or a duration such as `"30m"`. A change needs no rebuild. |
 | `min_words`, `max_words` | The chunk size limits of the splitter. The splitter also cuts a chunk to the token limit of the model profile (4 characters for each token), and a text that Ollama refuses as too long is embedded in two halves; Ollama never truncates a text. A change needs `ragnarok index --rebuild`. |
+| `chunk_prefix` | `none` (the default) or `description`: the description of a note goes before the text of each body chunk in the text to the model. The stored text and the keyword index do not change. A change needs `ragnarok index --rebuild`. |
+| `note_rank` | How the chunks of a note give its rank: `maxp` (the default, the best chunk), `topk_sum` (the sum of the scores of the best 3 chunks of the note in the dense list and in the keyword list) or `note_vector` (also the mean chunk vector of each note, as a third list). A change needs a new index. |
+| `[variants.<name>]` | The bench: a variant overrides `model`, `dimension`, `query_prefix`, `doc_template`, `min_words`, `max_words`, `chunk_prefix` and `note_rank`. |
+| `[corpora.<name>]` | The bench: a `root` and a list of `vaults` that a variant indexes. |
 | `project_markers` | A folder that holds one of these files is a project folder (default `DRIVERS.md`, `SUMMARY.md`). |
 | `jira_prefixes` | The ticket prefixes that `find_by_jira` knows. |
 | `[vault_rules.<vault>]` | The path rules of one vault: which folder gives the area and the project. |
@@ -210,6 +214,7 @@ Without frontmatter, the path rules give the metadata. The default rules work fo
 | `ragnarok backfill propose\|export\|merge\|apply <vault> [file...]` | Proposes, describes and applies missing frontmatter keys. The order is `propose`, `export`, Claude writes descriptions, `merge <vault> <file>...`, you examine the proposal, `apply`. |
 | `ragnarok survey <vault> [--json]` | Prints the folders, frontmatter keys, marker files, name patterns and ticket prefixes of a vault folder. Run it before you write `[vault_rules.<vault>]`. It prints no note text. |
 | `ragnarok eval mechanical\|pool\|agent` | Runs an evaluation on the question sets in `data/eval/sets/`. |
+| `ragnarok bench index --variant <name> --corpus <name>` | Builds or updates the index of a variant on a corpus in `data/variants/<variant>/<corpus>/index.db`. It shares the embedding cache, so a variant with the default embedding settings embeds nothing again. It refuses an index that was built with other settings of the variant. |
 
 Run each command with `uvx ragnarok-mcp`, for example `uvx ragnarok-mcp search "boiler"`, or with `uv run` in the
 checkout.
@@ -224,6 +229,7 @@ ignores `config.toml`, `data/` and `logs/`.
 | `config.toml` | The configuration of this computer. |
 | `data/index.db` | The SQLite index. Copy it and `data/embed-cache.db` to a second computer to skip the first index. |
 | `data/embed-cache.db` | The embedding cache that all index files share. Its key is the model, the dimension, the document template and the text hash. |
+| `data/variants/<variant>/<corpus>/index.db` | The index of a bench variant on a corpus. The MCP server never uses it. |
 | `data/backups/` | The vault archives that `backfill apply` makes before it writes. |
 | `data/proposals/` | The output of `backfill propose` and `backfill export`. |
 | `data/eval/` | Your question sets (`sets/`), the evaluation results and the mirror of the agent evaluation. |

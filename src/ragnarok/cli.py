@@ -19,6 +19,7 @@ COMMANDS = {
     "eval": "Run the evaluation sets",
     "init": "Set up this computer: config, Ollama, model, index and the MCP server in Claude Code",
     "doctor": "Check the six parts of the setup and print the fix for each failure",
+    "bench": "Measure the variants of the index settings",
 }
 
 
@@ -63,6 +64,10 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("vault", help="a folder name under the vault root; it need not be in the config yet")
     sv.add_argument("--top", type=int, default=30, help="the number of rows in each list (default 30)")
     sv.add_argument("--json", action="store_true", help="print one JSON object")
+    bench = parsers["bench"].add_subparsers(dest="bench", required=True)
+    bi = bench.add_parser("index", help="Build or update the index of a variant on a corpus")
+    bi.add_argument("--variant", required=True, help="a table [variants.<name>] of the config")
+    bi.add_argument("--corpus", required=True, help="a table [corpora.<name>] of the config")
     return parser
 
 
@@ -150,6 +155,27 @@ def cmd_index(cfg, args) -> int:
     finally:
         conn.close()
     print(json.dumps(result.__dict__, default=str))
+    return 0
+
+
+def cmd_bench(cfg, args) -> int:
+    from .bench import open_variant
+    from .embed import EmbedError, OllamaEmbedder
+    from .index import IndexMismatch, update
+
+    try:
+        vcfg, conn = open_variant(cfg, args.variant, args.corpus)
+    except (KeyError, IndexMismatch) as e:
+        print(f"ragnarok bench index: {e.args[0]}", file=sys.stderr)
+        return 1
+    try:
+        result = update(vcfg, conn, OllamaEmbedder(vcfg), progress=lambda m: print(m, file=sys.stderr, flush=True))
+    except EmbedError as e:
+        print(f"ragnarok bench index: {e}. The notes indexed before the error stay in the index.", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+    print(json.dumps({"index": str(vcfg.index_path), **result.__dict__}, default=str))
     return 0
 
 
@@ -385,6 +411,7 @@ HANDLERS = {
     "index": cmd_index,
     "status": cmd_status,
     "search": cmd_search,
+    "bench": cmd_bench,
 }
 
 

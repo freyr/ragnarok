@@ -7,6 +7,7 @@ import posixpath
 import re
 import sqlite3
 import time
+from array import array
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -80,6 +81,19 @@ CREATE TABLE IF NOT EXISTS cache.embed_cache (
 """
 
 
+def _notes_vec_schema(dimension: int) -> str:
+    """The mean chunk vector of each note, for note_rank = note_vector only."""
+    return f"""
+CREATE VIRTUAL TABLE IF NOT EXISTS notes_vec USING vec0(
+    note_id INTEGER PRIMARY KEY,
+    embedding float[{dimension}] distance_metric=cosine,
+    vault TEXT,
+    sensitivity TEXT,
+    status TEXT
+);
+"""
+
+
 def cache_path(cfg: Config) -> Path:
     """The embedding cache that all index files of the home share: data_dir/embed-cache.db."""
     return cfg.data_dir / "embed-cache.db"
@@ -112,6 +126,8 @@ def connect(cfg: Config) -> sqlite3.Connection:
         conn.execute(f"PRAGMA {schema}.journal_mode=WAL")
         conn.execute(f"PRAGMA {schema}.synchronous=NORMAL")
     conn.executescript(_schema(cfg.dimension))
+    if cfg.note_rank == "note_vector":
+        conn.executescript(_notes_vec_schema(cfg.dimension))
     expected = {"model": cfg.model, "dimension": str(cfg.dimension), "schema_version": str(SCHEMA_VERSION)}
     stored = dict(conn.execute("SELECT key, value FROM meta").fetchall())
     if not stored:
@@ -187,7 +203,9 @@ def _hash_file(data: bytes) -> str:
     return hashlib.sha1(data).hexdigest()
 
 
-def _delete_note(conn: sqlite3.Connection, note_id: int) -> None:
+def _delete_note(conn: sqlite3.Connection, note_id: int, notes_vec: bool = False) -> None:
+    if notes_vec:
+        conn.execute("DELETE FROM notes_vec WHERE note_id = ?", (note_id,))
     ids = [r[0] for r in conn.execute("SELECT id FROM chunks WHERE note_id = ?", (note_id,))]
     conn.executemany("DELETE FROM chunks_vec WHERE chunk_id = ?", [(i,) for i in ids])
     conn.executemany("DELETE FROM chunks_fts WHERE rowid = ?", [(i,) for i in ids])
@@ -238,7 +256,7 @@ def _same(cfg: Config, conn: sqlite3.Connection, note_id: int, m, chunks) -> boo
         return False
     jira = [k for (k,) in conn.execute("SELECT key FROM jira WHERE note_id = ? ORDER BY key", (note_id,))]
     stored = [h for (h,) in conn.execute("SELECT text_hash FROM chunks WHERE note_id = ? ORDER BY ord", (note_id,))]
-    return jira == m.jira and stored == [input_hash(cfg, c.heading, c.text) for c in chunks]
+    return jira == m.jira and stored == [input_hash(cfg, c.heading, c.model_text) for c in chunks]
 
 
 def update(
@@ -337,7 +355,7 @@ def update(
     if pending:
         _write(cfg, conn, embedder, pending, result)
     for _, (nid, *_) in gone.items():
-        _delete_note(conn, nid)
+        _delete_note(conn, nid, cfg.note_rank == "note_vector")
         result.removed += 1
     if result.added or result.changed or result.moved or result.removed or result.rederived:
         resolve_links(conn)
@@ -359,7 +377,7 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
     hashes = {}
     for p in pending:
         for c in p.chunks:
-            hashes[input_hash(cfg, c.heading, c.text)] = (c.heading, c.text)
+            hashes[input_hash(cfg, c.heading, c.model_text)] = (c.heading, c.model_text)
     key = _key(cfg)
     vectors = {}
     keys = list(hashes)
@@ -376,10 +394,11 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
         vectors.update((k, sqlite_vec.serialize_float32(v)) for k, v in zip(missing, embedded, strict=True))
         result.embedded += len(missing)
 
+    notes_vec = cfg.note_rank == "note_vector"
     for p in pending:
         m = p.meta
         if p.note_id is not None:
-            _delete_note(conn, p.note_id)
+            _delete_note(conn, p.note_id, notes_vec)
             if p.rederived:
                 result.rederived += 1
             elif p.moved:
@@ -392,7 +411,7 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
         # its snapshot of the notes
         other = conn.execute("SELECT id FROM notes WHERE path = ?", (p.rel,)).fetchone()
         if other:
-            _delete_note(conn, other[0])
+            _delete_note(conn, other[0], notes_vec)
         cur = conn.execute(
             "INSERT INTO notes (vault, path, title, project, area, type, status, sensitivity, description,"
             " mtime_ns, size, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -413,7 +432,7 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
         )
         note_id = cur.lastrowid
         for c in p.chunks:
-            th = input_hash(cfg, c.heading, c.text)
+            th = input_hash(cfg, c.heading, c.model_text)
             cid = conn.execute(
                 "INSERT INTO chunks (note_id, ord, heading, text, text_hash) VALUES (?, ?, ?, ?, ?)",
                 (note_id, c.ord, c.heading, c.text, th),
@@ -424,6 +443,13 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
                 (cid, vectors[th], m.vault, m.sensitivity, m.status),
             )
             result.chunks += 1
+        if notes_vec and p.chunks:
+            rows = [array("f", vectors[input_hash(cfg, c.heading, c.model_text)]) for c in p.chunks]
+            mean = [sum(column) / len(rows) for column in zip(*rows, strict=True)]
+            conn.execute(
+                "INSERT INTO notes_vec (note_id, embedding, vault, sensitivity, status) VALUES (?, ?, ?, ?, ?)",
+                (note_id, sqlite_vec.serialize_float32(mean), m.vault, m.sensitivity, m.status),
+            )
         conn.executemany("INSERT INTO links (from_note, target) VALUES (?, ?)", [(note_id, t) for t in p.links])
         conn.executemany("INSERT INTO jira (key, note_id) VALUES (?, ?)", [(k, note_id) for k in m.jira])
     # after the writes to the index: each writer takes the lock of the index before the lock of the shared cache, so
