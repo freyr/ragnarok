@@ -583,3 +583,23 @@ def test_freeze_refuses_notes_or_questions_from_other_prompts(work, tmp_path):
         freeze([out], "pilot", tmp_path / "a", deny)
     manifest = freeze([out], "pilot", tmp_path / "b", deny, prompts=changed)
     assert manifest["prompts"]["note.md"] == hashlib.sha256((changed / "note.md").read_bytes()).hexdigest()
+
+
+def test_a_failed_claude_call_is_retried_after_a_wait_and_then_reports_the_output(monkeypatch):
+    import subprocess
+
+    from ragnarok import synth
+
+    waits, results = [], []
+    monkeypatch.setattr(synth.time, "sleep", waits.append)
+    monkeypatch.setattr(synth.subprocess, "run", lambda cmd, **kw: results.pop(0))
+    ok = json.dumps({"result": "text", "modelUsage": {"m1": {}}, "is_error": False})
+    limit = '{"is_error": true, "result": "usage limit reached"}'
+    results[:] = [subprocess.CompletedProcess([], 1, limit, ""), subprocess.CompletedProcess([], 0, ok, "")]
+    assert synth.claude("p", "sonnet")[0] == "text"
+    assert waits == [30]
+    results[:] = [subprocess.CompletedProcess([], 1, limit, "")] * 6
+    waits.clear()
+    with pytest.raises(SynthError, match="usage limit reached"):
+        synth.claude("p", "sonnet")
+    assert waits == [30, 60, 120, 240, 480]

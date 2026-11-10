@@ -19,6 +19,7 @@ import subprocess
 import tarfile
 import tempfile
 import threading
+import time
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -628,6 +629,9 @@ class _State:
             tmp.replace(self.path)
 
 
+CLAUDE_WAITS = (30, 60, 120, 240, 480)
+
+
 def claude(prompt: str, model: str) -> tuple[str, str]:
     """The text and the model ID of one `claude -p` call with no tools, no settings and no CLAUDE.md of a folder."""
     cmd = [
@@ -647,14 +651,25 @@ def claude(prompt: str, model: str) -> tuple[str, str]:
         "--strict-mcp-config",
         "--no-session-persistence",
     ]
-    with tempfile.TemporaryDirectory(prefix="ragnarok-synth-") as cwd:
-        out = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=900)
-    if out.returncode != 0:
-        raise SynthError(f"claude -p failed ({out.returncode}): {out.stderr.strip()[:500]}")
-    data = json.loads(out.stdout)
-    if data.get("is_error"):
-        raise SynthError(f"claude -p failed: {str(data.get('result'))[:500]}")
-    return data["result"], next(iter(data.get("modelUsage") or {model: None}))
+    error = ""
+    for wait in (*CLAUDE_WAITS, None):
+        try:
+            with tempfile.TemporaryDirectory(prefix="ragnarok-synth-") as cwd:
+                out = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=900)
+        except subprocess.TimeoutExpired:
+            error = "claude -p failed: no answer in 900 s"
+        else:
+            try:
+                data = json.loads(out.stdout)
+            except json.JSONDecodeError:
+                data = {"is_error": True, "result": out.stdout}
+            if out.returncode == 0 and not data.get("is_error"):
+                return data["result"], next(iter(data.get("modelUsage") or {model: None}))
+            detail = (str(data.get("result") or "") + " " + out.stderr).strip()
+            error = f"claude -p failed ({out.returncode}): {detail[:500]}"
+        if wait is not None:
+            time.sleep(wait)
+    raise SynthError(error)
 
 
 def prompt_hashes(prompts: Path, names: tuple[str, ...] | None = None) -> dict[str, str]:
