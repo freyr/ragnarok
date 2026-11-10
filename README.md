@@ -215,6 +215,34 @@ Without frontmatter, the path rules give the metadata. The default rules work fo
 | `ragnarok survey <vault> [--json]` | Prints the folders, frontmatter keys, marker files, name patterns and ticket prefixes of a vault folder. Run it before you write `[vault_rules.<vault>]`. It prints no note text. |
 | `ragnarok eval mechanical\|pool\|agent` | Runs an evaluation on the question sets in `data/eval/sets/`. |
 | `ragnarok bench index --variant <name> --corpus <name>` | Builds or updates the index of a variant on a corpus in `data/variants/<variant>/<corpus>/index.db`. It shares the embedding cache, so a variant with the default embedding settings embeds nothing again. It refuses an index that was built with other settings of the variant. |
+| `ragnarok bench run --set <file> --variant <name>` | Runs each question of a set through the MCP search (`limit` 20, with the change scan, no filter) on the index of the variant on the corpus of the set. It writes the rank of each expected note, the scan time and the search time of each question, the keyword overlap of the question and the gold note, and the BM25 rank of the gold note to `data/bench/<set hash>-<variant hash>.json`. It refuses a set when an expected path is not in the index, lists each missing path and runs no question. |
+| `ragnarok bench compare --set <file> <A> <B> [<B2>...] [--margin 0.05]` | Gives recall@5 and MRR of each variant, by stratum and by area, and the difference B − A with a 95% interval from a cluster bootstrap (10,000 samples, fixed seed). With more than one B, the interval level follows the Holm correction. It lists the share of discordant questions and each changed question with its diagnostics. It ends with one verdict line for each B (see the set format). |
+| `ragnarok bench convert <draft set> --out <file> --name <name> --kind synthetic\|real --corpus <name>` | Converts a draft set of `ragnarok eval` to the set format. The stratum is the old `type`, the cluster is the first expected path, and the area comes from the metadata rules of the first expected note (`unknown` when the note is absent). It does not convert a question with no expected path or with a folder as an expected path, and it lists each one. |
+
+### The set format
+
+A set is one JSON file:
+
+```json
+{
+  "name": "pilot", "kind": "real", "version": 2, "corpus": "real", "hash": "<SHA-256 of the questions>",
+  "questions": [
+    {"id": "q01", "question": "What is a field stop?", "expected": ["Private/Astro/Field Stop.md"],
+     "stratum": "lookup", "area": "astro", "cluster": "Private/Astro/Field Stop.md", "notes": "optional"}
+  ]
+}
+```
+
+- `kind` is `synthetic` or `real`. `corpus` is a table `[corpora.<name>]` of the config.
+- `hash` is the SHA-256 of the `questions` list as JSON with sorted keys and no spaces. The bench refuses a set whose hash does not agree.
+- `expected` holds one or more note paths. A continuation question lists the `SUMMARY.md` of its project.
+- `cluster` is the path of the main gold note. The bootstrap draws clusters, not questions.
+- recall@5 is 1 when all expected notes are in the first 5 notes, else 0. MRR uses the rank of the first expected note; no expected note in the first 20 gives 0.
+
+The verdict of `bench compare`:
+
+- A synthetic set: B wins when the interval of B − A at its Holm level is above 0 for recall@5 or for MRR, the point difference of the other measure is not below 0, and the p95 search time (scan included) is below 500 ms. The report also gives the sign of the difference in each vault.
+- A real set does not decide a win. It checks that B does not get worse: the lower end of the interval of B − A must be above −margin for recall@5 and for MRR. It also checks the p95 time.
 
 Run each command with `uvx ragnarok-mcp`, for example `uvx ragnarok-mcp search "boiler"`, or with `uv run` in the
 checkout.
@@ -230,6 +258,7 @@ ignores `config.toml`, `data/` and `logs/`.
 | `data/index.db` | The SQLite index. Copy it and `data/embed-cache.db` to a second computer to skip the first index. |
 | `data/embed-cache.db` | The embedding cache that all index files share. Its key is the model, the dimension, the document template and the text hash. |
 | `data/variants/<variant>/<corpus>/index.db` | The index of a bench variant on a corpus. The MCP server never uses it. |
+| `data/bench/` | The results of `bench run`, one file for each set and variant settings. |
 | `data/backups/` | The vault archives that `backfill apply` makes before it writes. |
 | `data/proposals/` | The output of `backfill propose` and `backfill export`. |
 | `data/eval/` | Your question sets (`sets/`), the evaluation results and the mirror of the agent evaluation. |

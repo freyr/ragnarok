@@ -68,6 +68,20 @@ def build_parser() -> argparse.ArgumentParser:
     bi = bench.add_parser("index", help="Build or update the index of a variant on a corpus")
     bi.add_argument("--variant", required=True, help="a table [variants.<name>] of the config")
     bi.add_argument("--corpus", required=True, help="a table [corpora.<name>] of the config")
+    br = bench.add_parser("run", help="Run each question of a set through the search of a variant")
+    br.add_argument("--set", required=True, type=Path, dest="set_file", help="a set file of version 2")
+    br.add_argument("--variant", required=True, help="a table [variants.<name>] of the config")
+    bc = bench.add_parser("compare", help="Compare the results of variants B with variant A on a set")
+    bc.add_argument("--set", required=True, type=Path, dest="set_file", help="a set file of version 2")
+    bc.add_argument("--margin", type=float, default=0.05, help="real set: the no-regression margin (default 0.05)")
+    bc.add_argument("base", metavar="A", help="the variant to compare with")
+    bc.add_argument("others", metavar="B", nargs="+", help="one or more variants")
+    bv = bench.add_parser("convert", help="Convert a draft set of `ragnarok eval` to a set file of version 2")
+    bv.add_argument("old", type=Path, help="the draft set file")
+    bv.add_argument("--out", required=True, type=Path, help="the new set file")
+    bv.add_argument("--name", required=True, help="the set name in the header")
+    bv.add_argument("--kind", required=True, choices=["synthetic", "real"])
+    bv.add_argument("--corpus", required=True, help="the corpus of the set, a table [corpora.<name>] of the config")
     return parser
 
 
@@ -159,6 +173,100 @@ def cmd_index(cfg, args) -> int:
 
 
 def cmd_bench(cfg, args) -> int:
+    handler = {"index": _bench_index, "run": _bench_run, "compare": _bench_compare, "convert": _bench_convert}
+    return handler[args.bench](cfg, args)
+
+
+def _bench_set(args):
+    from .bench import load_set
+
+    try:
+        return load_set(args.set_file)
+    except (OSError, ValueError) as e:
+        print(f"ragnarok bench {args.bench}: {e}", file=sys.stderr)
+        return None
+
+
+def _bench_run(cfg, args) -> int:
+    from .bench import MissingGold, open_variant, result_path, run_set
+    from .embed import EmbedError, OllamaEmbedder
+    from .index import IndexMismatch
+
+    bench_set = _bench_set(args)
+    if bench_set is None:
+        return 1
+    try:
+        vcfg, conn = open_variant(cfg, args.variant, bench_set["corpus"])
+    except (KeyError, IndexMismatch) as e:
+        print(f"ragnarok bench run: {e.args[0]}", file=sys.stderr)
+        return 1
+    try:
+        result = run_set(vcfg, conn, OllamaEmbedder(vcfg), bench_set, args.variant)
+    except MissingGold as e:
+        for qid, path in e.missing:
+            print(f"{qid}: {path}", file=sys.stderr)
+        print(f"ragnarok bench run: {e}. Correct the set; no question ran.", file=sys.stderr)
+        return 1
+    except EmbedError as e:
+        print(f"ragnarok bench run: {e}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+    out = result_path(vcfg, bench_set)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(result, indent=1, ensure_ascii=False) + "\n")
+    print(f"{len(result['questions'])} questions of {bench_set['name']} with {args.variant} written to {out}")
+    return 0
+
+
+def _bench_compare(cfg, args) -> int:
+    from .bench import compare, result_path
+
+    bench_set = _bench_set(args)
+    if bench_set is None:
+        return 1
+    results = []
+    for name in [args.base, *args.others]:
+        try:
+            path = result_path(cfg.variant(name, bench_set["corpus"]), bench_set)
+        except KeyError as e:
+            print(f"ragnarok bench compare: {e.args[0]}", file=sys.stderr)
+            return 1
+        if not path.exists():
+            print(
+                f"ragnarok bench compare: no result of {name} on this set at {path}. "
+                f"Run `ragnarok bench run --set {args.set_file} --variant {name}`.",
+                file=sys.stderr,
+            )
+            return 1
+        result = json.loads(path.read_text())
+        if (result["set_hash"], result["corpus"]) != (bench_set["hash"], bench_set["corpus"]):
+            print(f"ragnarok bench compare: {path} is the result of another set or corpus", file=sys.stderr)
+            return 1
+        results.append((name, result))
+    print("\n".join(compare(bench_set, results, args.margin)))
+    return 0
+
+
+def _bench_convert(cfg, args) -> int:
+    from dataclasses import replace
+
+    from .bench import convert, write_set
+
+    if args.corpus not in cfg.corpora:
+        print(f"ragnarok bench convert: no corpus {args.corpus!r} in the configuration", file=sys.stderr)
+        return 1
+    corpus = cfg.corpora[args.corpus]
+    ccfg = replace(cfg, root=corpus.root, vaults=list(corpus.vaults), vault_paths={})
+    questions, skipped = convert(json.loads(args.old.read_text()), ccfg)
+    for qid, reason in skipped:
+        print(f"not converted {qid}: {reason}", file=sys.stderr)
+    write_set(args.out, args.name, args.kind, args.corpus, questions)
+    print(f"{len(questions)} questions written to {args.out}, {len(skipped)} not converted")
+    return 0
+
+
+def _bench_index(cfg, args) -> int:
     from .bench import open_variant
     from .embed import EmbedError, OllamaEmbedder
     from .index import IndexMismatch, update
