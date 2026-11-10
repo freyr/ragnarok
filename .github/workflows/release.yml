@@ -1,0 +1,28 @@
+# The release job of the freyr standard. On each push to main it creates the tag and the GitHub release
+# of each package whose version file is higher than its last tag (.github/release.json):
+# server-vX.Y.Z for the MCP server, ragnarok--vX.Y.Z for the plugin. It pushes no commit.
+# The release App pushes the tags, so publish.yml starts from a server-v* tag.
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      releases: ${{ steps.release.outputs.releases }}
+    steps:
+      - id: release
+        uses: freyr/.github/actions/release@FREYR_SHA # v1.0.0
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
