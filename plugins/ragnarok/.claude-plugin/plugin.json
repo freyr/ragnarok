@@ -1,0 +1,17 @@
+{
+  "name": "ragnarok",
+  "version": "0.5.0",
+  "description": "Run the ragnarok MCP server from PyPI, set it up, adapt it to your vaults, and make Claude search the vaults with ragnarok first.",
+  "author": {
+    "name": "freyr"
+  },
+  "repository": "https://github.com/freyr/ragnarok-bundle",
+  "keywords": [
+    "ragnarok",
+    "obsidian",
+    "rag",
+    "mcp",
+    "knowledge-base"
+  ],
+  "license": "MIT"
+}

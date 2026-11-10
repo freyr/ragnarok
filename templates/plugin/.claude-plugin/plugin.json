@@ -1,0 +1,10 @@
+{
+  "name": "PLUGIN_NAME",
+  "version": "0.1.0",
+  "description": "ONE_LINE_DESCRIPTION",
+  "author": {
+    "name": "freyr"
+  },
+  "repository": "https://github.com/freyr/ragnarok-bundle",
+  "license": "MIT"
+}

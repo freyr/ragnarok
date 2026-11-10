@@ -1,0 +1,141 @@
+name: plugins-release
+
+# The release line of the Claude Code plugins and the marketplace (tags plugin-vX.Y.Z). The server has its
+# own line (tags server-vX.Y.Z) in publish.yml.
+#
+# On each push to main that changes the plugins or the marketplace, run the plugin CI. Then, if a commit
+# since the last plugin release holds [major], [minor] or [patch], bump the version of the marketplace and
+# every plugin, update plugins/CHANGELOG.md, commit, tag and publish a GitHub release. A push with no
+# marker makes no release.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".claude-plugin/**"
+      - "plugins/**"
+
+permissions: {}
+
+concurrency:
+  group: plugins-release
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    # The '$/' self-repository syntax is not yet known to actionlint, so keep './'.
+    uses: ./.github/workflows/plugins-ci.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+
+  release:
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          # The job pushes the release commit and the tag with the workflow token.
+          persist-credentials: true # zizmor: ignore[artipacked]
+
+      - name: Create the first plugin tag
+        # The plugins came into this repository at the version in marketplace.json, with no plugin-v tag.
+        # The tag action needs a tag as the start of its commit range, so the first run tags HEAD with
+        # that version. That run then makes no release.
+        run: |
+          if [ -z "$(git tag --list 'plugin-v*')" ]; then
+            tag="plugin-v$(jq -r .metadata.version .claude-plugin/marketplace.json)"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$tag" -m "$tag (the plugins moved into ragnarok-bundle)"
+            git push origin "$tag"
+            echo "Created the first plugin tag $tag." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Compute the next version from the commit markers
+        id: bump
+        uses: anothrNick/github-tag-action@4ed44965e0db8dab2b466a16da04aec3cc312fd8 # 1.75.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRY_RUN: "true"
+          DEFAULT_BUMP: none
+          TAG_PREFIX: plugin-v
+          RELEASE_BRANCHES: main
+          BRANCH_HISTORY: compare
+          # The action matches these as shell patterns, so the brackets are escaped.
+          MAJOR_STRING_TOKEN: '\[major\]'
+          MINOR_STRING_TOKEN: '\[minor\]'
+          PATCH_STRING_TOKEN: '\[patch\]'
+          NONE_STRING_TOKEN: '\[none\]'
+
+      - name: Decide
+        id: decide
+        env:
+          PART: ${{ steps.bump.outputs.part }}
+          OLD_TAG: ${{ steps.bump.outputs.old_tag }}
+          NEW_TAG: ${{ steps.bump.outputs.new_tag }}
+        run: |
+          # With no commit since the last tag, the action sets no part and no old_tag.
+          if [ -z "$PART" ] || [ "$PART" = "none" ] || [ -z "$NEW_TAG" ] || [ "$NEW_TAG" = "$OLD_TAG" ]; then
+            echo "No [major], [minor] or [patch] marker since $OLD_TAG. No release." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "release=false" >>"$GITHUB_OUTPUT"
+          else
+            echo "Release $NEW_TAG ($PART bump from $OLD_TAG)." | tee -a "$GITHUB_STEP_SUMMARY"
+            {
+              echo "release=true"
+              echo "tag=$NEW_TAG"
+              echo "version=${NEW_TAG#plugin-v}"
+            } >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Bump the plugin versions
+        if: steps.decide.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.decide.outputs.version }}
+        run: scripts/bump-version.sh "$VERSION"
+
+      - name: Write the release notes
+        if: steps.decide.outputs.release == 'true'
+        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
+        with:
+          config: cliff.toml
+          args: >-
+            --unreleased --strip header --tag ${{ steps.decide.outputs.tag }}
+            --include-path "plugins/**" --include-path ".claude-plugin/**"
+        env:
+          OUTPUT: ${{ runner.temp }}/RELEASE_NOTES.md
+
+      - name: Update plugins/CHANGELOG.md
+        # Insert the new section above the first release section, under the header of the file.
+        if: steps.decide.outputs.release == 'true'
+        env:
+          NOTES: ${{ runner.temp }}/RELEASE_NOTES.md
+        run: |
+          awk -v notes="$NOTES" '
+            !done && /^## / { while ((getline line < notes) > 0) print line; print ""; done = 1 }
+            { print }
+          ' plugins/CHANGELOG.md >"$RUNNER_TEMP/CHANGELOG.md"
+          mv "$RUNNER_TEMP/CHANGELOG.md" plugins/CHANGELOG.md
+
+      - name: Commit, tag and push
+        if: steps.decide.outputs.release == 'true'
+        env:
+          TAG: ${{ steps.decide.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add plugins/CHANGELOG.md .claude-plugin/marketplace.json plugins/*/.claude-plugin/plugin.json
+          git commit -m "chore(release): $TAG [skip ci]"
+          git tag -a "$TAG" -m "$TAG"
+          git push origin HEAD:main
+          git push origin "$TAG"
+
+      - name: Publish the GitHub release
+        if: steps.decide.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.decide.outputs.tag }}
+          NOTES: ${{ runner.temp }}/RELEASE_NOTES.md
+        run: gh release create "$TAG" --title "ragnarok plugins ${TAG#plugin-v}" --notes-file "$NOTES" --verify-tag

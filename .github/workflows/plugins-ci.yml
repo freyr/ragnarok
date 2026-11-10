@@ -1,0 +1,119 @@
+name: plugins-ci
+
+# Checks of the Claude Code plugins and the marketplace. The server has its own checks in publish.yml.
+
+on:
+  pull_request:
+    paths:
+      - ".claude-plugin/**"
+      - "plugins/**"
+      - "templates/**"
+      - "scripts/**"
+      - "cliff.toml"
+      - ".markdownlint-cli2.jsonc"
+      - ".github/workflows/plugins-*.yml"
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The Claude Code CLI holds the source-of-truth schema for plugins and marketplaces.
+  CLAUDE_CODE_VERSION: "2.1.318"
+
+jobs:
+  marketplace:
+    name: Marketplace (Anthropic validate-plugins)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: anthropics/claude-plugins-community/.github/actions/validate-plugins@06ec7b6a0a82bdc4bec44bd82d4368c42f20d7c1 # main 2026-10-13
+        with:
+          marketplace-path: .claude-plugin/marketplace.json
+          claude-cli-version: ${{ env.CLAUDE_CODE_VERSION }}
+
+  plugins:
+    name: Plugins (strict validate, versions, tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Install Claude Code
+        # The exact version is pinned in CLAUDE_CODE_VERSION; there is no lockfile for a global CLI.
+        run: npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" # zizmor: ignore[adhoc-packages]
+      - name: Validate plugins
+        env:
+          DISABLE_AUTOUPDATER: "1"
+        run: scripts/validate-plugins.sh
+
+  lint:
+    name: Lint (Markdown, shell, workflows)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: markdownlint
+        uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
+        with:
+          globs: |
+            plugins/**/*.md
+            templates/**/*.md
+      - name: ShellCheck
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
+        with:
+          scandir: .
+          ignore_paths: src tests
+      - name: actionlint
+        uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
+
+  security:
+    name: Security (secrets, workflow analysis)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+      - name: zizmor
+        uses: zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1
+        with:
+          advanced-security: false
+          # Pin zizmor itself, so a new audit cannot fail CI without a change in this repository.
+          version: 1.31.1
+
+  changelog:
+    name: Changelog preview
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: git-cliff (unreleased changes)
+        id: cliff
+        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
+        with:
+          config: cliff.toml
+          args: --unreleased --strip header --include-path "plugins/**" --include-path ".claude-plugin/**"
+      - name: Write the preview to the job summary
+        env:
+          CONTENT: ${{ steps.cliff.outputs.content }}
+        run: printf '%s\n' "$CONTENT" >>"$GITHUB_STEP_SUMMARY"

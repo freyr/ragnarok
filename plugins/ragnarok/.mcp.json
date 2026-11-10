@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "ragnarok": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "ragnarok-mcp>=2.0.0",
+        "ragnarok-mcp",
+        "serve"
+      ],
+      "env": {
+        "RAGNAROK_HOME": "${RAGNAROK_HOME:-}"
+      }
+    }
+  }
+}

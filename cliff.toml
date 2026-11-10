@@ -1,0 +1,42 @@
+# git-cliff configuration for the plugin changelog (plugins/CHANGELOG.md): https://git-cliff.org/docs/configuration
+# Only the plugin release line (tags plugin-vX.Y.Z) uses it. The release workflow passes --include-path for
+# plugins/ and .claude-plugin/, so a server commit never shows up here.
+# The release workflow inserts each new section under the header of plugins/CHANGELOG.md.
+# Commits are grouped by the release marker in their message: [major], [minor], [patch].
+
+[changelog]
+header = ""
+body = """
+{% if version -%}
+## [{{ version | trim_start_matches(pat="plugin-v") }}](https://github.com/freyr/ragnarok-bundle/releases/tag/{{ version }}) - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else -%}
+## Unreleased
+{% endif -%}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+
+{% for commit in commits -%}
+- {{ commit.message | split(pat="\n") | first | replace(from="[major]", to="") | replace(from="[minor]", to="") | replace(from="[patch]", to="") | replace(from="[none]", to="") | trim | upper_first }} ([{{ commit.id | truncate(length=7, end="") }}](https://github.com/freyr/ragnarok-bundle/commit/{{ commit.id }}))
+{% endfor -%}
+{% endfor %}
+"""
+footer = ""
+trim = false
+
+[git]
+conventional_commits = false
+filter_unconventional = false
+split_commits = false
+protect_breaking_commits = false
+filter_commits = false
+tag_pattern = "^plugin-v[0-9]+\\.[0-9]+\\.[0-9]+$"
+topo_order = false
+sort_commits = "oldest"
+commit_parsers = [
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^Merge (pull request|branch)", skip = true },
+  { message = "\\[major\\]", group = "<!-- 0 -->Breaking changes" },
+  { message = "\\[minor\\]", group = "<!-- 1 -->Features" },
+  { message = "\\[patch\\]", group = "<!-- 2 -->Fixes" },
+  { message = ".*", group = "<!-- 3 -->Other changes" },
+]
