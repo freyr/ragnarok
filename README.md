@@ -289,8 +289,10 @@ The GitHub releases are the changelog.
 ### Server
 
 ```bash
-uv run pytest
+uv run pytest --cov            # fails below the coverage floor (fail_under in pyproject.toml)
 uv run ruff check . && uv run ruff format --check .
+uv run mypy                     # strict type check of src/
+uv audit --preview-features audit-command
 ```
 
 ### Plugins

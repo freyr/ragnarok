@@ -10,7 +10,7 @@ from ragnarok.search import PrivateNotAllowed, fts_query, search
 class TopicEmbedder:
     """Vectors from word overlap with a few topics, so that dense search is meaningful in tests."""
 
-    TOPICS = ["boiler", "eyepiece", "password", "database", "queue", "budget", "person", "incident"]
+    TOPICS = ("boiler", "eyepiece", "password", "database", "queue", "budget", "person", "incident")
 
     def embed_docs(self, items):
         return [self.vector(h + " " + t) for h, t in items]
@@ -75,9 +75,11 @@ def test_include_private_needs_the_config_gate(index):
 def test_filters(index):
     cfg, conn, emb = index
     hits = search(cfg, conn, emb, "boiler", vault="Work", limit=50)
-    assert hits and all(h.vault == "Work" for h in hits)
+    assert hits
+    assert all(h.vault == "Work" for h in hits)
     hits = search(cfg, conn, emb, "boiler", project="Heating", limit=50)
-    assert hits and all(h.project == "Heating" for h in hits)
+    assert hits
+    assert all(h.project == "Heating" for h in hits)
     hits = search(cfg, conn, emb, "old Q7", include_archived=False, limit=50)
     assert all(h.status == "active" for h in hits)
 
@@ -86,7 +88,8 @@ def test_hit_has_ranks_and_snippet(index):
     cfg, conn, emb = index
     hit = search(cfg, conn, emb, "boiler flow temperature")[0]
     assert hit.path == "Home/Heating/notes/boiler.md"
-    assert hit.dense_rank == 1 and hit.fts_rank == 1
+    assert hit.dense_rank == 1
+    assert hit.fts_rank == 1
     assert "weather curve" in hit.text
 
 

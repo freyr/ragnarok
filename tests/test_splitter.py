@@ -24,14 +24,16 @@ def test_small_sections_join_with_the_next_under_the_same_parent():
     chunks = split("Note", body, min_words=80, max_words=300)
     assert len(chunks) == 1
     assert chunks[0].heading == "Note > T"
-    assert "A" in chunks[0].text and "B" in chunks[0].text
+    assert "A" in chunks[0].text
+    assert "B" in chunks[0].text
 
 
 def test_top_level_sections_are_siblings():
     body = f"# One\n{words(100)}\n# Two\n{words(10)}\n# Three\n{words(100)}"
     chunks = split("N", body, min_words=80)
     assert [c.heading for c in chunks] == ["N > One", "N > Two"]
-    assert chunks[1].text.startswith("w") and "Three" in chunks[1].text
+    assert chunks[1].text.startswith("w")
+    assert "Three" in chunks[1].text
 
 
 def test_small_section_does_not_join_into_another_branch():
@@ -43,7 +45,8 @@ def test_small_section_does_not_join_into_another_branch():
 def test_small_last_section_joins_the_one_before():
     body = f"# T\n## A\n{words(100)}\n## B\n{words(5)}"
     chunks = split("N", body, min_words=80)
-    assert len(chunks) == 1 and chunks[0].heading == "N > T"
+    assert len(chunks) == 1
+    assert chunks[0].heading == "N > T"
     assert chunks[0].text.endswith("B\nw w w w w")
 
 
@@ -73,7 +76,8 @@ def test_description_chunk():
 
 def test_note_without_headings():
     chunks = split("N", words(50))
-    assert len(chunks) == 1 and chunks[0].heading == "N"
+    assert len(chunks) == 1
+    assert chunks[0].heading == "N"
 
 
 def note(title="N"):

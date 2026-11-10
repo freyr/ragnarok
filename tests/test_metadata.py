@@ -17,7 +17,7 @@ def test_walker_skips_dot_folders_and_node_modules(vault):
 
 
 @pytest.mark.parametrize(
-    "rel, area, project, status, type_",
+    ("rel", "area", "project", "status", "type_"),
     [
         ("Work/Devops/db-resize/SUMMARY.md", "devops", "db-resize", "active", "summary"),
         ("Work/Devops/db-resize/research-cpu.md", "devops", "db-resize", "active", "research"),
@@ -64,7 +64,7 @@ def test_frontmatter_overrides_path_rules(vault):
 
 
 @pytest.mark.parametrize(
-    "value, project",
+    ("value", "project"),
     [
         ("[[Devops/tenant-split/SUMMARY]]", "tenant-split"),
         ("[[Devops/_archive/db-migration/SUMMARY|old]]", "db-migration"),
@@ -81,7 +81,7 @@ def test_description_from_frontmatter(vault):
 
 
 @pytest.mark.parametrize(
-    "rel, private",
+    ("rel", "private"),
     [
         ("Work/Personal/People/Someone.md", True),
         ("Work/SLA/Incidents/2026-01-01.md", True),
@@ -118,7 +118,7 @@ def test_load_config(tmp_path):
 def test_load_config_rejects_unknown_keys(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text("allow_privat = true\n")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"unknown config key .*: allow_privat"):
         load_config(path)
 
 
@@ -221,7 +221,7 @@ def test_frontmatter_area_is_lower_case(vault):
 
 
 @pytest.mark.parametrize(
-    "raw, type_",
+    ("raw", "type_"),
     [
         ("design", "spec"),
         ("brief", "spec"),
@@ -238,7 +238,7 @@ def test_type_aliases(vault, raw, type_):
     assert (m.type, m.sources["type"]) == (type_, "frontmatter-map")
 
 
-@pytest.mark.parametrize("stage, status", [("DONE", "active"), ("done", "active"), ("DELIVER", "active")])
+@pytest.mark.parametrize(("stage", "status"), [("DONE", "active"), ("done", "active"), ("DELIVER", "active")])
 def test_summary_stage_done_does_not_archive_the_project(vault, stage, status):
     (vault.root / "Home/Heating/SUMMARY.md").write_text(f"---\nstage: {stage}\n---\n# Heating\n")
     m = meta(vault, "Home/Heating/notes/boiler.md")
@@ -247,7 +247,7 @@ def test_summary_stage_done_does_not_archive_the_project(vault, stage, status):
 
 
 @pytest.mark.parametrize(
-    "state, status",
+    ("state", "status"),
     [
         ("done", "active"),
         ("superseded", "archived"),

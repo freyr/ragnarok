@@ -33,7 +33,8 @@ def test_propose_lists_only_the_missing_keys(vault):
 def test_propose_leaves_a_status_from_the_summary_state_out(vault):
     (vault.root / "Home/Heating/SUMMARY.md").write_text("---\nstate: superseded\n---\n# Heating\n")
     boiler = rows_by_path(backfill.propose(vault, "Home"))["Home/Heating/notes/boiler.md"]
-    assert "status" not in boiler["set"] and "status" not in boiler["source"]
+    assert "status" not in boiler["set"]
+    assert "status" not in boiler["source"]
     (vault.root / "Home/Heating/notes/boiler.md").write_text("---\nstatus: done\n---\n# Boiler\n")
     boiler = rows_by_path(backfill.propose(vault, "Home"))["Home/Heating/notes/boiler.md"]
     assert "status" not in boiler["set"]
@@ -74,7 +75,7 @@ def test_propose_needs_two_common_words_for_a_match(vault):
 
 
 @pytest.mark.parametrize(
-    "text, expected",
+    ("text", "expected"),
     [
         ("# T\nbody\n", "---\nproject: p\n---\n# T\nbody\n"),
         ("---\na: 1\n---\n# T\n", "---\na: 1\nproject: p\n---\n# T\n"),
@@ -102,7 +103,7 @@ def test_apply_archives_first_and_adds_only_missing_keys(vault):
     assert "Home/Teaching/flashcards/node_modules/pkg/README.md" not in names
 
     after = (vault.root / "Home/Heating/notes/boiler.md").read_text()
-    fm, body = parse_note(after)
+    fm, _body = parse_note(after)
     assert fm == {
         "project": "Heating",
         "area": "heating",
@@ -118,7 +119,7 @@ def test_apply_archives_first_and_adds_only_missing_keys(vault):
 
 
 def test_apply_refuses_the_proposal_of_another_vault(vault):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="the proposal is for the vault Home, not Studio"):
         backfill.apply(vault, "Studio", backfill.propose(vault, "Home"))
 
 

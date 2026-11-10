@@ -8,10 +8,12 @@ import sqlite3
 import time
 from collections import defaultdict
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 
 from .config import Config, variant_hash
+from .embed import Embedder
 from .evaluate import keywords
 from .index import IndexMismatch, connect, update
 from .metadata import resolve_file
@@ -59,13 +61,13 @@ MARGIN = 0.05
 P95_MS = 500
 
 
-def set_hash(questions: list[dict]) -> str:
+def set_hash(questions: list[dict[str, Any]]) -> str:
     """The SHA-256 of the canonical JSON of the question list."""
     text = json.dumps(questions, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def write_set(path: Path, name: str, kind: str, corpus: str, questions: list[dict]) -> None:
+def write_set(path: Path, name: str, kind: str, corpus: str, questions: list[dict[str, Any]]) -> None:
     data = {
         "name": name,
         "kind": kind,
@@ -77,7 +79,7 @@ def write_set(path: Path, name: str, kind: str, corpus: str, questions: list[dic
     Path(path).write_text(json.dumps(data, indent=1, ensure_ascii=False) + "\n")
 
 
-def load_set(path: Path) -> dict:
+def load_set(path: Path) -> dict[str, Any]:
     """A set file of version 2. Raise ValueError when the header, a question or the hash is wrong."""
     data = json.loads(Path(path).read_text())
     for key in ("name", "kind", "version", "corpus", "hash", "questions"):
@@ -102,10 +104,10 @@ def load_set(path: Path) -> dict:
         ids.add(q["id"])
     if set_hash(data["questions"]) != data["hash"]:
         raise ValueError(f"{path}: the hash of the questions does not agree with the header")
-    return data
+    return cast(dict[str, Any], data)
 
 
-def convert(old: list[dict], cfg: Config) -> tuple[list[dict], list[tuple[str, str]]]:
+def convert(old: list[dict[str, Any]], cfg: Config) -> tuple[list[dict[str, Any]], list[tuple[str, str]]]:
     """The questions of a draft set of evaluate.py in the format v2, and the (id, reason) of each question that it
     cannot convert. stratum = the old type, cluster = the first expected path, area = the area that the metadata rules
     give the first expected note on cfg ("unknown" when the note is absent)."""
@@ -143,7 +145,7 @@ class MissingGold(ValueError):
         self.missing = missing
 
 
-def missing_gold(conn: sqlite3.Connection, questions: list[dict]) -> list[tuple[str, str, str]]:
+def missing_gold(conn: sqlite3.Connection, questions: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
     """The (id, path, reason) of each expected path that the search cannot return: "not in the index" or "private"."""
     sensitivity = dict(conn.execute("SELECT path, sensitivity FROM notes"))
     missing = []
@@ -171,12 +173,14 @@ def bm25_rank(cfg: Config, conn: sqlite3.Connection, question: str, path: str) -
     return paths.index(path) + 1 if path in paths else None
 
 
-def result_path(vcfg: Config, bench_set: dict) -> Path:
+def result_path(vcfg: Config, bench_set: dict[str, Any]) -> Path:
     """The result file of a variant on a set: a second variant never writes over the first one."""
     return vcfg.data_dir / "bench" / f"{bench_set['hash'][:12]}-{variant_hash(vcfg)}.json"
 
 
-def run_set(vcfg: Config, conn: sqlite3.Connection, embedder, bench_set: dict, variant: str) -> dict:
+def run_set(
+    vcfg: Config, conn: sqlite3.Connection, embedder: Embedder, bench_set: dict[str, Any], variant: str
+) -> dict[str, Any]:
     """Each question through Tools.search with limit 20 and the change scan. Raise MissingGold before the first
     question when an expected path is not in the index.
 
@@ -263,11 +267,11 @@ def _sign(x: float) -> str:
     return "+" if x > 0 else "-" if x < 0 else "0"
 
 
-def _p95(result: dict) -> float:
+def _p95(result: dict[str, Any]) -> float:
     return float(np.percentile([r["total_ms"] for r in result["questions"]], 95))
 
 
-def compare(bench_set: dict, results: list[tuple[str, dict]], margin: float = MARGIN) -> list[str]:
+def compare(bench_set: dict[str, Any], results: list[tuple[str, dict[str, Any]]], margin: float = MARGIN) -> list[str]:
     """The report of bench compare: results[0] is A, the others are B. It ends with one verdict line for each B."""
     qs = bench_set["questions"]
     ids = [q["id"] for q in qs]
@@ -296,7 +300,7 @@ def compare(bench_set: dict, results: list[tuple[str, dict]], margin: float = MA
                 lines.append(f"  {kind} {value} n={len(at)}: recall@5 {rec[at].mean():.3f} MRR {mrr[at].mean():.3f}")
     a_name, a_rec, a_mrr, a_rows = table[0]
     # for each measure, the interval of each B at its Holm level among the B variants
-    stats: dict[str, list[tuple]] = {}
+    stats: dict[str, list[tuple[Any, ...]]] = {}
     for m, col, base in (("recall@5", 1, a_rec), ("MRR", 2, a_mrr)):
         diffs = [list(row[col] - base) for row in table[1:]]
         levels, rejected = holm([cluster_bootstrap(d, clusters)[3] for d in diffs])

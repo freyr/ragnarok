@@ -4,6 +4,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .config import Config
+    from .metadata import NoteMeta
 
 HEADING = re.compile(r"^(#{1,3})\s+(.+?)\s*#*\s*$")
 FENCE = re.compile(r"^\s*(```|~~~)")
@@ -45,7 +50,7 @@ def sections(body: str) -> list[Section]:
         m = None if in_fence else HEADING.match(line)
         if m:
             level = len(m.group(1))
-            path = path[: level - 1] + [m.group(2).strip()]
+            path = [*path[: level - 1], m.group(2).strip()]
             result.append(Section(tuple(path), []))
         else:
             result[-1].lines.append(line)
@@ -142,7 +147,7 @@ def _cut(text: str, limit: int) -> list[str]:
     return parts
 
 
-def fit(cfg, chunks: list[Chunk]) -> list[Chunk]:
+def fit(cfg: Config, chunks: list[Chunk]) -> list[Chunk]:
     """Cut each chunk whose text to the model is above the token limit of the model profile; no text is lost."""
     from .embed import doc_input, max_chars
 
@@ -156,7 +161,7 @@ def fit(cfg, chunks: list[Chunk]) -> list[Chunk]:
     return out
 
 
-def chunk_note(cfg, meta, body: str) -> tuple[list[Chunk], int]:
+def chunk_note(cfg: Config, meta: NoteMeta, body: str) -> tuple[list[Chunk], int]:
     """Redact and split the body of a resolved note. Return (chunks, number of redactions)."""
     from .redact import redact
 
@@ -170,7 +175,7 @@ def chunk_note(cfg, meta, body: str) -> tuple[list[Chunk], int]:
     return fit(cfg, chunks), count
 
 
-def chunk_file(cfg, rel: str):
+def chunk_file(cfg: Config, rel: str) -> tuple[NoteMeta, list[Chunk], int]:
     """Read, resolve, redact and split one note. Return (meta, chunks, number of redactions)."""
     from .metadata import read_note, resolve
 

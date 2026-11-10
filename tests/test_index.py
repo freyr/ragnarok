@@ -206,7 +206,8 @@ def test_connect_migrates_an_older_index_and_its_cache_with_no_embedding(cfg, re
     conn = connect(cfg)
     st = status(cfg, conn)
     assert st["rules_hash"] == rules_hash(cfg)
-    assert st["notes"] == built.notes and st["chunks"] == st["vectors"] == built.chunks
+    assert st["notes"] == built.notes
+    assert st["chunks"] == st["vectors"] == built.chunks
     assert run_index(cfg, monkeypatch, capsys)["embedded"] == 0
     # --rebuild deletes the index file, not the cache, so all chunks come from the converted entries
     rebuilt = run_index(cfg, monkeypatch, capsys, "--rebuild")
@@ -241,7 +242,8 @@ def test_cache_entries_that_another_index_writes_during_the_embedding_do_not_sto
             return super().embed_docs(items)
 
     result = update(cfg, conn, OtherWriterEmbedder())
-    assert (result.touched, result.added) == (1, 1) and result.embedded > 0
+    assert (result.touched, result.added) == (1, 1)
+    assert result.embedded > 0
 
 
 def test_two_index_files_share_one_cache(cfg):
@@ -281,7 +283,8 @@ def test_a_failed_migration_leaves_the_old_index_usable(cfg):
     conn = raw(cfg.index_path)
     assert tables(conn) == before
     meta = dict(conn.execute("SELECT key, value FROM meta"))
-    assert meta["schema_version"] == "1" and meta["rules_hash"] == rules_hash(cfg)
+    assert meta["schema_version"] == "1"
+    assert meta["rules_hash"] == rules_hash(cfg)
     assert conn.execute("SELECT count(*) FROM refs").fetchone() == (1,)
 
 
@@ -298,11 +301,13 @@ def test_an_index_of_another_schema_version_is_refused(cfg, version):
 
 def test_full_index_then_no_new_embeddings(cfg):
     conn, emb, first = build(cfg)
-    assert first.added == first.notes > 0 and emb.calls == first.embedded > 0
+    assert first.added == first.notes > 0
+    assert emb.calls == first.embedded > 0
     second = update(cfg, conn, emb)
     assert (second.added, second.changed, second.removed, second.embedded, second.rederived) == (0, 0, 0, 0, 0)
     st = status(cfg, conn)
-    assert st["notes"] == first.notes and st["chunks"] == st["vectors"] == first.chunks
+    assert st["notes"] == first.notes
+    assert st["chunks"] == st["vectors"] == first.chunks
 
 
 def test_changed_note_is_rewritten_and_only_new_chunks_are_embedded(cfg):
@@ -442,8 +447,10 @@ def test_changed_vault_rule_gives_new_project_and_area_without_embedding(cfg):
     cfg.vault_rules = {**cfg.vault_rules, "Home": VaultRules(area="house", project_depth=1)}
     result = update(cfg, conn, emb)
     assert note_row(conn, FIELD_STOP)[:2] == ("Astro", "house")
-    assert result.embedded == 0 and emb.calls == calls
-    assert result.changed == 0 and result.rederived > 0
+    assert result.embedded == 0
+    assert emb.calls == calls
+    assert result.changed == 0
+    assert result.rederived > 0
 
 
 def test_changed_area_embeds_only_the_description_chunk(cfg):
@@ -500,7 +507,8 @@ def test_added_marker_gives_the_notes_of_its_folder_a_new_project_without_embedd
     marker.write_text("# Astro\nThe summary of the astro folder.\n")
     result = update(cfg, conn, emb)
     assert note_row(conn, FIELD_STOP)[0] == "Astro"
-    assert result.rederived == 1 and result.added == 1
+    assert result.rederived == 1
+    assert result.added == 1
     assert emb.calls - calls == result.embedded  # only the new marker note is embedded
     marker.unlink()
     result = update(cfg, conn, emb)
@@ -515,7 +523,8 @@ def test_marker_change_leaves_notes_outside_its_folder_alone(cfg, monkeypatch):
     real = index.resolve
     monkeypatch.setattr(index, "resolve", lambda *a, **k: calls.append(a[1]) or real(*a, **k))
     update(cfg, conn, emb)
-    assert calls and all(rel.startswith("Home/Astro/") for rel in calls)
+    assert calls
+    assert all(rel.startswith("Home/Astro/") for rel in calls)
 
 
 def test_link_goes_to_the_note_in_the_nearest_folder(cfg):

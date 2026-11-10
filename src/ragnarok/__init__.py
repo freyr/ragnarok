@@ -1,3 +1,8 @@
 """Local RAG search over Obsidian vaults."""
 
-__version__ = "1.0.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("ragnarok-mcp")
+except PackageNotFoundError:  # a source tree that is not installed
+    __version__ = "0.0.0"

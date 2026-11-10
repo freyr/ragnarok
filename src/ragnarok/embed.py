@@ -7,6 +7,7 @@ import json
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from typing import Protocol, cast
 
 from .config import Config
 
@@ -68,7 +69,7 @@ def template(cfg: Config) -> str:
 
 def input_hash(cfg: Config, heading: str, text: str) -> str:
     """The text hash of a chunk in the cache key: the model and the full text that goes to the model."""
-    return hashlib.sha1(f"{cfg.model}\0{doc_input(cfg, heading, text)}".encode()).hexdigest()
+    return hashlib.sha1(f"{cfg.model}\0{doc_input(cfg, heading, text)}".encode(), usedforsecurity=False).hexdigest()
 
 
 class _TooLong(Exception):
@@ -84,6 +85,14 @@ def _halves(text: str) -> tuple[str, str]:
     return text[:cut], text[cut + 1 :]
 
 
+class Embedder(Protocol):
+    """What the indexer and the search need from an embedder; the tests give a fake one."""
+
+    def embed_docs(self, items: list[tuple[str, str]]) -> list[list[float]]: ...
+
+    def embed_query(self, query: str) -> list[float]: ...
+
+
 class OllamaEmbedder:
     def __init__(self, cfg: Config, batch: int = 32, timeout: float = 600):
         self.cfg = cfg
@@ -95,13 +104,13 @@ class OllamaEmbedder:
         native = profile(self.cfg).native_dimension
         if native is not None and self.cfg.dimension < native:
             body["dimensions"] = self.cfg.dimension
-        req = urllib.request.Request(
+        req = urllib.request.Request(  # noqa: S310 - the configured Ollama URL
             f"{self.cfg.ollama_url}/api/embed",
             data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # noqa: S310 - the configured Ollama URL
                 vectors = json.load(resp)["embeddings"]
         except urllib.error.HTTPError as e:
             message = e.read().decode(errors="replace")
@@ -115,7 +124,7 @@ class OllamaEmbedder:
             ) from e
         if len(vectors) != len(texts) or any(len(v) != self.cfg.dimension for v in vectors):
             raise EmbedError(f"Ollama returned vectors that do not match the dimension {self.cfg.dimension}")
-        return vectors
+        return cast(list[list[float]], vectors)
 
     def _post(self, texts: list[str]) -> list[list[float]]:
         """Embed the texts. When Ollama refuses a text above the context length, split the batch until the text is

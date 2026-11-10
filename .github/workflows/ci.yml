@@ -21,7 +21,7 @@ env:
 
 jobs:
   test:
-    name: Test (pytest)
+    name: Test (pytest, coverage)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -30,8 +30,37 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: false
-      - name: pytest
-        run: uv run --frozen pytest -q
+      - name: pytest with the coverage floor
+        # fail_under in pyproject.toml is the floor.
+        run: uv run --frozen pytest -q --cov --cov-report=term-missing
+
+  static:
+    name: Static (mypy strict)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: false
+      - name: mypy
+        run: uv run --frozen mypy
+
+  audit:
+    name: Audit (dependency advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: false
+          # `uv audit` is a preview command, so pin the uv version that it was tested with.
+          version: "0.13.7"
+      - name: uv audit
+        run: uv audit --frozen --preview-features audit-command
 
   build:
     name: Build (wheel and sdist)
@@ -140,7 +169,7 @@ jobs:
   ci-gate:
     # The one required check. It fails when a needed job failed or was cancelled.
     if: always()
-    needs: [test, build, marketplace, plugins, lint, security]
+    needs: [test, static, audit, build, marketplace, plugins, lint, security]
     runs-on: ubuntu-latest
     steps:
       - uses: freyr/.github/actions/ci-gate@3f8fbbcf74283946ee3a7f63e21dd19bf02cdb77 # v1.0.0

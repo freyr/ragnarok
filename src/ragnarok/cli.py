@@ -4,8 +4,9 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
-from .config import load_config
+from .config import Config, load_config
 
 COMMANDS = {
     "index": "Build or update the full index of all vaults",
@@ -85,11 +86,11 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _relative(cfg, raw: str) -> str:
+def _relative(cfg: Config, raw: str) -> str:
     return cfg.note_key(raw)
 
 
-def cmd_inspect(cfg, args) -> int:
+def cmd_inspect(cfg: Config, args: argparse.Namespace) -> int:
     from .metadata import resolve_file
 
     code = 0
@@ -104,7 +105,7 @@ def cmd_inspect(cfg, args) -> int:
     return code
 
 
-def cmd_chunks(cfg, args) -> int:
+def cmd_chunks(cfg: Config, args: argparse.Namespace) -> int:
     from dataclasses import replace
     from statistics import median
 
@@ -120,7 +121,7 @@ def cmd_chunks(cfg, args) -> int:
         print(f"redactions: {count}")
     if not args.stats:
         return 0
-    totals = {"all": [], "normal": []}
+    totals: dict[str, list[int]] = {"all": [], "normal": []}
     notes = redacted_notes = 0
     for rel in iter_notes(cfg):
         meta, chunks, count = chunk_file(cfg, rel)
@@ -137,7 +138,7 @@ def cmd_chunks(cfg, args) -> int:
     return 0
 
 
-def _with_min_words(cfg, min_words):
+def _with_min_words(cfg: Config, min_words: int | None) -> Config:
     """A configuration with a different minimum chunk size uses its own index file."""
     from dataclasses import replace
 
@@ -147,7 +148,7 @@ def _with_min_words(cfg, min_words):
     return replace(cfg, min_words=min_words, index_path=path)
 
 
-def cmd_index(cfg, args) -> int:
+def cmd_index(cfg: Config, args: argparse.Namespace) -> int:
     from .embed import EmbedError, OllamaEmbedder
     from .index import IndexMismatch, connect, update
 
@@ -172,12 +173,12 @@ def cmd_index(cfg, args) -> int:
     return 0
 
 
-def cmd_bench(cfg, args) -> int:
+def cmd_bench(cfg: Config, args: argparse.Namespace) -> int:
     handler = {"index": _bench_index, "run": _bench_run, "compare": _bench_compare, "convert": _bench_convert}
     return handler[args.bench](cfg, args)
 
 
-def _bench_set(args):
+def _bench_set(args: argparse.Namespace) -> dict[str, Any] | None:
     from .bench import load_set
 
     try:
@@ -187,7 +188,7 @@ def _bench_set(args):
         return None
 
 
-def _bench_run(cfg, args) -> int:
+def _bench_run(cfg: Config, args: argparse.Namespace) -> int:
     from .bench import MissingGold, open_variant, result_path, run_set
     from .embed import EmbedError, OllamaEmbedder
     from .index import IndexMismatch
@@ -219,7 +220,7 @@ def _bench_run(cfg, args) -> int:
     return 0
 
 
-def _bench_compare(cfg, args) -> int:
+def _bench_compare(cfg: Config, args: argparse.Namespace) -> int:
     from .bench import compare, result_path
 
     bench_set = _bench_set(args)
@@ -248,7 +249,7 @@ def _bench_compare(cfg, args) -> int:
     return 0
 
 
-def _bench_convert(cfg, args) -> int:
+def _bench_convert(cfg: Config, args: argparse.Namespace) -> int:
     from dataclasses import replace
 
     from .bench import convert, write_set
@@ -266,7 +267,7 @@ def _bench_convert(cfg, args) -> int:
     return 0
 
 
-def _bench_index(cfg, args) -> int:
+def _bench_index(cfg: Config, args: argparse.Namespace) -> int:
     from .bench import open_variant
     from .embed import EmbedError, OllamaEmbedder
     from .index import IndexMismatch, update
@@ -287,7 +288,7 @@ def _bench_index(cfg, args) -> int:
     return 0
 
 
-def cmd_status(cfg, args) -> int:
+def cmd_status(cfg: Config, args: argparse.Namespace) -> int:
     from .index import IndexMismatch, connect, status
 
     if not cfg.index_path.exists():
@@ -305,7 +306,7 @@ def cmd_status(cfg, args) -> int:
     return 0
 
 
-def cmd_search(cfg, args) -> int:
+def cmd_search(cfg: Config, args: argparse.Namespace) -> int:
     import time
 
     from .embed import EmbedError, OllamaEmbedder
@@ -347,7 +348,7 @@ def cmd_search(cfg, args) -> int:
     return 0
 
 
-def cmd_eval(cfg, args) -> int:
+def cmd_eval(cfg: Config, args: argparse.Namespace) -> int:
     from .embed import OllamaEmbedder
     from .evaluate import mechanical, pool
     from .index import connect
@@ -376,7 +377,7 @@ def cmd_eval(cfg, args) -> int:
     return 0
 
 
-def cmd_serve(cfg, args) -> int:
+def cmd_serve(cfg: Config, args: argparse.Namespace) -> int:
     import logging
 
     from .config import home_dir
@@ -393,7 +394,7 @@ def cmd_serve(cfg, args) -> int:
     return 0
 
 
-def cmd_backfill(cfg, args) -> int:
+def cmd_backfill(cfg: Config, args: argparse.Namespace) -> int:
     from . import backfill
 
     if args.vault not in cfg.vaults:
@@ -427,7 +428,7 @@ def cmd_backfill(cfg, args) -> int:
     return 0
 
 
-def _merge(cfg, args) -> int:
+def _merge(cfg: Config, args: argparse.Namespace) -> int:
     from . import backfill
 
     descriptions = {}
@@ -463,7 +464,7 @@ def _merge(cfg, args) -> int:
     return 0
 
 
-def cmd_survey(cfg, args) -> int:
+def cmd_survey(cfg: Config, args: argparse.Namespace) -> int:
     from .survey import format_text, survey
 
     if not cfg.vault_dir(args.vault).is_dir():
@@ -474,13 +475,13 @@ def cmd_survey(cfg, args) -> int:
     return 0
 
 
-def _config_file(args) -> Path:
+def _config_file(args: argparse.Namespace) -> Path:
     from .config import config_path
 
     return args.config or config_path()
 
 
-def cmd_init(cfg, args) -> int:
+def cmd_init(cfg: Config, args: argparse.Namespace) -> int:
     from .bootstrap import init
     from .config import home_dir
 
@@ -492,7 +493,7 @@ def cmd_init(cfg, args) -> int:
 
     def ask(question: str, default: str) -> str:
         if args.root:
-            return args.root
+            return str(args.root)
         if args.yes:
             return default
         return input(f"{question} [{default}]: ").strip() or default
@@ -500,7 +501,7 @@ def cmd_init(cfg, args) -> int:
     return init(home_dir(), _config_file(args), confirm, ask)
 
 
-def cmd_doctor(cfg, args) -> int:
+def cmd_doctor(cfg: Config, args: argparse.Namespace) -> int:
     from .bootstrap import doctor, print_checks
     from .config import home_dir
 
