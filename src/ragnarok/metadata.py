@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field
 from fnmatch import fnmatchcase
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 import frontmatter
 
@@ -105,7 +106,7 @@ class NoteMeta:
     jira: list[str] = field(default_factory=list)
     sources: dict[str, str] = field(default_factory=dict)
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -130,7 +131,7 @@ def is_private(cfg: Config, rel: str) -> bool:
     return any(fnmatchcase(rel, pattern) for pattern in cfg.private_patterns)
 
 
-def parse_note(text: str) -> tuple[dict, str]:
+def parse_note(text: str) -> tuple[dict[str, Any], str]:
     """Return (frontmatter, body). Malformed frontmatter counts as none."""
     try:
         post = frontmatter.loads(text)
@@ -139,7 +140,7 @@ def parse_note(text: str) -> tuple[dict, str]:
         return {}, text
 
 
-def read_note(path: Path) -> tuple[dict, str]:
+def read_note(path: Path) -> tuple[dict[str, Any], str]:
     return parse_note(path.read_text(errors="replace"))
 
 
@@ -149,7 +150,7 @@ def find_jira(cfg: Config, vault: str, text: str) -> list[str]:
     return sorted(keys)
 
 
-def _as_list(value) -> list[str]:
+def _as_list(value: Any) -> list[str]:
     if value is None:
         return []
     if isinstance(value, str):
@@ -251,7 +252,7 @@ def _type_from_path(parts: list[str]) -> str | None:
 def resolve(
     cfg: Config,
     rel: str,
-    fm: dict | None = None,
+    fm: dict[str, Any] | None = None,
     body: str = "",
     has_marker: Callable[[str], bool] | None = None,
     project_archived: Callable[[str], bool] | None = None,

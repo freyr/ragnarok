@@ -23,6 +23,7 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .config import Config, default_home, is_checkout, load_config
 
@@ -229,7 +230,7 @@ def init(
     config_file: Path,
     confirm: Callable[[str], bool],
     ask: Callable[[str, str], str],
-    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    run: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> int:
     def step(n: int, text: str) -> None:
         print(f"\n[{n}/6] {text}", flush=True)
@@ -276,7 +277,10 @@ def init(
                 )
                 return 1
         run(["brew", "services", "start", "ollama"], check=True)
-        answers = lambda: ollama_models(cfg) is not None  # noqa: E731
+
+        def answers() -> bool:
+            return ollama_models(cfg) is not None
+
         if not wait_for(answers):
             # launchd can load the job without a start of the process; a kickstart starts it
             run(["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/sh.brew.ollama"], check=False)

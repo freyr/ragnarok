@@ -7,7 +7,9 @@ import hashlib
 import logging
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any, cast
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -50,7 +52,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
     again when it changed, so that a new private pattern or rule applies to that call without a restart.
     A missing, recent, invalid or vault-less file does not replace the configuration in use. A valid file that
     the index refuses (a new model or dimension) stops the old configuration: each call fails until the rebuild."""
-    state: dict = {}
+    state: dict[str, Any] = {}
     lock = threading.Lock()  # one call at a time: the scan writes to the index
     watch = None if tools is not None or cfg is not None else (config_file or config_path())
 
@@ -64,6 +66,8 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
             raise IndexMismatch(state["stopped"])
 
     def reload(stamp: tuple[int, int] | None) -> None:
+        if watch is None:  # only a watched config file reloads
+            return
         stopped = "stopped" in state
         if stamp is None:
             return keep("is missing")
@@ -100,7 +104,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
             state["tools"] = tools
         elif watch is None:
             if "tools" not in state:
-                state["tools"] = open_tools(cfg)
+                state["tools"] = open_tools(cast(Config, cfg))  # no tools and no watch: cfg is set
         elif "tools" not in state and "stopped" not in state:
             stamp, digest = _stamp(watch), _digest(watch)
             state["tools"] = open_tools(load_config(watch))
@@ -110,11 +114,11 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
             stamp = _stamp(watch)
             if "stopped" in state or stamp != state["stamp"]:
                 reload(stamp)
-        return state["tools"]
+        return cast(Tools, state["tools"])
 
-    def timed(fn):
+    def timed[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
         @functools.wraps(fn)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             start = time.perf_counter()
             ok = "ok"
             try:
@@ -156,7 +160,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
         include_archived: bool = True,
         include_private: bool = False,
         limit: int = 8,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Hybrid search (meaning and keywords) over the vault notes. Returns notes, each with its best section.
 
         Filters: vault (the name of a vault folder), project (folder slug), area, type (research,
@@ -175,7 +179,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
 
     @server.tool()
     @timed
-    def find_projects(query: str, vault: str | None = None, limit: int = 5) -> dict:
+    def find_projects(query: str, vault: str | None = None, limit: int = 5) -> dict[str, Any]:
         """Find the earlier projects that a prompt continues or resembles, ranked by their matching notes.
 
         Each project has its slug, vault, folder, description, stage, state, next action and matching notes.
@@ -184,13 +188,13 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
 
     @server.tool()
     @timed
-    def list_project(project: str, vault: str | None = None) -> dict:
+    def list_project(project: str, vault: str | None = None) -> dict[str, Any]:
         """All notes of a project in any folder, with type, status and description, with stage, state, next action."""
         return get().list_project(project, vault=vault)
 
     @server.tool()
     @timed
-    def open_projects(states: list[str] | None = None, vault: str | None = None) -> dict:
+    def open_projects(states: list[str] | None = None, vault: str | None = None) -> dict[str, Any]:
         """The projects that are open, grouped by the state in their SUMMARY.md, newest update first.
 
         states defaults to in-progress and paused; the other values are done, superseded and abandoned. Each project has
@@ -200,7 +204,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
 
     @server.tool()
     @timed
-    def open_note(path: str, heading: str | None = None, outline: bool | None = None) -> dict:
+    def open_note(path: str, heading: str | None = None, outline: bool | None = None) -> dict[str, Any]:
         """The text of a note (or of one section, by heading), its frontmatter, links and backlinks.
 
         outline=true gives the sections (heading path, words, first sentence) instead of the text. A note of more
@@ -212,7 +216,7 @@ def build(cfg: Config | None = None, tools: Tools | None = None, config_file: Pa
 
     @server.tool()
     @timed
-    def find_by_jira(key: str) -> dict:
+    def find_by_jira(key: str) -> dict[str, Any]:
         """The notes that contain a Jira key, for example ABC-123."""
         return get().find_by_jira(key)
 

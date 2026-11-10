@@ -7,6 +7,7 @@ import json
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from typing import Protocol, cast
 
 from .config import Config
 
@@ -84,6 +85,14 @@ def _halves(text: str) -> tuple[str, str]:
     return text[:cut], text[cut + 1 :]
 
 
+class Embedder(Protocol):
+    """What the indexer and the search need from an embedder; the tests give a fake one."""
+
+    def embed_docs(self, items: list[tuple[str, str]]) -> list[list[float]]: ...
+
+    def embed_query(self, query: str) -> list[float]: ...
+
+
 class OllamaEmbedder:
     def __init__(self, cfg: Config, batch: int = 32, timeout: float = 600):
         self.cfg = cfg
@@ -115,7 +124,7 @@ class OllamaEmbedder:
             ) from e
         if len(vectors) != len(texts) or any(len(v) != self.cfg.dimension for v in vectors):
             raise EmbedError(f"Ollama returned vectors that do not match the dimension {self.cfg.dimension}")
-        return vectors
+        return cast(list[list[float]], vectors)
 
     def _post(self, texts: list[str]) -> list[list[float]]:
         """Embed the texts. When Ollama refuses a text above the context length, split the batch until the text is

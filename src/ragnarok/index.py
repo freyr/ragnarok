@@ -11,13 +11,14 @@ from array import array
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import sqlite_vec
 
 from .config import Config, rules_hash
-from .embed import input_hash, template
-from .metadata import iter_notes, read_note, resolve
-from .splitter import chunk_note
+from .embed import Embedder, input_hash, template
+from .metadata import NoteMeta, iter_notes, read_note, resolve
+from .splitter import Chunk, chunk_note
 
 SCHEMA_VERSION = 3
 GROUP = 64  # notes per transaction during an update
@@ -240,14 +241,14 @@ class _Pending:
     mtime_ns: int
     size: int
     hash: str
-    meta: object
-    chunks: list
+    meta: NoteMeta
+    chunks: list[Chunk]
     links: list[str]
     moved: bool = False
     rederived: bool = False
 
 
-def _same(cfg: Config, conn: sqlite3.Connection, note_id: int, m, chunks) -> bool:
+def _same(cfg: Config, conn: sqlite3.Connection, note_id: int, m: NoteMeta, chunks: list[Chunk]) -> bool:
     """True when the index already holds this metadata and these chunks for the note."""
     row = conn.execute(
         "SELECT title, project, area, type, status, sensitivity, description FROM notes WHERE id = ?", (note_id,)
@@ -262,7 +263,7 @@ def _same(cfg: Config, conn: sqlite3.Connection, note_id: int, m, chunks) -> boo
 def update(
     cfg: Config,
     conn: sqlite3.Connection,
-    embedder,
+    embedder: Embedder,
     progress: Callable[[str], None] | None = None,
     limit: int | None = None,
 ) -> UpdateResult:
@@ -368,7 +369,9 @@ def update(
     return result
 
 
-def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pending], result: UpdateResult) -> None:
+def _write(
+    cfg: Config, conn: sqlite3.Connection, embedder: Embedder, pending: list[_Pending], result: UpdateResult
+) -> None:
     # end the transaction of the earlier writes (a touched note), so the read of the cache below is not a snapshot
     # inside it: another index can write the cache during the embedding, and a write after a stale snapshot fails at
     # once (SQLITE_BUSY_SNAPSHOT), with no busy timeout
@@ -379,7 +382,7 @@ def _write(cfg: Config, conn: sqlite3.Connection, embedder, pending: list[_Pendi
         for c in p.chunks:
             hashes[input_hash(cfg, c.heading, c.model_text)] = (c.heading, c.model_text)
     key = _key(cfg)
-    vectors = {}
+    vectors: dict[str, bytes] = {}
     keys = list(hashes)
     for i in range(0, len(keys), 500):
         part = keys[i : i + 500]
@@ -526,8 +529,11 @@ def resolve_links(conn: sqlite3.Connection) -> None:
     conn.executemany("UPDATE links SET to_note = ? WHERE rowid = ?", updates)
 
 
-def status(cfg: Config, conn: sqlite3.Connection) -> dict:
-    one = lambda q: conn.execute(q).fetchone()[0]  # noqa: E731
+def status(cfg: Config, conn: sqlite3.Connection) -> dict[str, Any]:
+
+    def one(q: str) -> Any:
+        return conn.execute(q).fetchone()[0]
+
     return {
         "index": str(cfg.index_path),
         "size_mb": round(cfg.index_path.stat().st_size / 1e6, 1) if cfg.index_path.exists() else 0,

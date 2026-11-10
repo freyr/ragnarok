@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import re
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import replace
+from typing import Any
 
 import frontmatter
 
@@ -27,34 +29,34 @@ PREFIX_RE = re.compile(r"^([^-_\s]+[-_])")
 MARKER_MIN_FOLDERS = 3
 
 
-def _ranked(counter: Counter, top: int) -> tuple[dict, int]:
+def _ranked(counter: Counter[str], top: int) -> tuple[dict[str, Any], int]:
     items = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
     return dict(items[:top]), max(len(items) - top, 0)
 
 
-def _folders(counter: Counter, top: int) -> dict:
+def _folders(counter: Counter[str], top: int) -> dict[str, Any]:
     folders, more = _ranked(counter, top)
     return {"folders": folders, "more": more}
 
 
-def survey(cfg: Config, vault: str, top: int = 30) -> dict:
+def survey(cfg: Config, vault: str, top: int = 30) -> dict[str, Any]:
     """The facts of the vault folder `vault`. The folder need not be in cfg.vaults."""
     notes = 0
     with_frontmatter = 0
     malformed: list[str] = []
-    by_depth: Counter = Counter()
-    level1: Counter = Counter()
-    level2: Counter = Counter()
-    level3: Counter = Counter()
+    by_depth: Counter[int] = Counter()
+    level1: Counter[str] = Counter()
+    level2: Counter[str] = Counter()
+    level3: Counter[str] = Counter()
     malformed_private = 0
-    keys: Counter = Counter()
-    values: dict[str, Counter] = {key: Counter() for key in VALUE_KEYS}
+    keys: Counter[str] = Counter()
+    values: dict[str, Counter[str]] = {key: Counter() for key in VALUE_KEYS}
     folders_of_name: dict[str, set[str]] = defaultdict(set)
-    prefixes: Counter = Counter()
+    prefixes: Counter[str] = Counter()
     date_prefixed = 0
-    archive: Counter = Counter()
+    archive: Counter[str] = Counter()
     ticket_keys: dict[str, set[str]] = defaultdict(set)
-    ticket_notes: Counter = Counter()
+    ticket_notes: Counter[str] = Counter()
 
     for rel in iter_notes(replace(cfg, vaults=[vault])):
         notes += 1
@@ -131,11 +133,11 @@ def survey(cfg: Config, vault: str, top: int = 30) -> dict:
     }
 
 
-def format_text(facts: dict) -> str:
+def format_text(facts: dict[str, Any]) -> str:
     """The facts as plain text, one section for each rule input."""
     out = [f"vault {facts['vault']}: {facts['notes']} notes, {facts['with_frontmatter']} with frontmatter"]
 
-    def section(title: str, rows: dict, fmt=str):
+    def section(title: str, rows: dict[str, Any], fmt: Callable[[Any], str] = str) -> None:
         out.append(f"\n{title}")
         out.extend([f"  {key}: {fmt(value)}" for key, value in rows.items()] or ["  (none)"])
 

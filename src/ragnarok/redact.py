@@ -44,7 +44,7 @@ def redact(text: str) -> tuple[str, int]:
     """Return (redacted text, number of replacements)."""
     count = 0
 
-    def token_sub(_m: re.Match) -> str:
+    def token_sub(_m: re.Match[str]) -> str:
         nonlocal count
         count += 1
         return MARK
@@ -52,20 +52,20 @@ def redact(text: str) -> tuple[str, int]:
     for pattern in TOKEN_PATTERNS:
         text = pattern.sub(token_sub, text)
 
-    def kv_sub(m: re.Match) -> str:
+    def kv_sub(m: re.Match[str]) -> str:
         nonlocal count
         value = m.group("value")
         if NOT_LITERAL.match(value) or value == MARK:
-            return m.group(0)
+            return str(m.group(0))
         count += 1
         return f"{m.group('key')}{m.group('sep')}{m.group('q')}{MARK}{m.group('q')}"
 
     text = KEY_VALUE.sub(kv_sub, text)
 
-    def url_sub(m: re.Match) -> str:
+    def url_sub(m: re.Match[str]) -> str:
         nonlocal count
         if NOT_LITERAL.match(m.group("value")):
-            return m.group(0)
+            return str(m.group(0))
         count += 1
         return f"{m.group('pre')}{MARK}{m.group('post')}"
 
