@@ -6,6 +6,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-10
+
+### Added
+
+- The shared embedding cache `data/embed-cache.db`. Each index file attaches it. Its key is the model, the
+  dimension, the document template and the text hash, so index files with the same embedding settings share the
+  entries. `ragnarok index --rebuild` deletes only the index file and keeps the cache.
+- A model profile for each shortlisted embedding model: the query prefix, the document template (with the title and
+  the heading path), the native dimension and the token limit. The config keys `query_prefix` and `doc_template`
+  override the profile.
+- Variants and corpora: the tables `[variants.<name>]` (they override `model`, `dimension`, `query_prefix`,
+  `doc_template`, `min_words`, `max_words`, `chunk_prefix` and `note_rank`) and `[corpora.<name>]` (`root` and
+  `vaults`). Each pair has its own index file `data/variants/<variant>/<corpus>/index.db`. The MCP server always
+  uses `data/index.db`.
+- `chunk_prefix` (`none`, `description`) and `note_rank` (`maxp`, `topk_sum`, `note_vector`). The defaults are
+  `none` and `maxp`, which is the search of 2.0.0.
+- The bench commands: `ragnarok bench index` builds the index of a variant on a corpus, `ragnarok bench run` runs a
+  question set of format v2 through the search tool, `ragnarok bench compare` gives recall@5 and MRR, the paired
+  difference with a cluster bootstrap interval and the Holm correction, a verdict line for each variant, and the
+  p95 latency. `ragnarok bench convert` converts a draft set to format v2. A set whose expected note is not in the
+  index stops the run and lists each such path.
+
+### Changed
+
+- The index has schema version 3. The first start of 2.1.0 copies the embedding cache of the index file to the
+  shared cache with no new embedding. The old cache table stays in the index file until the next
+  `ragnarok index --rebuild`.
+- `embed.py` sends `truncate: false`, and `dimensions` when the dimension is below the native one. The splitter
+  cuts a chunk to the token limit of the profile. When Ollama refuses a text for its context length, the text is
+  embedded in two halves and the vector is their mean. No text is cut silently.
+- The config key `doc_prefix` is now `doc_template`. A `config.toml` with `doc_prefix` gives a warning and still
+  works.
+
+### Upgrade
+
+- A 2.0.0 MCP server that still runs during the first 2.1.0 start keeps working, because the old cache table stays.
+  A new start of 2.0.0 on a 2.1.0 index is refused.
+
 ## [2.0.0] - 2026-11-09
 
 ### Removed
