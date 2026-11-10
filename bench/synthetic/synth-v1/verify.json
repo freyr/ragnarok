@@ -1,0 +1,275 @@
+{
+ "seed2001": {
+  "checks": {
+   "deep-fact-position": 0,
+   "distractor-holds-gold": 0,
+   "expected-missing": 0,
+   "fact-in-note": 0,
+   "forbidden-word": 0,
+   "gold-elsewhere": 0,
+   "gold-in-note": 0,
+   "graph-hash": 0,
+   "halves": 0,
+   "long-note-length": 0,
+   "note-missing": 0,
+   "property-in-note": 0,
+   "question-missing": 0,
+   "strata": 0,
+   "subject-check": 0,
+   "unique-properties": 0,
+   "value-elsewhere": 0
+  },
+  "failures": [],
+  "graph_hash": "98cfe0d52cce286062f19dafb395620e68954675bcb9a2991cc561adf292436e",
+  "notes": {
+   "kept": 921,
+   "planned": 921,
+   "removed": 0
+  },
+  "passed": true,
+  "questions": {
+   "kept": 480,
+   "planned": 480,
+   "removed": 0
+  },
+  "removed": {
+   "notes": [],
+   "questions": []
+  },
+  "seed": 2001,
+  "strata": {
+   "continuation": {
+    "dev": 24,
+    "kept": 48,
+    "planned": 48,
+    "target": 48,
+    "test": 24
+   },
+   "deep-section": {
+    "dev": 48,
+    "kept": 96,
+    "planned": 96,
+    "target": 96,
+    "test": 48
+   },
+   "direct": {
+    "dev": 48,
+    "kept": 96,
+    "planned": 96,
+    "target": 96,
+    "test": 48
+   },
+   "distractor": {
+    "dev": 36,
+    "kept": 72,
+    "planned": 72,
+    "target": 72,
+    "test": 36
+   },
+   "lexical-gap": {
+    "dev": 48,
+    "kept": 96,
+    "planned": 96,
+    "target": 96,
+    "test": 48
+   },
+   "multi-hop": {
+    "dev": 12,
+    "kept": 24,
+    "planned": 24,
+    "target": 24,
+    "test": 12
+   },
+   "outdated": {
+    "dev": 24,
+    "kept": 48,
+    "planned": 48,
+    "target": 48,
+    "test": 24
+   }
+  },
+  "vault": "seed2001"
+ },
+ "seed2002": {
+  "checks": {
+   "deep-fact-position": 0,
+   "distractor-holds-gold": 0,
+   "expected-missing": 0,
+   "fact-in-note": 0,
+   "forbidden-word": 0,
+   "gold-elsewhere": 0,
+   "gold-in-note": 0,
+   "graph-hash": 0,
+   "halves": 0,
+   "long-note-length": 0,
+   "note-missing": 0,
+   "property-in-note": 0,
+   "question-missing": 0,
+   "strata": 0,
+   "subject-check": 0,
+   "unique-properties": 0,
+   "value-elsewhere": 0
+  },
+  "failures": [],
+  "graph_hash": "05b8d4132e2b59ff57e9717ed7b0e17dc24fb2417e3604996880bfdb5296ef7c",
+  "notes": {
+   "kept": 907,
+   "planned": 907,
+   "removed": 0
+  },
+  "passed": true,
+  "questions": {
+   "kept": 480,
+   "planned": 480,
+   "removed": 0
+  },
+  "removed": {
+   "notes": [],
+   "questions": []
+  },
+  "seed": 2002,
+  "strata": {
+   "continuation": {
+    "dev": 24,
+    "kept": 48,
+    "planned": 48,
+    "target": 48,
+    "test": 24
+   },
+   "deep-section": {
+    "dev": 48,
+    "kept": 96,
+    "planned": 96,
+    "target": 96,
+    "test": 48
+   },
+   "direct": {
+    "dev": 48,
+    "kept": 96,
+    "planned": 96,
+    "target": 96,
+    "test": 48
+   },
+   "distractor": {
+    "dev": 36,
+    "kept": 72,
+    "planned": 72,
+    "target": 72,
+    "test": 36
+   },
+   "lexical-gap": {
+    "dev": 48,
+    "kept": 96,
+    "planned": 96,
+    "target": 96,
+    "test": 48
+   },
+   "multi-hop": {
+    "dev": 12,
+    "kept": 24,
+    "planned": 24,
+    "target": 24,
+    "test": 12
+   },
+   "outdated": {
+    "dev": 24,
+    "kept": 48,
+    "planned": 48,
+    "target": 48,
+    "test": 24
+   }
+  },
+  "vault": "seed2002"
+ },
+ "seed2003": {
+  "checks": {
+   "deep-fact-position": 0,
+   "distractor-holds-gold": 0,
+   "expected-missing": 0,
+   "fact-in-note": 0,
+   "forbidden-word": 0,
+   "gold-elsewhere": 0,
+   "gold-in-note": 0,
+   "graph-hash": 0,
+   "halves": 0,
+   "long-note-length": 0,
+   "note-missing": 0,
+   "property-in-note": 0,
+   "question-missing": 0,
+   "strata": 0,
+   "subject-check": 0,
+   "unique-properties": 0,
+   "value-elsewhere": 0
+  },
+  "failures": [],
+  "graph_hash": "5b781781fa9004559588f6dadbbc055bf223d312d795ce09de2453c14c4c2b8c",
+  "notes": {
+   "kept": 938,
+   "planned": 938,
+   "removed": 0
+  },
+  "passed": true,
+  "questions": {
+   "kept": 480,
+   "planned": 480,
+   "removed": 0
+  },
+  "removed": {
+   "notes": [],
+   "questions": []
+  },
+  "seed": 2003,
+  "strata": {
+   "continuation": {
+    "dev": 24,
+    "kept": 48,
+    "planned": 48,
+    "target": 48,
+    "test": 24
+   },
+   "deep-section": {
+    "dev": 48,
+    "kept": 96,
+    "planned": 96,
+    "target": 96,
+    "test": 48
+   },
+   "direct": {
+    "dev": 48,
+    "kept": 96,
+    "planned": 96,
+    "target": 96,
+    "test": 48
+   },
+   "distractor": {
+    "dev": 36,
+    "kept": 72,
+    "planned": 72,
+    "target": 72,
+    "test": 36
+   },
+   "lexical-gap": {
+    "dev": 48,
+    "kept": 96,
+    "planned": 96,
+    "target": 96,
+    "test": 48
+   },
+   "multi-hop": {
+    "dev": 12,
+    "kept": 24,
+    "planned": 24,
+    "target": 24,
+    "test": 12
+   },
+   "outdated": {
+    "dev": 24,
+    "kept": 48,
+    "planned": 48,
+    "target": 48,
+    "test": 24
+   }
+  },
+  "vault": "seed2003"
+ }
+}
