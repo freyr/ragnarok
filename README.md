@@ -237,7 +237,7 @@ A set is one JSON file:
 - `hash` is the SHA-256 of the `questions` list as JSON with sorted keys and no spaces. The bench refuses a set whose hash does not agree.
 - `expected` holds one or more note paths. A continuation question lists the `SUMMARY.md` of its project.
 - `cluster` is the path of the main gold note. The bootstrap draws clusters, not questions.
-- recall@5 is 1 when all expected notes are in the first 5 notes, else 0. MRR uses the rank of the first expected note; no expected note in the first 20 gives 0.
+- recall@5 is 1 when min(5, the number of expected notes) of the expected notes are in the first 5 notes, else 0. MRR uses the rank of the first expected note; no expected note in the first 20 gives 0.
 
 The verdict of `bench compare`:
 

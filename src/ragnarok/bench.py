@@ -252,9 +252,10 @@ def run_set(vcfg: Config, conn: sqlite3.Connection, embedder, bench_set: dict, v
 
 
 def measures(ranks: list[int | None]) -> tuple[int, float]:
-    """recall@5 (1 when all expected notes are in the first 5) and the reciprocal rank of the first expected note."""
+    """recall@5 (1 when min(5, the number of expected notes) of them are in the first 5) and the reciprocal rank of
+    the first expected note."""
     found = [r for r in ranks if r is not None]
-    recall = int(len(found) == len(ranks) and max(found) <= RECALL_AT)
+    recall = int(sum(r <= RECALL_AT for r in found) >= min(RECALL_AT, len(ranks)))
     return recall, 1.0 / min(found) if found else 0.0
 
 

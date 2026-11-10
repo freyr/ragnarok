@@ -28,12 +28,17 @@ from ragnarok.config import Config
         ([5], 1, 1 / 5),
         ([7], 0, 1 / 7),
         ([None], 0, 0.0),
-        # multi-gold: recall@5 needs all expected notes in the first 5, MRR takes the first expected note
+        # multi-gold: recall@5 needs all expected notes (up to 5) in the first 5, MRR takes the first expected note
         ([2, 6], 0, 1 / 2),
         ([4, 1], 1, 1.0),
         ([None, 9], 0, 1 / 9),
         ([None, None], 0, 0.0),
         ([5, 3], 1, 1 / 3),
+        # more than 5 expected notes: recall@5 needs 5 of them in the first 5
+        ([1, 2, 3, 4, 5, 9, None], 1, 1.0),
+        ([2, 1, 5, 3, 4, None], 1, 1.0),
+        ([1, 2, 3, 4, 6, 7], 0, 1.0),
+        ([1, 2, 3, 4, None, None], 0, 1.0),
     ],
 )
 def test_measures_of_a_single_gold_and_a_multi_gold_question(ranks, recall, rr):
