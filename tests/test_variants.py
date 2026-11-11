@@ -402,8 +402,10 @@ def test_an_orphan_note_vector_row_is_removed_by_the_next_update(tmp_path):
     conn.execute("DELETE FROM notes WHERE id = ?", (nid,))
     (cfg.root / "V/Q.md").unlink()
     conn.commit()
+    assert conn.execute("SELECT count(*) FROM notes_vec_rowids").fetchone()[0] == 3
     update(cfg, conn, emb)
     assert sorted(note_vectors(cfg)) == ["V/P.md", "V/R.md"]
+    assert conn.execute("SELECT count(*) FROM notes_vec_rowids").fetchone()[0] == 2
 
 
 def test_no_drift_means_no_write_in_the_sync(tmp_path):

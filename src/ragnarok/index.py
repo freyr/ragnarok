@@ -263,7 +263,7 @@ def _same(cfg: Config, conn: sqlite3.Connection, note_id: int, m: NoteMeta, chun
 def _note_vector_drift(conn: sqlite3.Connection) -> bool:
     """True when the ids in notes_vec differ from the ids of the notes that have chunks (a missing or an orphan row)."""
     have = {r[0] for r in conn.execute("SELECT rowid FROM notes_vec_rowids")}
-    want = {r[0] for r in conn.execute("SELECT DISTINCT note_id FROM chunks")}
+    want = {r[0] for r in conn.execute("SELECT DISTINCT c.note_id FROM chunks c JOIN notes n ON n.id = c.note_id")}
     return have != want
 
 
@@ -309,7 +309,7 @@ def sync_note_rank(cfg: Config, conn: sqlite3.Connection) -> None:
                 vectors: list[array[float]] = []
 
                 def flush() -> None:
-                    if current is not None:
+                    if current in notes:  # a chunk whose note is gone gets no row, as in the drift check
                         mean = [sum(column) / len(vectors) for column in zip(*vectors, strict=True)]
                         conn.execute(
                             "INSERT INTO notes_vec (note_id, embedding, vault, sensitivity, status)"
