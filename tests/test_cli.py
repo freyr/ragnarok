@@ -8,6 +8,7 @@ REQUIRED = {
     "backfill": ["propose", "Studio"],
     "survey": ["Studio"],
     "bench": ["index", "--variant", "baseline", "--corpus", "real"],
+    "synth": ["verify", "work"],
 }
 
 

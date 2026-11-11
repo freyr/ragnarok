@@ -1,0 +1,58 @@
+{
+ "name": "synth-v1",
+ "kind": "synthetic",
+ "generator_version": 1,
+ "frozen": "2026-11-10",
+ "models": [
+  "claude-sonnet-5-5"
+ ],
+ "llm_dates": [
+  "2026-11-10T12:15:53Z",
+  "2026-11-10T23:20:37Z"
+ ],
+ "vaults": [
+  {
+   "vault": "seed2001",
+   "seed": 2001,
+   "graph_hash": "98cfe0d52cce286062f19dafb395620e68954675bcb9a2991cc561adf292436e",
+   "notes": 921,
+   "questions": 480
+  },
+  {
+   "vault": "seed2002",
+   "seed": 2002,
+   "graph_hash": "05b8d4132e2b59ff57e9717ed7b0e17dc24fb2417e3604996880bfdb5296ef7c",
+   "notes": 907,
+   "questions": 480
+  },
+  {
+   "vault": "seed2003",
+   "seed": 2003,
+   "graph_hash": "5b781781fa9004559588f6dadbbc055bf223d312d795ce09de2453c14c4c2b8c",
+   "notes": 938,
+   "questions": 480
+  }
+ ],
+ "set_hash": "1d56c84fd41880ff047698dc5d5ae0a32d2ce867f926cd330b9529b8d84bcb09",
+ "prompts": {
+  "note.md": "5876c34da68aa1c2f90dd6e55c0117f3b60debc7932415da161b4144b834cce4",
+  "question.md": "1b0e895a0da415e3bf6cb11f0966eea483c096336ed6b948b38c820710e7dd50",
+  "strata.toml": "78ecbd1d6788b164f30e5da9013a7713170be7904789e956f5d2c487c351b5a1",
+  "subject-check.md": "61e7008dfe5d2a13cde2d560fd2257d449c2adc3dfec9fe2937f0202d0d2b8dd"
+ },
+ "files": {
+  "graph-seed2001.json": "7fb3911930d0ea1e18ee8630fa0ff1b296d1f18b1c16dec22aa5f67a4146869f",
+  "graph-seed2002.json": "f7da4817245b2ffc2e3f0f1a880f1a9601238b782c9801bf7e9b59569b2e674b",
+  "graph-seed2003.json": "065d12c2033aae8b92e834265e691f720cddb25edbdfaf880ddc6ffeaa62d242",
+  "prompts/note.md": "5876c34da68aa1c2f90dd6e55c0117f3b60debc7932415da161b4144b834cce4",
+  "prompts/question.md": "1b0e895a0da415e3bf6cb11f0966eea483c096336ed6b948b38c820710e7dd50",
+  "prompts/strata.toml": "78ecbd1d6788b164f30e5da9013a7713170be7904789e956f5d2c487c351b5a1",
+  "prompts/subject-check.md": "61e7008dfe5d2a13cde2d560fd2257d449c2adc3dfec9fe2937f0202d0d2b8dd",
+  "questions.json": "5372126f2a171f33209a30b6eb8a8a1636def498903203bfce9a51d2dd055645",
+  "vault.tar.gz": "0ac24c239e2f50aca2f637239b69b733d1fdbc898963ef7c8faaf7f7b738674a",
+  "verify.json": "33bd2d527e0732b7b71a3eccfbc6bc8adc48d0fde8389d884806c561ee15fbbe",
+  "world-seed2001.json": "644c383d2b2caaa67b129ee92636f08213ab0882464e85cde1c0f7ea30846f6b",
+  "world-seed2002.json": "8a27b28e012c40677ae5c7a97e4ed0b2110475f25807307d43e56af09b4eefd6",
+  "world-seed2003.json": "ebef4d0dda21c8764beb6083174240795bf21398239088b5f1869442998cee41"
+ }
+}

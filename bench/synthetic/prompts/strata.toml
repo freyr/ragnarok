@@ -1,0 +1,22 @@
+# The instruction of each stratum for the question writer (question.md, $instruction).
+
+[direct]
+instruction = "Ask directly and plainly, as a person who wants the value."
+
+[lexical-gap]
+instruction = "Paraphrase: say what the value is for or what it describes, with words that differ from the name of the value."
+
+[deep-section]
+instruction = "Ask directly and plainly, as a person who wants the value."
+
+[distractor]
+instruction = "Use each of the given properties, because similar subjects exist."
+
+[outdated]
+instruction = "Ask for the current value; the value changed in the past."
+
+[continuation]
+instruction = "Write a short, vague first message that continues earlier work on the project, as if the person returns after some weeks. Ask where the work stopped or what comes next."
+
+[multi-hop]
+instruction = "Ask about the device through the place: describe the place by its properties and ask for the value of the device there."

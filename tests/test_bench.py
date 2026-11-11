@@ -28,12 +28,17 @@ from ragnarok.config import Config
         ([5], 1, 1 / 5),
         ([7], 0, 1 / 7),
         ([None], 0, 0.0),
-        # multi-gold: recall@5 needs all expected notes in the first 5, MRR takes the first expected note
+        # multi-gold: recall@5 needs all expected notes (up to 5) in the first 5, MRR takes the first expected note
         ([2, 6], 0, 1 / 2),
         ([4, 1], 1, 1.0),
         ([None, 9], 0, 1 / 9),
         ([None, None], 0, 0.0),
         ([5, 3], 1, 1 / 3),
+        # more than 5 expected notes: recall@5 needs 5 of them in the first 5
+        ([1, 2, 3, 4, 5, 9, None], 1, 1.0),
+        ([2, 1, 5, 3, 4, None], 1, 1.0),
+        ([1, 2, 3, 4, 6, 7], 0, 1.0),
+        ([1, 2, 3, 4, None, None], 0, 1.0),
     ],
 )
 def test_measures_of_a_single_gold_and_a_multi_gold_question(ranks, recall, rr):
@@ -190,6 +195,172 @@ def test_convert_the_draft_format(tmp_path):
         },
     ]
     assert [qid for qid, _ in skipped] == ["q03", "h01"]
+
+
+def gold_vault(tmp_path):
+    for rel in ("V/Heating/boiler.md", "V/Heating/pump.md", "V/Astro/mount.md", "V/Astro/New/eyepiece.md"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("# Note\n")
+    return Config(root=tmp_path, vaults=["V"], index_path=tmp_path / "i.db")
+
+
+def test_convert_the_health_format(tmp_path):
+    cfg = gold_vault(tmp_path)
+    old = [
+        {
+            "id": "st-01",
+            "class": "now",
+            "when": "now",
+            "question": "boiler now?",
+            "question_alt": "the boiler today?",
+            "answer": "a",
+            "gold": [
+                {"path": "V/Heating/boiler.md", "grade": 1},
+                {"path": "V/Heating/old.md", "grade": 0},
+                {"path": "V/Heating/pump.md"},
+            ],
+            "wrong": ["V/Heating/old.md"],
+        },
+        {"id": "fu-01", "class": "future", "when": "future", "question": "plan?", "gold": [], "wrong": []},
+    ]
+    questions, skipped = convert(old, cfg)
+    assert questions == [
+        {
+            "id": "st-01",
+            "question": "boiler now?",
+            "question_alt": "the boiler today?",
+            "answer": "a",
+            "wrong": ["V/Heating/old.md"],
+            "expected": ["V/Heating/boiler.md", "V/Heating/pump.md"],
+            "stratum": "now",
+            "area": "heating",
+            "cluster": "V/Heating/boiler.md",
+        }
+    ]
+    assert skipped == [("fu-01", "no expected path")]
+
+
+def test_convert_the_kb_format_drops_the_kb_keys(tmp_path):
+    cfg = gold_vault(tmp_path)
+    old = [
+        {
+            "id": "st-02",
+            "class": "single-truth",
+            "question": "mount load?",
+            "question_alt": "how much does the mount carry?",
+            "gold": [{"path": "V/Astro/mount.md", "grade": 1}],
+            "gold_eligibility": {"type": ["entity"]},
+            "gold_route": "kb",
+            "gold_entities": ["mount"],
+            "gold_claims": ["20 kg"],
+            "distractors": [],
+            "origin": "builder",
+        }
+    ]
+    questions, skipped = convert(old, cfg)
+    assert questions == [
+        {
+            "id": "st-02",
+            "question": "mount load?",
+            "question_alt": "how much does the mount carry?",
+            "gold_entities": ["mount"],
+            "distractors": [],
+            "origin": "builder",
+            "expected": ["V/Astro/mount.md"],
+            "stratum": "single-truth",
+            "area": "astro",
+            "cluster": "V/Astro/mount.md",
+        }
+    ]
+    assert skipped == []
+
+
+def test_convert_applies_the_path_map_and_takes_the_cluster_from_an_existing_note(tmp_path):
+    cfg = gold_vault(tmp_path)
+    path_map = {"V/Astro/Old/eyepiece.md": "V/Astro/New/eyepiece.md", "V/Astro/mount-copy.md": "V/Astro/mount.md"}
+    old = [
+        {"id": "q01", "question": "eyepiece?", "type": "lookup", "expected": ["V/Astro/Old/eyepiece.md"]},
+        {
+            "id": "hi-01",
+            "class": "history",
+            "question": "old mount?",
+            "gold": [
+                {"path": "V/Astro/gone.md", "grade": 1},
+                {"path": "V/Astro/mount-copy.md", "grade": 1},
+                {"path": "V/Astro/mount.md", "grade": 1},
+            ],
+        },
+    ]
+    questions, _ = convert(old, cfg, path_map=path_map)
+    assert [(q["expected"], q["cluster"], q["area"]) for q in questions] == [
+        (["V/Astro/New/eyepiece.md"], "V/Astro/New/eyepiece.md", "astro"),
+        # the gone path stays, so the gold check reports it; the map makes a duplicate, which is removed
+        (["V/Astro/gone.md", "V/Astro/mount.md"], "V/Astro/mount.md", "astro"),
+    ]
+
+
+def test_convert_keeps_one_question_of_each_text_and_makes_the_ids_unique(tmp_path):
+    cfg = gold_vault(tmp_path)
+    gold = [{"path": "V/Astro/mount.md", "grade": 1}]
+    old = [
+        {"id": "st-20", "class": "now", "question": "Mount load?", "gold": gold},
+        {"id": "st-20", "class": "history", "question": "mount load before?", "gold": gold},
+        {"id": "q05", "question": " mount LOAD? ", "type": "fact", "expected": ["V/Astro/mount.md"]},
+    ]
+    questions, skipped = convert(old, cfg)
+    assert [q["id"] for q in questions] == ["st-20", "history-st-20"]
+    assert skipped == [("q05", "the same text as st-20")]
+
+
+def test_convert_keeps_the_selected_areas(tmp_path):
+    cfg = gold_vault(tmp_path)
+    old = [
+        {"id": "q01", "question": "boiler?", "type": "lookup", "expected": ["V/Heating/boiler.md"]},
+        {"id": "q02", "question": "mount?", "type": "fact", "expected": ["V/Astro/mount.md"]},
+        {"id": "q03", "question": "gone?", "type": "fact", "expected": ["V/Gone/x.md"]},
+    ]
+    questions, skipped = convert(old, cfg, areas=["astro"])
+    assert [q["id"] for q in questions] == ["q02"]
+    assert skipped == [("q01", "the area heating is not selected"), ("q03", "the area unknown is not selected")]
+
+
+def test_bench_convert_reads_several_files_with_a_path_map(tmp_path, capsys, monkeypatch):
+    gold_vault(tmp_path / "vaults")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.toml").write_text(
+        f'root = "{tmp_path / "vaults"}"\nvaults = ["V"]\n\n[corpora.real]\nroot = "{tmp_path / "vaults"}"\n'
+        'vaults = ["V"]\n'
+    )
+    monkeypatch.setenv("RAGNAROK_HOME", str(home))
+    health = tmp_path / "health.json"
+    health.write_text(
+        json.dumps([{"id": "st-01", "class": "now", "question": "mount?", "gold": [{"path": "V/Astro/mount.md"}]}])
+    )
+    draft = tmp_path / "draft.json"
+    draft.write_text(
+        json.dumps(
+            [
+                {"id": "q01", "question": "eyepiece?", "type": "lookup", "expected": ["V/Astro/Old/eyepiece.md"]},
+                {"id": "q02", "question": "boiler?", "type": "lookup", "expected": ["V/Heating/boiler.md"]},
+            ]
+        )
+    )
+    path_map = tmp_path / "map.tsv"
+    path_map.write_text("old\tnew\tsource\nV/Astro/Old/eyepiece.md\tV/Astro/New/eyepiece.md\tcleanup move\n")
+    out = tmp_path / "real.json"
+    code, printed = run(
+        capsys, "bench", "convert", health, draft, "--out", out, "--name", "real-v1", "--kind", "real",
+        "--corpus", "real", "--path-map", path_map, "--area", "astro",
+    )  # fmt: skip
+    assert code == 0, printed.err
+    assert "not converted q02: the area heating is not selected" in printed.err
+    data = load_set(out)
+    assert (data["name"], data["kind"], data["corpus"]) == ("real-v1", "real", "real")
+    assert [(q["id"], q["expected"]) for q in data["questions"]] == [
+        ("st-01", ["V/Astro/mount.md"]),
+        ("q01", ["V/Astro/New/eyepiece.md"]),
+    ]
 
 
 # --- bench run and bench compare on a fixture vault ----------------------------------------------------------------

@@ -217,7 +217,7 @@ Without frontmatter, the path rules give the metadata. The default rules work fo
 | `ragnarok bench index --variant <name> --corpus <name>` | Builds or updates the index of a variant on a corpus in `data/variants/<variant>/<corpus>/index.db`. It shares the embedding cache, so a variant with the default embedding settings embeds nothing again. It refuses an index that was built with other settings of the variant. |
 | `ragnarok bench run --set <file> --variant <name>` | Runs each question of a set through the MCP search (`limit` 20, with the change scan, no filter) on the index of the variant on the corpus of the set. It writes the rank of each expected note, the scan time and the search time of each question, the keyword overlap of the question and the gold note, and the BM25 rank of the gold note to `data/bench/<set hash>-<variant hash>.json`. It first brings the index of the variant current with no limit. It refuses a set when an expected path is not in the index or is private, lists each such path with its reason and runs no question. |
 | `ragnarok bench compare --set <file> <A> <B> [<B2>...] [--margin 0.05]` | Gives recall@5 and MRR of each variant, by stratum and by area, and the difference B − A with a 95% interval from a cluster bootstrap (10,000 samples, fixed seed). With more than one B, the interval level follows the Holm correction. It lists the share of discordant questions and each changed question with its diagnostics. It ends with one verdict line for each B (see the set format). |
-| `ragnarok bench convert <draft set> --out <file> --name <name> --kind synthetic\|real --corpus <name>` | Converts a draft set of `ragnarok eval` to the set format. The stratum is the old `type`, the cluster is the first expected path, and the area comes from the metadata rules of the first expected note (`unknown` when the note is absent). It does not convert a question with no expected path or with a folder as an expected path, and it lists each one. |
+| `ragnarok bench convert <old set>... --out <file> --name <name> --kind synthetic\|real --corpus <name> [--path-map <tsv>] [--area <area>]...` | Converts one or more old sets to the set format. It reads the draft format of `ragnarok eval` (`expected`, `type`) and the gold format of the health and KB sets (`gold` as a list of path and grade, `class`); each question shows its format. In the gold format, a gold path of grade 1 or more (no grade counts as 1) becomes an expected path, `class` becomes the stratum, the KB keys `gold_eligibility`, `gold_route`, `gold_claims` and `when` are dropped, and the other keys stay. In the draft format, the stratum is the old `type`. `--path-map` gives a TSV file with the columns `old` and `new`: each old expected path is replaced by the new one. The cluster is the first expected path that is a note, else the first expected path, and the area comes from the metadata rules of the cluster note (`unknown` when the note is absent). It does not convert a question with no expected path, with a folder as an expected path, of an area that `--area` does not select, or with the text of an earlier question, and it lists each one. An id that an earlier question has gets the prefix `<stratum>-`. |
 
 ### The set format
 
@@ -237,12 +237,34 @@ A set is one JSON file:
 - `hash` is the SHA-256 of the `questions` list as JSON with sorted keys and no spaces. The bench refuses a set whose hash does not agree.
 - `expected` holds one or more note paths. A continuation question lists the `SUMMARY.md` of its project.
 - `cluster` is the path of the main gold note. The bootstrap draws clusters, not questions.
-- recall@5 is 1 when all expected notes are in the first 5 notes, else 0. MRR uses the rank of the first expected note; no expected note in the first 20 gives 0.
+- recall@5 is 1 when min(5, the number of expected notes) of the expected notes are in the first 5 notes, else 0. MRR uses the rank of the first expected note; no expected note in the first 20 gives 0.
 
 The verdict of `bench compare`:
 
 - A synthetic set: B wins when the interval of B − A at its Holm level is above 0 for recall@5 or for MRR, the point difference of the other measure is not below 0, and the p95 search time (scan included) is below 500 ms. The report also gives the sign of the difference in each vault.
 - A real set does not decide a win. It checks that B does not get worse: the lower end of the interval of B − A must be above −margin for recall@5 and for MRR. It also checks the p95 time.
+
+### The synthetic set
+
+`ragnarok synth` makes a synthetic vault with known answers in a work folder, one folder for each seed. Run the
+commands in a checkout: they read the prompts in `bench/synthetic/prompts/` and call `claude -p` (no tools, no
+settings, no `CLAUDE.md`).
+
+| Command | What it does |
+|---|---|
+| `ragnarok synth graph --seed <n> --questions <n> --out <folder>` | Builds the seeded fact graph of the vault `seed<n>`: areas, projects with `DRIVERS.md` and `SUMMARY.md`, devices, places, people and their facts, each with a unique value in exactly one current note, plus distractor notes, archived notes with an older value and long notes (3,000-10,000 words) with the fact in the last section. It plans one question for each gold note, in the strata `direct` 20%, `lexical-gap` 20%, `deep-section` 20%, `distractor` 15%, `outdated` 10%, `continuation` 10% and `multi-hop` 5%, each with a `dev` or `test` half and a property set that matches exactly one subject. It writes `world.json` and `graph.json` and prints the graph hash; the same seed gives the same hash. |
+| `ragnarok synth render <folder> [--model sonnet] [--jobs 4]` | Writes each note with `claude -p` from its facts, the properties of its subject and the style targets (aggregate numbers only) into `<folder>/vault/seed<n>/`. A note that fails its string checks is written again at most twice and then removed with its question. A second run continues. |
+| `ragnarok synth questions <folder> [--model sonnet] [--jobs 4]` | Writes each question from its fact tuple only, with the forbidden words and the instruction of its stratum, and gives it to a blind `claude -p` call with the subjects of the same class and area and the subjects of the same class in other areas that differ from its property set in at most one property. It refuses to run until each note is rendered. A question with a forbidden word or that the blind call does not resolve to its subject is written again at most twice and then removed. |
+| `ragnarok synth verify <folder>` | Checks the graph hash, the property sets, the strata and the halves, that each value is in its note and in no other note (a distractor holds no gold value), that each note states the property values that its questions use (a sibling note its own values), the length of each long note and the position of its fact, the forbidden words and the answer of the blind check. It lists each failed check, writes `verify.json` and fails when a kept note or question fails. |
+| `ragnarok synth freeze <folder>... --name <set> [--out bench/synthetic/<set>]` | Freezes verified work folders into one set folder: `vault.tar.gz`, `questions.json` (a set of kind `synthetic` whose corpus is the set name, with the `half` of each question), the `world-` and `graph-` file of each seed, the prompts, `verify.json` and `manifest.json` with the SHA-256 of each file, the model IDs and the SHA-256 of each prompt. Each note and question records the SHA-256 of the prompts that wrote it, and freeze refuses when they differ from the prompts that it copies. It refuses when a check fails or when the notes, the questions or the graphs hold a term of the deny list. |
+
+The deny list holds the terms that must never be in a synthetic set: vault names, real names, real paths. It stays
+outside the repo, in `RAGNAROK_SYNTH_DENY`, else `data/synth-deny.txt` of the home folder: one term on each line, `#`
+starts a comment, no case, whole words for a term of letters. The tests marked `local` call `claude -p` and read the
+deny list; CI skips them, `uv run pytest -m local` runs them.
+
+To measure a frozen set, unpack `vault.tar.gz` into a folder and add `[corpora.<set>]` with that folder as `root` and
+the vaults `seed<n>` of the manifest.
 
 Run each command with `uvx ragnarok-mcp`, for example `uvx ragnarok-mcp search "boiler"`, or with `uv run` in the
 checkout.

@@ -1,6 +1,6 @@
 [project]
 name = "ragnarok-mcp"
-version = "2.1.1"
+version = "2.2.0"
 description = "Local RAG search over Obsidian vaults: SQLite (sqlite-vec + FTS5), Ollama embeddings, FastMCP server"
 requires-python = ">=3.12"
 license = "MIT"
@@ -59,6 +59,9 @@ select = ["E", "F", "I", "B", "UP", "S", "SIM", "RUF", "PT", "C4"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# a local test calls claude -p or reads the local deny list; CI skips it, `uv run pytest -m local` runs it
+markers = ["local: needs claude -p or the deny list of this computer"]
+addopts = "-m 'not local'"
 
 [tool.mypy]
 files = ["src"]

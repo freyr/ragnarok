@@ -1,0 +1,35 @@
+{
+ "generator_version": 1,
+ "seed": 2003,
+ "vault": "seed2003",
+ "questions": 480,
+ "strata": {
+  "direct": 0.2,
+  "lexical-gap": 0.2,
+  "deep-section": 0.2,
+  "distractor": 0.15,
+  "outdated": 0.1,
+  "continuation": 0.1,
+  "multi-hop": 0.05
+ },
+ "style": {
+  "words_median": 882,
+  "words_p90": 3526,
+  "headings_median": 5,
+  "table_share": 0.16,
+  "code_share": 0.12,
+  "list_share": 0.44,
+  "link_mean": 2.08,
+  "no_link_share": 0.53,
+  "description_share": 0.71,
+  "project_notes_median": 4
+ },
+ "note_words": [
+  120,
+  2500
+ ],
+ "long_words": [
+  3000,
+  10000
+ ]
+}
