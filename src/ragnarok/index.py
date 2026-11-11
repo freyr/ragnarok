@@ -260,6 +260,52 @@ def _same(cfg: Config, conn: sqlite3.Connection, note_id: int, m: NoteMeta, chun
     return jira == m.jira and stored == [input_hash(cfg, c.heading, c.model_text) for c in chunks]
 
 
+def _sync_note_rank(cfg: Config, conn: sqlite3.Connection) -> None:
+    """Record the note rank in meta. When it changes to note_vector, build notes_vec again from chunks_vec.
+
+    The table holds the mean chunk vector of each note that has chunks, the same vector that the write path of
+    _write computes. It reads the stored chunk vectors: no embedding call, no use of the cache. The delete, the
+    inserts and the meta write are one transaction. A note rank other than note_vector only stores the new value."""
+
+    def stored() -> str | None:
+        row = conn.execute("SELECT value FROM meta WHERE key = 'note_rank'").fetchone()
+        return row[0] if row else None
+
+    if stored() == cfg.note_rank:
+        return
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # another process can have done this while this one waited for the lock
+        if stored() != cfg.note_rank:
+            if cfg.note_rank == "note_vector":
+                conn.execute("DELETE FROM notes_vec")
+                rows = conn.execute(
+                    "SELECT c.note_id, v.embedding FROM chunks c JOIN chunks_vec v ON v.chunk_id = c.id"
+                    " ORDER BY c.note_id, c.ord"
+                ).fetchall()
+                by_note: dict[int, list[array[float]]] = {}
+                for note_id, blob in rows:
+                    by_note.setdefault(note_id, []).append(array("f", blob))
+                notes = {
+                    nid: (vault, sensitivity, status)
+                    for nid, vault, sensitivity, status in conn.execute(
+                        "SELECT id, vault, sensitivity, status FROM notes"
+                    )
+                }
+                for note_id, vectors in by_note.items():
+                    mean = [sum(column) / len(vectors) for column in zip(*vectors, strict=True)]
+                    conn.execute(
+                        "INSERT INTO notes_vec (note_id, embedding, vault, sensitivity, status) VALUES (?, ?, ?, ?, ?)",
+                        (note_id, sqlite_vec.serialize_float32(mean), *notes[note_id]),
+                    )
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('note_rank', ?)", (cfg.note_rank,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def update(
     cfg: Config,
     conn: sqlite3.Connection,
@@ -279,6 +325,7 @@ def update(
     """
     start = time.monotonic()
     result = UpdateResult()
+    _sync_note_rank(cfg, conn)
     rules = rules_hash(cfg)
     rederive = conn.execute("SELECT value FROM meta WHERE key = 'rules_hash'").fetchone() != (rules,)
     if rederive:
@@ -534,12 +581,16 @@ def status(cfg: Config, conn: sqlite3.Connection) -> dict[str, Any]:
     def one(q: str) -> Any:
         return conn.execute(q).fetchone()[0]
 
+    note_rank = (conn.execute("SELECT value FROM meta WHERE key = 'note_rank'").fetchone() or [None])[0]
+    has_table = conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'notes_vec_rowids'").fetchone()
     return {
         "index": str(cfg.index_path),
         "size_mb": round(cfg.index_path.stat().st_size / 1e6, 1) if cfg.index_path.exists() else 0,
         "model": one("SELECT value FROM meta WHERE key = 'model'"),
         "dimension": int(one("SELECT value FROM meta WHERE key = 'dimension'")),
         "rules_hash": (conn.execute("SELECT value FROM meta WHERE key = 'rules_hash'").fetchone() or [None])[0],
+        "note_rank": note_rank,
+        "note_vectors": one("SELECT count(*) FROM notes_vec_rowids") if has_table else 0,
         "notes": one("SELECT count(*) FROM notes"),
         "private_notes": one("SELECT count(*) FROM notes WHERE sensitivity = 'private'"),
         "archived_notes": one("SELECT count(*) FROM notes WHERE status = 'archived'"),

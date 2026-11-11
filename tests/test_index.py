@@ -187,6 +187,7 @@ def run_index(cfg, monkeypatch, capsys, *args) -> dict:
 
 @pytest.mark.parametrize("release", ["1.1.0", "1.2.0", "2.0.0"])
 def test_connect_migrates_an_older_index_and_its_cache_with_no_embedding(cfg, release, monkeypatch, capsys):
+    cfg.note_rank = "maxp"  # the schema of an index with no notes_vec table
     _, built = old_index(cfg, release)
     conn = connect(cfg)
     assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == ("3",)
