@@ -330,15 +330,15 @@ def compare(bench_set: dict[str, Any], results: list[tuple[str, dict[str, Any]]]
             for value, at in sorted(by_value.items()):
                 lines.append(f"  {kind} {value} n={len(at)}: recall@5 {rec[at].mean():.3f} MRR {mrr[at].mean():.3f}")
     a_name, a_rec, a_mrr, a_rows = table[0]
-    # for each measure, the interval of each B at its Holm level among the B variants
-    stats: dict[str, list[tuple[Any, ...]]] = {}
-    for m, col, base in (("recall@5", 1, a_rec), ("MRR", 2, a_mrr)):
-        diffs = [list(row[col] - base) for row in table[1:]]
-        levels, rejected = holm([cluster_bootstrap(d, clusters)[3] for d in diffs])
-        stats[m] = [
-            (*cluster_bootstrap(d, clusters, alpha=level), level, rej)
-            for d, level, rej in zip(diffs, levels, rejected, strict=True)
-        ]
+    # the interval of each pair of a B variant and a measure at its Holm level among all those pairs, so that two
+    # measures do not give a B two chances to win
+    pairs = [
+        (m, list(row[col] - base)) for m, col, base in (("recall@5", 1, a_rec), ("MRR", 2, a_mrr)) for row in table[1:]
+    ]
+    levels, rejected = holm([cluster_bootstrap(d, clusters)[3] for _, d in pairs])
+    stats: dict[str, list[tuple[Any, ...]]] = {"recall@5": [], "MRR": []}
+    for (m, d), level, rej in zip(pairs, levels, rejected, strict=True):
+        stats[m].append((*cluster_bootstrap(d, clusters, alpha=level), level, rej))
     verdicts = []
     for k, (b_name, b_rec, b_mrr, b_rows) in enumerate(table[1:]):
         lines.append(f"## {b_name} - {a_name}")

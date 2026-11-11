@@ -2,12 +2,14 @@
 
 import json
 import os
+import re
 
 import numpy as np
 import pytest
 
 from ragnarok.bench import (
     cluster_bootstrap,
+    compare,
     convert,
     holm,
     load_set,
@@ -532,3 +534,26 @@ def test_bench_compare_needs_a_run_of_each_variant(home, capsys):
     code, out = run(capsys, "bench", "compare", "--set", path, "baseline", "other")
     assert code == 1
     assert "bench run" in out.err
+
+
+def test_compare_corrects_over_each_pair_of_a_variant_and_a_measure():
+    # 2 B variants x 2 measures = 4 hypotheses: the Holm levels are alpha/4, alpha/3, alpha/2 and alpha
+    qs = [
+        {"id": f"q{i}", "cluster": f"seed1/n{i}.md", "stratum": "direct", "area": "a", "expected": [f"seed1/n{i}.md"]}
+        for i in range(40)
+    ]
+    bench_set = {"name": "s", "kind": "synthetic", "corpus": "c", "questions": qs}
+
+    def result(ranks):
+        rows = [
+            {"id": q["id"], "ranks": [r], "total_ms": 10.0, "overlap": 1.0, "bm25_rank": None}
+            for q, r in zip(qs, ranks, strict=True)
+        ]
+        return {"questions": rows}
+
+    a = result([8] * 40)
+    b1 = result([1] * 30 + [8] * 10)  # a large gain
+    b2 = result([2] * 12 + [8] * 28)  # a smaller gain
+    lines = compare(bench_set, [("a", a), ("b1", b1), ("b2", b2)])
+    levels = sorted(float(re.search(r"at level ([0-9.]+)", x).group(1)) for x in lines if "at level" in x)
+    assert levels == pytest.approx([0.05 / 4, 0.05 / 3, 0.05 / 2, 0.05], abs=5e-4)
