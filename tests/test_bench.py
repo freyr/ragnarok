@@ -549,7 +549,7 @@ def test_compare_corrects_over_each_pair_of_a_variant_and_a_measure():
             {"id": q["id"], "ranks": [r], "total_ms": 10.0, "overlap": 1.0, "bm25_rank": None}
             for q, r in zip(qs, ranks, strict=True)
         ]
-        return {"questions": rows}
+        return {"questions": rows, "scope": "vault"}
 
     a = result([8] * 40)
     b1 = result([1] * 30 + [8] * 10)  # a large gain
@@ -557,3 +557,63 @@ def test_compare_corrects_over_each_pair_of_a_variant_and_a_measure():
     lines = compare(bench_set, [("a", a), ("b1", b1), ("b2", b2)])
     levels = sorted(float(re.search(r"at level ([0-9.]+)", x).group(1)) for x in lines if "at level" in x)
     assert levels == pytest.approx([0.05 / 4, 0.05 / 3, 0.05 / 2, 0.05], abs=5e-4)
+
+
+def _result(qs, ranks, **extra):
+    rows = [
+        {"id": q["id"], "ranks": [r], "total_ms": 10.0, "overlap": 1.0, "bm25_rank": None}
+        for q, r in zip(qs, ranks, strict=True)
+    ]
+    return {"questions": rows, **extra}
+
+
+def _questions(n=40):
+    return [
+        {"id": f"q{i}", "cluster": f"seed1/n{i}.md", "stratum": "direct", "area": "a", "expected": [f"seed1/n{i}.md"]}
+        for i in range(n)
+    ]
+
+
+def test_bench_run_searches_a_synthetic_question_in_its_own_vault(home, capsys):
+    # twin notes in the vault W match the words of the question better than the gold note in the vault V
+    for name in ("boiler-twin", "boiler-twin-2"):
+        (home / f"vaults/W/Astro/{name}.md").write_text("# Boiler twin\nboiler flow temperature setting\n")
+    questions = fixture_questions()[:1]
+    questions[0]["question"] = "boiler flow temperature setting"
+    assert run(capsys, "bench", "index", "--variant", "baseline", "--corpus", "real")[0] == 0
+    ranks = {}
+    for kind in ("real", "synthetic"):
+        path = home / f"{kind}.json"
+        write_set(path, kind, kind, "real", questions)
+        code, out = run(capsys, "bench", "run", "--set", path, "--variant", "baseline")
+        assert code == 0, out.err
+        result = json.loads(next((home / "data/bench").glob(f"{load_set(path)['hash'][:12]}-*.json")).read_text())
+        row = result["questions"][0]
+        ranks[kind] = (result["scope"], row["bm25_rank"], row["ranks"])
+    # the fixture embedder gives each note the same vector, so the BM25 rank shows the scope
+    assert ranks["real"][:2] == ("corpus", 3)
+    assert ranks["synthetic"] == ("vault", 1, [1])
+
+
+def test_compare_refuses_results_with_different_search_scopes():
+    qs = _questions()
+    bench_set = {"name": "s", "kind": "synthetic", "corpus": "c", "questions": qs}
+    a = _result(qs, [8] * 40, scope="vault")
+    old = _result(qs, [1] * 40)  # a result of an earlier release has no scope: the whole corpus
+    with pytest.raises(ValueError, match="scope"):
+        compare(bench_set, [("a", a), ("old", old)])
+
+
+def test_the_real_set_check_uses_a_one_sided_95_percent_interval_with_no_holm_level():
+    qs = _questions()
+    bench_set = {"name": "r", "kind": "real", "corpus": "c", "questions": qs}
+    a = _result(qs, [1] * 40)
+    b1 = _result(qs, [1] * 30 + [8] * 10)
+    b2 = _result(qs, [1] * 39 + [2])
+    lines = compare(bench_set, [("a", a), ("b1", b1), ("b2", b2)])
+    levels = [float(re.search(r"at level ([0-9.]+)", x).group(1)) for x in lines if "at level" in x]
+    assert levels == [0.1] * 4
+    verdicts = [x for x in lines if x.startswith("verdict")]
+    assert "no regression: fail" in verdicts[0]
+    assert "one-sided 95%" in verdicts[0]
+    assert "no regression: pass" in verdicts[1]
