@@ -161,7 +161,7 @@ def _note_vectors(
     """Ranked (note_id, None) by the mean chunk vector of each note, with the note filters."""
     where, params = _vec_where(vector, k, vault, include_archived, include_private)
     ranked = [nid for (nid,) in conn.execute(f"SELECT note_id FROM notes_vec WHERE {where} ORDER BY distance", params)]
-    if not ranked or not note_where:
+    if not ranked:
         return [(nid, None) for nid in ranked]
     marks = ",".join("?" * len(ranked))
     sql = f"SELECT n.id FROM notes n WHERE n.id IN ({marks}){note_where}"

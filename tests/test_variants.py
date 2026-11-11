@@ -6,10 +6,11 @@ import math
 import sqlite3
 
 import pytest
+import sqlite_vec
 
 from ragnarok.cli import build_parser
 from ragnarok.config import Config, load_config
-from ragnarok.index import connect, update
+from ragnarok.index import _delete_note, connect, sync_note_rank, update
 from ragnarok.search import search
 
 # --- configuration -------------------------------------------------------------------------------------------------
@@ -361,6 +362,103 @@ def test_status_reports_the_note_rank_and_the_note_vector_rows(tmp_path):
     update(maxp, conn, TableEmbedder(VECTOR_TABLE))
     st = status(maxp, conn)
     assert (st["note_rank"], st["note_vectors"]) == ("maxp", 0)
+
+
+# --- drift of notes_vec and orphan rows ------------------------------------------------------------
+
+
+def built_note_vector(tmp_path):
+    cfg = make(tmp_path, VECTOR, note_rank="note_vector", allow_private=True)
+    emb = TableEmbedder(VECTOR_TABLE)
+    conn = connect(cfg)
+    update(cfg, conn, emb)
+    return cfg, conn, emb
+
+
+def test_an_orphan_note_vector_row_never_reaches_a_search_with_no_other_filter(tmp_path):
+    cfg, conn, emb = built_note_vector(tmp_path)
+    nid = conn.execute("SELECT id FROM notes WHERE path = 'V/Q.md'").fetchone()[0]
+    _delete_note(conn, nid)
+    conn.execute("DELETE FROM notes WHERE id = ?", (nid,))
+    (cfg.root / "V/Q.md").unlink()  # an older server: it does not delete the row of notes_vec
+    conn.commit()
+    hits = search(cfg, conn, emb, "q", mode="dense", include_private=True)
+    assert sorted(h.path for h in hits) == ["V/P.md", "V/R.md"]
+
+
+def test_a_missing_note_vector_row_is_repaired_by_the_next_update(tmp_path):
+    cfg, conn, emb = built_note_vector(tmp_path)
+    want = note_vectors(cfg)
+    conn.execute("DELETE FROM notes_vec WHERE note_id = (SELECT id FROM notes WHERE path = 'V/R.md')")
+    conn.commit()
+    update(cfg, conn, emb)
+    assert note_vectors(cfg) == want
+
+
+def test_an_orphan_note_vector_row_is_removed_by_the_next_update(tmp_path):
+    cfg, conn, emb = built_note_vector(tmp_path)
+    nid = conn.execute("SELECT id FROM notes WHERE path = 'V/Q.md'").fetchone()[0]
+    _delete_note(conn, nid)
+    conn.execute("DELETE FROM notes WHERE id = ?", (nid,))
+    (cfg.root / "V/Q.md").unlink()
+    conn.commit()
+    update(cfg, conn, emb)
+    assert sorted(note_vectors(cfg)) == ["V/P.md", "V/R.md"]
+
+
+def test_no_drift_means_no_write_in_the_sync(tmp_path):
+    cfg, conn, _emb = built_note_vector(tmp_path)
+    before = conn.total_changes
+    sync_note_rank(cfg, conn)
+    assert conn.total_changes == before
+    assert not conn.in_transaction
+
+
+def test_status_says_whether_the_note_vectors_are_current(tmp_path):
+    from ragnarok.index import status
+
+    cfg, conn, _emb = built_note_vector(tmp_path)
+    assert status(cfg, conn)["note_vectors_current"] is True
+    conn.execute("DELETE FROM notes_vec WHERE note_id = (SELECT id FROM notes WHERE path = 'V/R.md')")
+    conn.commit()
+    assert status(cfg, conn)["note_vectors_current"] is False
+    maxp = dataclasses.replace(cfg, note_rank="maxp")
+    assert status(maxp, conn)["note_vectors_current"] is True
+
+
+def test_the_default_rank_builds_the_note_vectors_of_an_index_with_no_note_rank_key(tmp_path):
+    cfg, conn, emb = built_note_vector(tmp_path / "a")
+    want = note_vectors(cfg)
+    conn.execute("DELETE FROM meta WHERE key = 'note_rank'")
+    conn.execute("DELETE FROM notes_vec")
+    conn.commit()
+    conn.close()
+    conn = connect(cfg)  # the default rank, as after the upgrade of an index made by an older release
+    update(cfg, conn, emb)
+    assert note_vectors(cfg) == want
+    assert stored_rank(cfg) == "note_vector"
+
+
+def test_an_error_in_the_rebuild_leaves_the_table_and_the_meta_value(tmp_path, monkeypatch):
+    maxp = make(tmp_path, VECTOR, note_rank="maxp")
+    emb = TableEmbedder(VECTOR_TABLE)
+    conn = connect(maxp)
+    update(maxp, conn, emb)
+    conn.close()
+    nv = dataclasses.replace(maxp, note_rank="note_vector")
+    conn = connect(nv)
+    conn.execute(
+        "INSERT INTO notes_vec (note_id, embedding, vault, sensitivity, status) VALUES (99, ?, 'V', 'x', 'y')",
+        (sqlite_vec.serialize_float32([0.0, 0.0, 1.0]),),
+    )
+    conn.commit()
+    monkeypatch.setattr(sqlite_vec, "serialize_float32", lambda v: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(RuntimeError):
+        sync_note_rank(nv, conn)
+    monkeypatch.undo()
+    assert not conn.in_transaction
+    assert stored_rank(nv) == "maxp"
+    assert [r[0] for r in conn.execute("SELECT note_id FROM notes_vec")] == [99]
 
 
 # --- chunk_prefix --------------------------------------------------------------------------------------------------
