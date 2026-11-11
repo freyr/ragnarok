@@ -30,10 +30,11 @@ max_words = 300
 # "description" puts the description of a note before the text of each of its body chunks, in the text to the model
 # only. "none" (the default) sends the chunk text alone. A change needs `ragnarok index --rebuild`.
 chunk_prefix = "none"
-# How the chunks of a note give its rank: "maxp" (the default, its best chunk), "topk_sum" (the sum of the scores of
-# its best 3 chunks in each list) or "note_vector" (also the mean chunk vector of the note as a third list; it needs
-# a new index).
-note_rank = "maxp"
+# How the chunks of a note give its rank: "note_vector" (the default: the best chunk, and also the mean chunk vector
+# of the note as a third list), "maxp" (its best chunk) or "topk_sum" (the sum of the scores of its best 3 chunks in
+# each list). The first index update after a change to "note_vector" builds the note vectors from the stored chunk
+# vectors, with no new embedding.
+note_rank = "note_vector"
 
 # A folder that holds one of these files is a project folder.
 project_markers = ["DRIVERS.md", "SUMMARY.md"]

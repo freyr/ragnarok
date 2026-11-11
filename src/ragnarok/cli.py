@@ -371,7 +371,7 @@ def cmd_search(cfg: Config, args: argparse.Namespace) -> int:
     import time
 
     from .embed import EmbedError, OllamaEmbedder
-    from .index import IndexMismatch, connect
+    from .index import IndexMismatch, connect, sync_note_rank
     from .search import PrivateNotAllowed, search
 
     if not cfg.index_path.exists():
@@ -379,6 +379,7 @@ def cmd_search(cfg: Config, args: argparse.Namespace) -> int:
         return 1
     try:
         conn = connect(cfg)
+        sync_note_rank(cfg, conn)  # no update here: the third list must not read an empty or stale table
         start = time.monotonic()
         hits = search(
             cfg,
@@ -412,7 +413,7 @@ def cmd_search(cfg: Config, args: argparse.Namespace) -> int:
 def cmd_eval(cfg: Config, args: argparse.Namespace) -> int:
     from .embed import OllamaEmbedder
     from .evaluate import mechanical, pool
-    from .index import connect
+    from .index import connect, sync_note_rank
 
     cfg = _with_min_words(cfg, args.min_words)
     if not cfg.index_path.exists():
@@ -429,6 +430,7 @@ def cmd_eval(cfg: Config, args: argparse.Namespace) -> int:
         print("\n".join(evaluate(cfg, args.sets, names, out, args.calls, args.model, args.limit)))
         return 0
     conn = connect(cfg)
+    sync_note_rank(cfg, conn)
     if args.kind == "mechanical":
         print(f"# mechanical evaluation, min_words {cfg.min_words}, index {cfg.index_path.name}")
         print("\n".join(mechanical(cfg, conn, OllamaEmbedder(cfg), args.sets, args.out)))

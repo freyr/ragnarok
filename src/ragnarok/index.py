@@ -260,6 +260,80 @@ def _same(cfg: Config, conn: sqlite3.Connection, note_id: int, m: NoteMeta, chun
     return jira == m.jira and stored == [input_hash(cfg, c.heading, c.model_text) for c in chunks]
 
 
+def _note_vector_drift(conn: sqlite3.Connection) -> bool:
+    """True when the ids in notes_vec differ from the ids of the notes that have chunks (a missing or an orphan row)."""
+    have = {r[0] for r in conn.execute("SELECT rowid FROM notes_vec_rowids")}
+    want = {r[0] for r in conn.execute("SELECT DISTINCT c.note_id FROM chunks c JOIN notes n ON n.id = c.note_id")}
+    return have != want
+
+
+def sync_note_rank(cfg: Config, conn: sqlite3.Connection) -> None:
+    """Record the note rank in meta, and keep notes_vec complete when the rank is note_vector.
+
+    The table is built again from chunks_vec when the stored rank is not note_vector, or when the note ids of the table
+    differ from the ids of the notes that have chunks. The second case repairs the drift that a server of an older
+    release causes: it adds and removes notes and does not keep the table. The check reads two sets of ids and takes
+    a few milliseconds. It does not catch a row with a stale vector for an id that a new note reuses after an older
+    server deleted the note of that id. A change to a note rank other than note_vector only stores the new value.
+
+    The table holds the mean chunk vector of each note that has chunks, the same vector that the write path of
+    _write computes. It reads the stored chunk vectors: no embedding call, no use of the cache. The delete, the
+    inserts and the meta write are one transaction."""
+    is_vector = cfg.note_rank == "note_vector"
+
+    def stored() -> str | None:
+        row = conn.execute("SELECT value FROM meta WHERE key = 'note_rank'").fetchone()
+        return row[0] if row else None
+
+    def stale() -> bool:
+        if stored() != cfg.note_rank:
+            return True
+        return is_vector and _note_vector_drift(conn)
+
+    if not stale():
+        return
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # another process can have done this while this one waited for the lock
+        if stale():
+            if is_vector:
+                conn.execute("DELETE FROM notes_vec")
+                notes = {
+                    nid: (vault, sensitivity, status)
+                    for nid, vault, sensitivity, status in conn.execute(
+                        "SELECT id, vault, sensitivity, status FROM notes"
+                    )
+                }
+                current: int | None = None
+                vectors: list[array[float]] = []
+
+                def flush() -> None:
+                    if current in notes:  # a chunk whose note is gone gets no row, as in the drift check
+                        mean = [sum(column) / len(vectors) for column in zip(*vectors, strict=True)]
+                        conn.execute(
+                            "INSERT INTO notes_vec (note_id, embedding, vault, sensitivity, status)"
+                            " VALUES (?, ?, ?, ?, ?)",
+                            (current, sqlite_vec.serialize_float32(mean), *notes[current]),
+                        )
+
+                rows = conn.execute(
+                    "SELECT c.note_id, v.embedding FROM chunks c JOIN chunks_vec v ON v.chunk_id = c.id"
+                    " ORDER BY c.note_id, c.ord"
+                ).fetchall()
+                for note_id, blob in rows:
+                    if note_id != current:
+                        flush()
+                        current, vectors = note_id, []
+                    vectors.append(array("f", blob))
+                flush()
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('note_rank', ?)", (cfg.note_rank,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def update(
     cfg: Config,
     conn: sqlite3.Connection,
@@ -279,6 +353,7 @@ def update(
     """
     start = time.monotonic()
     result = UpdateResult()
+    sync_note_rank(cfg, conn)
     rules = rules_hash(cfg)
     rederive = conn.execute("SELECT value FROM meta WHERE key = 'rules_hash'").fetchone() != (rules,)
     if rederive:
@@ -534,12 +609,17 @@ def status(cfg: Config, conn: sqlite3.Connection) -> dict[str, Any]:
     def one(q: str) -> Any:
         return conn.execute(q).fetchone()[0]
 
+    note_rank = (conn.execute("SELECT value FROM meta WHERE key = 'note_rank'").fetchone() or [None])[0]
+    has_table = conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'notes_vec_rowids'").fetchone()
     return {
         "index": str(cfg.index_path),
         "size_mb": round(cfg.index_path.stat().st_size / 1e6, 1) if cfg.index_path.exists() else 0,
         "model": one("SELECT value FROM meta WHERE key = 'model'"),
         "dimension": int(one("SELECT value FROM meta WHERE key = 'dimension'")),
         "rules_hash": (conn.execute("SELECT value FROM meta WHERE key = 'rules_hash'").fetchone() or [None])[0],
+        "note_rank": note_rank,
+        "note_vectors": one("SELECT count(*) FROM notes_vec_rowids") if has_table else 0,
+        "note_vectors_current": cfg.note_rank != "note_vector" or (bool(has_table) and not _note_vector_drift(conn)),
         "notes": one("SELECT count(*) FROM notes"),
         "private_notes": one("SELECT count(*) FROM notes WHERE sensitivity = 'private'"),
         "archived_notes": one("SELECT count(*) FROM notes WHERE status = 'archived'"),

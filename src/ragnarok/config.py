@@ -119,7 +119,7 @@ class Config:
     chunk_prefix: str = "none"
     # how the chunks of a note give its rank: "maxp" (the best chunk), "topk_sum" (the sum of the scores of the best
     # TOPK chunks in each list) or "note_vector" (also the mean chunk vector of each note as a third list)
-    note_rank: str = "maxp"
+    note_rank: str = "note_vector"
     # bench: settings that override the keys in VARIANT_KEYS, and sets of vaults to index with a variant
     variants: dict[str, dict[str, Any]] = field(default_factory=dict)
     corpora: dict[str, Corpus] = field(default_factory=dict)

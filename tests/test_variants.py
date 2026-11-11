@@ -6,10 +6,11 @@ import math
 import sqlite3
 
 import pytest
+import sqlite_vec
 
 from ragnarok.cli import build_parser
 from ragnarok.config import Config, load_config
-from ragnarok.index import connect, update
+from ragnarok.index import _delete_note, connect, sync_note_rank, update
 from ragnarok.search import search
 
 # --- configuration -------------------------------------------------------------------------------------------------
@@ -46,7 +47,7 @@ def test_a_variant_on_a_corpus_has_its_own_index_and_shares_the_data_folder(tmp_
     path = tmp_path / "config.toml"
     path.write_text(CONFIG)
     cfg = load_config(path)
-    assert (cfg.chunk_prefix, cfg.note_rank) == ("none", "maxp")
+    assert (cfg.chunk_prefix, cfg.note_rank) == ("none", "note_vector")
     assert cfg.index_path == tmp_path / "data/index.db"
 
     v = cfg.variant("small", "synthetic")
@@ -162,7 +163,7 @@ def ranked(cfg, emb, query="q", **kw):
 
 
 def test_maxp_ranks_a_note_by_its_best_chunk(tmp_path):
-    cfg = make(tmp_path, DENSE)
+    cfg = make(tmp_path, DENSE, note_rank="maxp")
     assert ranked(cfg, TableEmbedder(DENSE_TABLE), mode="dense") == ["V/B.md", "V/A.md", "V/C.md"]
 
 
@@ -189,7 +190,7 @@ FTS = {
 
 
 def test_maxp_ranks_the_note_with_the_best_bm25_chunk_first(tmp_path):
-    cfg = make(tmp_path, FTS)
+    cfg = make(tmp_path, FTS, note_rank="maxp")
     assert ranked(cfg, TableEmbedder({}), "zebra", mode="fts") == ["V/B.md", "V/A.md"]
 
 
@@ -207,7 +208,7 @@ VECTOR_TABLE = {"wp": (1.0, 0.0, 0.0), "wq": S09, "wr": S08, "zero": (0.0, 0.0, 
 
 
 def test_maxp_without_a_note_vector(tmp_path):
-    cfg = make(tmp_path, VECTOR)
+    cfg = make(tmp_path, VECTOR, note_rank="maxp")
     assert ranked(cfg, TableEmbedder(VECTOR_TABLE), mode="dense") == ["V/P.md", "V/Q.md", "V/R.md"]
 
 
@@ -234,10 +235,232 @@ def test_note_vector_rows_follow_the_notes(tmp_path):
 
 
 def test_an_index_with_maxp_has_no_note_vector_table(tmp_path):
-    cfg = make(tmp_path, VECTOR)
+    cfg = make(tmp_path, VECTOR, note_rank="maxp")
     connect(cfg).close()
     names = {n for (n,) in sqlite3.connect(cfg.index_path).execute("SELECT name FROM sqlite_master")}
     assert not any(n.startswith("notes_vec") for n in names)
+
+
+# --- the default and the switch to note_vector ------------------------------------------------------------------------
+
+
+def note_vectors(cfg):
+    conn = sqlite3.connect(cfg.index_path)
+    conn.enable_load_extension(True)
+    import sqlite_vec
+
+    sqlite_vec.load(conn)
+    rows = conn.execute(
+        "SELECT n.path, v.embedding, v.vault, v.sensitivity, v.status FROM notes_vec v JOIN notes n ON n.id = v.note_id"
+    ).fetchall()
+    conn.close()
+    return {path: rest for path, *rest in rows}
+
+
+def test_note_vector_is_the_default_note_rank():
+    assert Config().note_rank == "note_vector"
+
+
+def test_an_index_of_maxp_gets_the_note_vectors_of_a_fresh_build_with_no_changed_note(tmp_path):
+    maxp = make(tmp_path / "a", VECTOR, note_rank="maxp")
+    emb = TableEmbedder(VECTOR_TABLE)
+    conn = connect(maxp)
+    update(maxp, conn, emb)
+    conn.close()
+    assert not note_vectors_table(maxp)
+    nv = dataclasses.replace(maxp, note_rank="note_vector")
+    conn = connect(nv)
+    result = update(nv, conn, emb)
+    assert result.added == result.changed == 0
+    conn.close()
+    fresh = make(tmp_path / "b", VECTOR, note_rank="note_vector")
+    fconn = connect(fresh)
+    update(fresh, fconn, TableEmbedder(VECTOR_TABLE))
+    fconn.close()
+    got, want = note_vectors(nv), note_vectors(fresh)
+    assert len(got) == 3
+    assert got == want
+    assert stored_rank(nv) == "note_vector"
+
+
+def note_vectors_table(cfg):
+    names = {n for (n,) in sqlite3.connect(cfg.index_path).execute("SELECT name FROM sqlite_master")}
+    return any(n.startswith("notes_vec") for n in names)
+
+
+def stored_rank(cfg):
+    row = sqlite3.connect(cfg.index_path).execute("SELECT value FROM meta WHERE key = 'note_rank'").fetchone()
+    return row and row[0]
+
+
+def test_note_vector_then_maxp_then_note_vector_leaves_no_stale_or_orphan_row(tmp_path):
+    nv = make(tmp_path / "a", VECTOR, note_rank="note_vector")
+    maxp = dataclasses.replace(nv, note_rank="maxp")
+    emb = TableEmbedder(VECTOR_TABLE)
+    conn = connect(nv)
+    update(nv, conn, emb)
+    conn.close()
+    conn = connect(maxp)
+    (maxp.root / "V/R.md").write_text(sections("wr1", "zero"))
+    (maxp.root / "V/P.md").unlink()
+    update(maxp, conn, emb)
+    assert stored_rank(maxp) == "maxp"
+    conn.close()
+    conn = connect(nv)
+    update(nv, conn, emb)
+    conn.close()
+    got = note_vectors(nv)
+    assert sorted(got) == ["V/Q.md", "V/R.md"]
+    fresh = make(
+        tmp_path / "b", {"V/Q.md": VECTOR["V/Q.md"], "V/R.md": sections("wr1", "zero")}, note_rank="note_vector"
+    )
+    fconn = connect(fresh)
+    update(fresh, fconn, TableEmbedder(VECTOR_TABLE))
+    fconn.close()
+    assert got == note_vectors(fresh)
+    check = sqlite3.connect(nv.index_path)
+    assert check.execute("SELECT count(*) FROM notes_vec_rowids").fetchone() == (2,)
+
+
+def test_the_note_vectors_are_built_with_a_limit_and_with_no_embedding_call(tmp_path):
+    maxp = make(tmp_path, VECTOR, note_rank="maxp")
+    emb = TableEmbedder(VECTOR_TABLE)
+    conn = connect(maxp)
+    update(maxp, conn, emb)
+    conn.close()
+    nv = dataclasses.replace(maxp, note_rank="note_vector")
+    conn = connect(nv)
+    calls = len(emb.items)
+    update(nv, conn, emb, limit=1)
+    assert len(emb.items) == calls
+    assert len(note_vectors(nv)) == 3
+
+
+def test_a_change_to_another_rank_only_stores_it_and_leaves_the_table(tmp_path):
+    nv = make(tmp_path, VECTOR, note_rank="note_vector")
+    emb = TableEmbedder(VECTOR_TABLE)
+    conn = connect(nv)
+    update(nv, conn, emb)
+    conn.close()
+    topk = dataclasses.replace(nv, note_rank="topk_sum")
+    conn = connect(topk)
+    update(topk, conn, emb)
+    assert stored_rank(topk) == "topk_sum"
+    assert len(note_vectors(topk)) == 3
+
+
+def test_status_reports_the_note_rank_and_the_note_vector_rows(tmp_path):
+    from ragnarok.index import status
+
+    nv = make(tmp_path / "a", VECTOR, note_rank="note_vector")
+    conn = connect(nv)
+    update(nv, conn, TableEmbedder(VECTOR_TABLE))
+    st = status(nv, conn)
+    assert (st["note_rank"], st["note_vectors"]) == ("note_vector", 3)
+    maxp = make(tmp_path / "b", VECTOR, note_rank="maxp")
+    conn = connect(maxp)
+    update(maxp, conn, TableEmbedder(VECTOR_TABLE))
+    st = status(maxp, conn)
+    assert (st["note_rank"], st["note_vectors"]) == ("maxp", 0)
+
+
+# --- drift of notes_vec and orphan rows ------------------------------------------------------------
+
+
+def built_note_vector(tmp_path):
+    cfg = make(tmp_path, VECTOR, note_rank="note_vector", allow_private=True)
+    emb = TableEmbedder(VECTOR_TABLE)
+    conn = connect(cfg)
+    update(cfg, conn, emb)
+    return cfg, conn, emb
+
+
+def test_an_orphan_note_vector_row_never_reaches_a_search_with_no_other_filter(tmp_path):
+    cfg, conn, emb = built_note_vector(tmp_path)
+    nid = conn.execute("SELECT id FROM notes WHERE path = 'V/Q.md'").fetchone()[0]
+    _delete_note(conn, nid)
+    conn.execute("DELETE FROM notes WHERE id = ?", (nid,))
+    (cfg.root / "V/Q.md").unlink()  # an older server: it does not delete the row of notes_vec
+    conn.commit()
+    hits = search(cfg, conn, emb, "q", mode="dense", include_private=True)
+    assert sorted(h.path for h in hits) == ["V/P.md", "V/R.md"]
+
+
+def test_a_missing_note_vector_row_is_repaired_by_the_next_update(tmp_path):
+    cfg, conn, emb = built_note_vector(tmp_path)
+    want = note_vectors(cfg)
+    conn.execute("DELETE FROM notes_vec WHERE note_id = (SELECT id FROM notes WHERE path = 'V/R.md')")
+    conn.commit()
+    update(cfg, conn, emb)
+    assert note_vectors(cfg) == want
+
+
+def test_an_orphan_note_vector_row_is_removed_by_the_next_update(tmp_path):
+    cfg, conn, emb = built_note_vector(tmp_path)
+    nid = conn.execute("SELECT id FROM notes WHERE path = 'V/Q.md'").fetchone()[0]
+    _delete_note(conn, nid)
+    conn.execute("DELETE FROM notes WHERE id = ?", (nid,))
+    (cfg.root / "V/Q.md").unlink()
+    conn.commit()
+    assert conn.execute("SELECT count(*) FROM notes_vec_rowids").fetchone()[0] == 3
+    update(cfg, conn, emb)
+    assert sorted(note_vectors(cfg)) == ["V/P.md", "V/R.md"]
+    assert conn.execute("SELECT count(*) FROM notes_vec_rowids").fetchone()[0] == 2
+
+
+def test_no_drift_means_no_write_in_the_sync(tmp_path):
+    cfg, conn, _emb = built_note_vector(tmp_path)
+    before = conn.total_changes
+    sync_note_rank(cfg, conn)
+    assert conn.total_changes == before
+    assert not conn.in_transaction
+
+
+def test_status_says_whether_the_note_vectors_are_current(tmp_path):
+    from ragnarok.index import status
+
+    cfg, conn, _emb = built_note_vector(tmp_path)
+    assert status(cfg, conn)["note_vectors_current"] is True
+    conn.execute("DELETE FROM notes_vec WHERE note_id = (SELECT id FROM notes WHERE path = 'V/R.md')")
+    conn.commit()
+    assert status(cfg, conn)["note_vectors_current"] is False
+    maxp = dataclasses.replace(cfg, note_rank="maxp")
+    assert status(maxp, conn)["note_vectors_current"] is True
+
+
+def test_the_default_rank_builds_the_note_vectors_of_an_index_with_no_note_rank_key(tmp_path):
+    cfg, conn, emb = built_note_vector(tmp_path / "a")
+    want = note_vectors(cfg)
+    conn.execute("DELETE FROM meta WHERE key = 'note_rank'")
+    conn.execute("DELETE FROM notes_vec")
+    conn.commit()
+    conn.close()
+    conn = connect(cfg)  # the default rank, as after the upgrade of an index made by an older release
+    update(cfg, conn, emb)
+    assert note_vectors(cfg) == want
+    assert stored_rank(cfg) == "note_vector"
+
+
+def test_an_error_in_the_rebuild_leaves_the_table_and_the_meta_value(tmp_path, monkeypatch):
+    maxp = make(tmp_path, VECTOR, note_rank="maxp")
+    emb = TableEmbedder(VECTOR_TABLE)
+    conn = connect(maxp)
+    update(maxp, conn, emb)
+    conn.close()
+    nv = dataclasses.replace(maxp, note_rank="note_vector")
+    conn = connect(nv)
+    conn.execute(
+        "INSERT INTO notes_vec (note_id, embedding, vault, sensitivity, status) VALUES (99, ?, 'V', 'x', 'y')",
+        (sqlite_vec.serialize_float32([0.0, 0.0, 1.0]),),
+    )
+    conn.commit()
+    monkeypatch.setattr(sqlite_vec, "serialize_float32", lambda v: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(RuntimeError):
+        sync_note_rank(nv, conn)
+    monkeypatch.undo()
+    assert not conn.in_transaction
+    assert stored_rank(nv) == "maxp"
+    assert [r[0] for r in conn.execute("SELECT note_id FROM notes_vec")] == [99]
 
 
 # --- chunk_prefix --------------------------------------------------------------------------------------------------
