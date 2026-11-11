@@ -58,6 +58,7 @@ RECALL_AT = 5
 SAMPLES = 10_000
 SEED = 0
 ALPHA = 0.05
+REAL_LEVEL = 0.10  # two-sided; its lower end is the one-sided 95% limit
 MARGIN = 0.05
 P95_MS = 500
 
@@ -197,10 +198,15 @@ def overlap(cfg: Config, question: str, path: str) -> float:
     return round(sum(k in text for k in kws) / len(kws), 3)
 
 
-def bm25_rank(cfg: Config, conn: sqlite3.Connection, question: str, path: str) -> int | None:
+def bm25_rank(cfg: Config, conn: sqlite3.Connection, question: str, path: str, vault: str | None = None) -> int | None:
     """The rank of the note in the BM25 list of notes, None when it is not in the list."""
-    paths = [h.path for h in search(cfg, conn, None, question, limit=CANDIDATES, mode="fts")]
+    paths = [h.path for h in search(cfg, conn, None, question, vault=vault, limit=CANDIDATES, mode="fts")]
     return paths.index(path) + 1 if path in paths else None
+
+
+def result_scope(bench_set: dict[str, Any]) -> str:
+    """What one search of the set covers: the vault of the question for a synthetic set, else the whole corpus."""
+    return "vault" if bench_set["kind"] == "synthetic" else "corpus"
 
 
 def result_path(vcfg: Config, bench_set: dict[str, Any]) -> Path:
@@ -214,6 +220,9 @@ def run_set(
     """Each question through Tools.search with limit 20 and the change scan. Raise MissingGold before the first
     question when an expected path is not in the index.
 
+    A synthetic set searches only the vault of the question (the first part of its cluster): the generator proves
+    that the properties of a question match one subject in its own vault, not in the vaults of the other seeds.
+
     One update with no limit first makes the index current: the change scan of a tool call takes at most SCAN_LIMIT
     notes, so an index far behind would give false missing paths and would change between the timed questions."""
     update(vcfg, conn, embedder, limit=None)
@@ -221,10 +230,12 @@ def run_set(
     if missing := missing_gold(conn, bench_set["questions"]):
         raise MissingGold(missing)
     embedder.embed_query("warm up")  # the times are with the model warm
+    scope = result_scope(bench_set)
     rows = []
     for q in bench_set["questions"]:
+        vault = q["cluster"].split("/", 1)[0] if scope == "vault" else None
         start = time.perf_counter()
-        out = tools.search(q["question"], limit=LIMIT)
+        out = tools.search(q["question"], limit=LIMIT, vault=vault)
         total = (time.perf_counter() - start) * 1000
         scan = tools.last_scan["ms"]
         paths = [r["path"] for r in out["results"]]
@@ -237,7 +248,7 @@ def run_set(
                 "search_ms": round(max(total - scan, 0.0), 1),
                 "total_ms": round(total, 1),
                 "overlap": overlap(vcfg, q["question"], q["cluster"]),
-                "bm25_rank": bm25_rank(vcfg, conn, q["question"], q["cluster"]),
+                "bm25_rank": bm25_rank(vcfg, conn, q["question"], q["cluster"], vault),
             }
         )
     return {
@@ -248,6 +259,7 @@ def run_set(
         "variant": variant,
         "variant_hash": variant_hash(vcfg),
         "limit": LIMIT,
+        "scope": scope,
         "questions": rows,
     }
 
@@ -314,6 +326,13 @@ def compare(bench_set: dict[str, Any], results: list[tuple[str, dict[str, Any]]]
         groups["area"][q["area"]].append(i)
         vaults[q["cluster"].split("/", 1)[0]].append(i)
     synthetic = bench_set["kind"] == "synthetic"
+    # a result of a release before the scope has no field: it searched the whole corpus
+    scopes = {name: result.get("scope", "corpus") for name, result in results}
+    if set(scopes.values()) != {result_scope(bench_set)}:
+        raise ValueError(
+            f"the results do not all have the search scope {result_scope(bench_set)!r} of this set ({scopes}); "
+            "run `ragnarok bench run` again for each variant"
+        )
     lines = [
         f"# set {bench_set['name']} ({bench_set['kind']}, {len(qs)} questions, {len(set(clusters))} clusters), "
         f"corpus {bench_set['corpus']}"
@@ -335,7 +354,12 @@ def compare(bench_set: dict[str, Any], results: list[tuple[str, dict[str, Any]]]
     pairs = [
         (m, list(row[col] - base)) for m, col, base in (("recall@5", 1, a_rec), ("MRR", 2, a_mrr)) for row in table[1:]
     ]
-    levels, rejected = holm([cluster_bootstrap(d, clusters)[3] for _, d in pairs])
+    if synthetic:
+        levels, rejected = holm([cluster_bootstrap(d, clusters)[3] for _, d in pairs])
+    else:
+        # a real set stops a regression and does not decide a win: each B has its own check, so no correction over
+        # the B variants applies, and the lower end of the interval at REAL_LEVEL is a one-sided 95% limit
+        levels, rejected = [REAL_LEVEL] * len(pairs), [False] * len(pairs)
     stats: dict[str, list[tuple[Any, ...]]] = {"recall@5": [], "MRR": []}
     for (m, d), level, rej in zip(pairs, levels, rejected, strict=True):
         stats[m].append((*cluster_bootstrap(d, clusters, alpha=level), level, rej))
@@ -376,7 +400,7 @@ def compare(bench_set: dict[str, Any], results: list[tuple[str, dict[str, Any]]]
             ok = rec_s[1] > -margin and mrr_s[1] > -margin
             verdicts.append(
                 f"verdict {b_name}: no win (a real set does not decide a win); "
-                f"no regression: {'pass' if ok else 'fail'} (lower ends recall@5 {rec_s[1]:+.3f}, "
+                f"no regression: {'pass' if ok else 'fail'} (one-sided 95% lower ends recall@5 {rec_s[1]:+.3f}, "
                 f"MRR {mrr_s[1]:+.3f} against -{margin:.3f}); latency: {'pass' if p95 < P95_MS else 'fail'} ({latency})"
             )
     return lines + verdicts

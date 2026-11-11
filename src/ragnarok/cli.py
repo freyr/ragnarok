@@ -300,7 +300,11 @@ def _bench_compare(cfg: Config, args: argparse.Namespace) -> int:
             print(f"ragnarok bench compare: {path} is the result of another set or corpus", file=sys.stderr)
             return 1
         results.append((name, result))
-    print("\n".join(compare(bench_set, results, args.margin)))
+    try:
+        print("\n".join(compare(bench_set, results, args.margin)))
+    except ValueError as e:
+        print(f"ragnarok bench compare: {e}", file=sys.stderr)
+        return 1
     return 0
 
 
